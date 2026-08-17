@@ -176,11 +176,16 @@ export function defaultCategories(): Category[] {
   const remainingIcons = (Object.keys(BILL_ICONS) as BillIconKey[]).filter((icon) => !RESERVED_OR_FALLBACK_ICONS.has(icon))
 
   const seeded: Category[] = remainingIcons.map((icon, i) => ({
-    id: `category-seed-${icon}`,
+    id: seededCategoryIdForIcon(icon),
     name: nameForIconKey(icon),
     icon,
     iconColor: ICON_COLORS[(builtIns.length + i) % ICON_COLORS.length],
   }))
 
   return [...builtIns, ...seeded]
+}
+
+/** Deterministic id for one of the auto-seeded (non-built-in) categories, given its icon key — e.g. `seededCategoryIdForIcon('loan')` always resolves to the pre-seeded "Loan" category's id. Lets callers default a picker onto a specific seeded category without hardcoding the `category-seed-*` string in more than one place. */
+export function seededCategoryIdForIcon(icon: BillIconKey): string {
+  return `category-seed-${icon}`
 }

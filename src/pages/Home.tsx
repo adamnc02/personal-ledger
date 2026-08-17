@@ -511,14 +511,24 @@ function ProgressRingsSection({ data }: { data: AppDataV2 }) {
   const goals = (person?.savingsEntries ?? []).filter((e) => e.type === 'goal' && e.includeInSummary)
   if (loans.length === 0 && goals.length === 0) return null
 
+  // Aggregate across every loan's own summary, not an average of their
+  // individual percentages — same convention as the credit cards' combined
+  // ring (CreditCardsCombinedDetail), so a large loan properly outweighs a
+  // small one in the combined figure rather than each loan counting equally.
+  const loanSummaries = loans.map((loan) => summarizeLoan(loan))
+  const totalLoansPayable = loanSummaries.reduce((sum, s) => sum + s.totalPayable, 0)
+  const totalLoansRemaining = loanSummaries.reduce((sum, s) => sum + s.remainingBalance, 0)
+  const totalLoansPaid = totalLoansPayable - totalLoansRemaining
+  const totalLoansPercentRepaid = totalLoansPayable > 0 ? Math.min(100, (totalLoansPaid / totalLoansPayable) * 100) : 0
+
   return (
     <div className="mt-5 pt-5 border-t flex flex-col gap-5" style={{ borderColor: 'var(--color-track)' }}>
       {loans.length > 0 && (
         <div>
           <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-3">Loans</h3>
-          <div className="flex flex-wrap gap-4 justify-center">
-            {loans.map((loan) => {
-              const summary = summarizeLoan(loan)
+          <div className="flex flex-col items-center gap-5">
+            {loans.map((loan, i) => {
+              const summary = loanSummaries[i]
               const percentRepaid = summary.totalPayable > 0 ? Math.min(100, ((summary.totalPayable - summary.remainingBalance) / summary.totalPayable) * 100) : 0
               return (
                 <div key={loan.id} className="flex flex-col items-center gap-1">
@@ -527,6 +537,24 @@ function ProgressRingsSection({ data }: { data: AppDataV2 }) {
                 </div>
               )
             })}
+
+            {loans.length > 1 && (
+              <div
+                className="flex flex-col items-center gap-1 pt-5 mt-1 border-t w-full"
+                style={{ borderColor: 'var(--color-track)' }}
+              >
+                <ProgressRing
+                  percent={totalLoansPercentRepaid}
+                  value={`£${formatCurrency(totalLoansRemaining)}`}
+                  label="Total Loans"
+                  size={160}
+                  strokeWidth={14}
+                />
+                <p className="text-[11px] text-[var(--color-ink-faint)]">
+                  £{formatCurrency(totalLoansPaid)} paid, of £{formatCurrency(totalLoansPayable)}
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}

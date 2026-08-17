@@ -5,19 +5,40 @@ import { Plus, ChevronDown, ChevronUp, CreditCard as CreditCardIcon } from 'luci
 import { useLedgerData } from '../context/LedgerContext'
 import { summarizeLoan } from '../lib/ledgerLoans'
 import { computeMinimumPaymentAmount, pickCreditCardColor } from '../lib/creditCards'
-import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardLumpPayment, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment } from '../types/ledger'
+import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
 import { CategoryIcon } from '../components/CategoryIcon'
 import { CategoryPicker } from '../components/CategoryPicker'
-import { visibleCategoriesFor } from '../lib/categories'
+import { visibleCategoriesFor, seededCategoryIdForIcon } from '../lib/categories'
 import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { CollapsibleSection } from '../components/CollapsibleSection'
+import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
+import { peopleWithSalaryCount } from '../lib/household'
 
 import { todayIso } from '../lib/date'
 
+// The pre-seeded "Loan" category (see categories.ts) — LoanForm defaults
+// new loans onto this rather than falling through to whatever happens to
+// be first in the visible list (which, with no credit cards yet, used to
+// resolve to "Income" — clearly wrong for a loan).
+const DEFAULT_LOAN_CATEGORY_ID = seededCategoryIdForIcon('loan')
+
 type LoanPrefill = Partial<Omit<Loan, 'id' | 'overpayments'>>
+
+// Handed off from the What-if page's "Log as real payment" / "Make this a
+// real recurring overpayment" buttons (see Scenarios.tsx's makeImpactReal)
+// — rather than auto-saving there, the user is transported here with the
+// target row already open and the relevant fields pre-populated, and
+// saves it themselves.
+export type OverpaymentPrefill = {
+  targetKind: 'loan' | 'credit_card'
+  targetId: string
+  mode: 'payoff' | 'recurring' // 'recurring' only ever applies to loans — see below
+  amount: number
+  date?: string // 'payoff' only
+}
 
 function AddButton({ onClick }: { onClick: () => void }) {
   return (
@@ -34,6 +55,8 @@ export function Loans() {
     updateLoan,
     removeLoan,
     logLoanOverpayment,
+    updateLoanOverpayment,
+    removeLoanOverpayment,
     addCreditCard,
     updateCreditCard,
     removeCreditCard,
@@ -46,6 +69,7 @@ export function Loans() {
   const [addingCard, setAddingCard] = useState(false)
   const [expandedLoan, setExpandedLoan] = useState<string | null>(null)
   const [expandedCard, setExpandedCard] = useState<string | null>(null)
+  const [overpaymentPrefill, setOverpaymentPrefill] = useState<OverpaymentPrefill | null>(null)
   const routerLocation = useLocation()
   const navigate = useNavigate()
   const loanPrefill = (routerLocation.state as { loanPrefill?: LoanPrefill } | null)?.loanPrefill
@@ -54,9 +78,22 @@ export function Loans() {
   // bill to make that split meaningful — see LoanEditPanel/LoanForm's
   // "hasJointBills" prop for the full reasoning.
   const hasJointBills = data.recurringTemplates.some((t) => t.location === 'joint')
+  // ...and, separately, only once 2+ people actually have a salary
+  // configured to split — see lib/household.ts's hasSalaryConfigured.
+  const canBeJoint = peopleWithSalaryCount(data.people) >= 2
 
   useEffect(() => {
     if (loanPrefill) setAddingLoan(true)
+
+    const prefill = (routerLocation.state as { overpaymentPrefill?: OverpaymentPrefill } | null)?.overpaymentPrefill
+    if (prefill) {
+      setOverpaymentPrefill(prefill)
+      if (prefill.targetKind === 'loan') setExpandedLoan(prefill.targetId)
+      else setExpandedCard(prefill.targetId)
+      // Consumed into local state above — clear the router state so a
+      // manual close/reopen of this same row later doesn't re-trigger it.
+      navigate('.', { replace: true, state: null })
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routerLocation.state])
 
@@ -79,6 +116,7 @@ export function Loans() {
             defaultOwnerId={data.primaryPersonId}
             initial={loanPrefill}
             hasJointBills={hasJointBills}
+            canBeJoint={canBeJoint}
             onAddCategory={addCategory}
             onCancel={() => {
               setAddingLoan(false)
@@ -100,39 +138,27 @@ export function Loans() {
               summary.totalPayable > 0 ? Math.min(100, ((summary.totalPayable - summary.remainingBalance) / summary.totalPayable) * 100) : 0
             const isOpen = expandedLoan === loan.id
             return (
-              <SwipeToDelete key={loan.id} onDelete={() => removeLoan(loan.id)} confirmLabel={loan.name}>
-                <div className="rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
-                  <button onClick={() => setExpandedLoan(isOpen ? null : loan.id)} className="w-full flex items-center justify-between text-left">
-                    <div className="flex items-center gap-2">
-                      <CategoryIcon category={category} />
-                      <div>
-                        <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">{loan.name}</h3>
-                        <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
-                          £{formatCurrency(summary.remainingBalance)} remaining · {summary.monthsRemaining} payment
-                          {summary.monthsRemaining === 1 ? '' : 's'} left
-                        </p>
-                      </div>
-                    </div>
-                    <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
-                  </button>
-
-                  <div className="h-1.5 rounded-full mt-3 overflow-hidden" style={{ background: 'var(--color-track)' }}>
-                    <div className="h-full rounded-full" style={{ width: `${percentRepaid}%`, background: 'var(--color-coral)' }} />
-                  </div>
-
-                  {isOpen && (
-                    <LoanEditPanel
-                      loan={loan}
-                      categories={visibleCategoriesFor(data, loan.categoryId)}
-                      people={data.people}
-                      hasJointBills={hasJointBills}
-                      onAddCategory={addCategory}
-                      onSave={(u) => updateLoan(loan.id, u)}
-                      onLogOverpayment={(amount, date, note) => logLoanOverpayment(loan.id, amount, date, note)}
-                    />
-                  )}
-                </div>
-              </SwipeToDelete>
+              <LoanRow
+                key={loan.id}
+                loan={loan}
+                category={category}
+                summary={summary}
+                percentRepaid={percentRepaid}
+                isOpen={isOpen}
+                onToggle={() => setExpandedLoan(isOpen ? null : loan.id)}
+                onRemove={() => removeLoan(loan.id)}
+                categories={visibleCategoriesFor(data, loan.categoryId)}
+                people={data.people}
+                hasJointBills={hasJointBills}
+                canBeJoint={canBeJoint}
+                onAddCategory={addCategory}
+                onSave={(u) => updateLoan(loan.id, u)}
+                onLogOverpayment={(amount, date, note) => logLoanOverpayment(loan.id, amount, date, note)}
+                onUpdateOverpayment={(overpaymentId, amount, date, note) => updateLoanOverpayment(loan.id, overpaymentId, amount, date, note)}
+                onRemoveOverpayment={(overpaymentId) => removeLoanOverpayment(loan.id, overpaymentId)}
+                overpaymentPrefill={overpaymentPrefill?.targetKind === 'loan' && overpaymentPrefill.targetId === loan.id ? overpaymentPrefill : null}
+                onPrefillConsumed={() => setOverpaymentPrefill(null)}
+              />
             )
           })}
           {data.loans.length === 0 && !addingLoan && <p className="text-sm text-[var(--color-ink-muted)] text-center py-8">No loans yet.</p>}
@@ -163,39 +189,21 @@ export function Loans() {
             const minPayment = computeMinimumPaymentAmount(card)
             const isOpen = expandedCard === card.id
             return (
-              <SwipeToDelete key={card.id} onDelete={() => removeCreditCard(card.id)} confirmLabel={card.name}>
-                <div className="rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
-                  <button onClick={() => setExpandedCard(isOpen ? null : card.id)} className="w-full flex items-center justify-between text-left">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="inline-flex items-center justify-center shrink-0 rounded-full"
-                        style={{ width: 32, height: 32, background: `${card.color}22` }}
-                      >
-                        <CreditCardIcon size={16} strokeWidth={1.75} style={{ color: card.color }} />
-                      </span>
-                      <div>
-                        <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">{card.name}</h3>
-                        <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
-                          £{formatCurrency(card.currentBalance)} owed · £{formatCurrency(minPayment)} due on the {card.paymentDayOfMonth}
-                          {ordinalSuffix(card.paymentDayOfMonth)}
-                        </p>
-                      </div>
-                    </div>
-                    <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
-                  </button>
-
-                  {isOpen && (
-                    <CreditCardEditPanel
-                      card={card}
-                      people={data.people}
-                      onSave={(u) => updateCreditCard(card.id, u)}
-                      onUpdateLumpPayment={(lumpPaymentId, amount, date, note) => updateCreditCardLumpPayment(card.id, lumpPaymentId, amount, date, note)}
-                      onRemoveLumpPayment={(lumpPaymentId) => removeCreditCardLumpPayment(card.id, lumpPaymentId)}
-                      onLogLumpPayment={(amount, date, note) => logCreditCardLumpPayment(card.id, amount, date, note)}
-                    />
-                  )}
-                </div>
-              </SwipeToDelete>
+              <CreditCardRow
+                key={card.id}
+                card={card}
+                minPayment={minPayment}
+                isOpen={isOpen}
+                onToggle={() => setExpandedCard(isOpen ? null : card.id)}
+                onRemove={() => removeCreditCard(card.id)}
+                people={data.people}
+                onSave={(u) => updateCreditCard(card.id, u)}
+                onUpdateLumpPayment={(lumpPaymentId, amount, date, note) => updateCreditCardLumpPayment(card.id, lumpPaymentId, amount, date, note)}
+                onRemoveLumpPayment={(lumpPaymentId) => removeCreditCardLumpPayment(card.id, lumpPaymentId)}
+                onLogLumpPayment={(amount, date, note) => logCreditCardLumpPayment(card.id, amount, date, note)}
+                overpaymentPrefill={overpaymentPrefill?.targetKind === 'credit_card' && overpaymentPrefill.targetId === card.id ? overpaymentPrefill : null}
+                onPrefillConsumed={() => setOverpaymentPrefill(null)}
+              />
             )
           })}
           {data.creditCards.length === 0 && !addingCard && <p className="text-sm text-[var(--color-ink-muted)] text-center py-8">No credit cards yet.</p>}
@@ -212,13 +220,171 @@ function ordinalSuffix(day: number): string {
   return 'th'
 }
 
-// ── Draft-then-Save edit panels — LoanEditPanel and CreditCardEditPanel
-// follow the same convention as the Salary page's PeriodEditor: nothing
-// persists until the explicit bottom Save button is pressed. Each mounts
-// fresh (guarded by isOpen in the parent) whenever its row is expanded, so
-// the draft always starts from the record's current saved values.
-// Overpayment/lump-payment logging is a separate action (a new ledger
-// entry, not a field edit on the loan/card record itself) and stays
+// ── Loan / Credit Card row wrappers — own the collapse-on-save + green
+// flash feedback (see SavedFlash.tsx), matching the same pattern used on
+// the Bills and Salary pages. The row collapses and its "open" edit
+// panel unmounts (via the isOpen && guard), then the whole row briefly
+// flashes green with a check mark and "Saved". ──
+
+function LoanRow({
+  loan,
+  category,
+  summary,
+  percentRepaid,
+  isOpen,
+  onToggle,
+  onRemove,
+  categories,
+  people,
+  hasJointBills,
+  canBeJoint,
+  onAddCategory,
+  onSave,
+  onLogOverpayment,
+  onUpdateOverpayment,
+  onRemoveOverpayment,
+  overpaymentPrefill,
+  onPrefillConsumed,
+}: {
+  loan: Loan
+  category: { id: string; name: string; icon: string; iconColor: string } | undefined
+  summary: ReturnType<typeof summarizeLoan>
+  percentRepaid: number
+  isOpen: boolean
+  onToggle: () => void
+  onRemove: () => void
+  categories: { id: string; name: string; icon: string; iconColor: string }[]
+  people: { id: string; name: string }[]
+  hasJointBills: boolean
+  canBeJoint: boolean
+  onAddCategory: (name: string) => { id: string }
+  onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
+  onLogOverpayment: (amount: number, date: string, note?: string) => void
+  onUpdateOverpayment: (overpaymentId: string, amount: number, date: string, note?: string) => void
+  onRemoveOverpayment: (overpaymentId: string) => void
+  overpaymentPrefill: OverpaymentPrefill | null
+  onPrefillConsumed: () => void
+}) {
+  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+
+  return (
+    <SwipeToDelete onDelete={onRemove} confirmLabel={loan.name}>
+      <div className="relative rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
+        <button onClick={onToggle} className="w-full flex items-center justify-between text-left">
+          <div className="flex items-center gap-2">
+            <CategoryIcon category={category} />
+            <div>
+              <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">{loan.name}</h3>
+              <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+                £{formatCurrency(summary.remainingBalance)} remaining · {summary.monthsRemaining} payment
+                {summary.monthsRemaining === 1 ? '' : 's'} left
+              </p>
+            </div>
+          </div>
+          <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
+        </button>
+
+        <div className="h-1.5 rounded-full mt-3 overflow-hidden" style={{ background: 'var(--color-track)' }}>
+          <div className="h-full rounded-full" style={{ width: `${percentRepaid}%`, background: 'var(--color-coral)' }} />
+        </div>
+
+        {isOpen && (
+          <LoanEditPanel
+            loan={loan}
+            categories={categories}
+            people={people}
+            hasJointBills={hasJointBills}
+            canBeJoint={canBeJoint}
+            onAddCategory={onAddCategory}
+            onSave={(u) => {
+              onSave(u)
+              onToggle()
+              triggerFlash()
+            }}
+            onLogOverpayment={onLogOverpayment}
+            onUpdateOverpayment={onUpdateOverpayment}
+            onRemoveOverpayment={onRemoveOverpayment}
+            overpaymentPrefill={overpaymentPrefill}
+            onPrefillConsumed={onPrefillConsumed}
+          />
+        )}
+
+        <SavedFlashOverlay active={flashActive} />
+      </div>
+    </SwipeToDelete>
+  )
+}
+
+function CreditCardRow({
+  card,
+  minPayment,
+  isOpen,
+  onToggle,
+  onRemove,
+  people,
+  onSave,
+  onUpdateLumpPayment,
+  onRemoveLumpPayment,
+  onLogLumpPayment,
+  overpaymentPrefill,
+  onPrefillConsumed,
+}: {
+  card: CreditCard
+  minPayment: number
+  isOpen: boolean
+  onToggle: () => void
+  onRemove: () => void
+  people: { id: string; name: string }[]
+  onSave: (u: Partial<Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>>) => void
+  onUpdateLumpPayment: (lumpPaymentId: string, amount: number, date: string, note?: string) => void
+  onRemoveLumpPayment: (lumpPaymentId: string) => void
+  onLogLumpPayment: (amount: number, date: string, note?: string) => void
+  overpaymentPrefill: OverpaymentPrefill | null
+  onPrefillConsumed: () => void
+}) {
+  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+
+  return (
+    <SwipeToDelete onDelete={onRemove} confirmLabel={card.name}>
+      <div className="relative rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
+        <button onClick={onToggle} className="w-full flex items-center justify-between text-left">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center justify-center shrink-0 rounded-full" style={{ width: 32, height: 32, background: `${card.color}22` }}>
+              <CreditCardIcon size={16} strokeWidth={1.75} style={{ color: card.color }} />
+            </span>
+            <div>
+              <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">{card.name}</h3>
+              <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+                £{formatCurrency(card.currentBalance)} owed · £{formatCurrency(minPayment)} due on the {card.paymentDayOfMonth}
+                {ordinalSuffix(card.paymentDayOfMonth)}
+              </p>
+            </div>
+          </div>
+          <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
+        </button>
+
+        {isOpen && (
+          <CreditCardEditPanel
+            card={card}
+            people={people}
+            onSave={(u) => {
+              onSave(u)
+              onToggle()
+              triggerFlash()
+            }}
+            onUpdateLumpPayment={onUpdateLumpPayment}
+            onRemoveLumpPayment={onRemoveLumpPayment}
+            onLogLumpPayment={onLogLumpPayment}
+            overpaymentPrefill={overpaymentPrefill}
+            onPrefillConsumed={onPrefillConsumed}
+          />
+        )}
+
+        <SavedFlashOverlay active={flashActive} />
+      </div>
+    </SwipeToDelete>
+  )
+}
 // immediate, same as before. ──
 
 type LoanDraft = Omit<Loan, 'id' | 'overpayments'>
@@ -233,25 +399,52 @@ function LoanEditPanel({
   categories,
   people,
   hasJointBills,
+  canBeJoint,
   onAddCategory,
   onSave,
   onLogOverpayment,
+  onUpdateOverpayment,
+  onRemoveOverpayment,
+  overpaymentPrefill,
+  onPrefillConsumed,
 }: {
   loan: Loan
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   people: { id: string; name: string }[]
   hasJointBills: boolean
+  canBeJoint: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
   onLogOverpayment: (amount: number, date: string, note?: string) => void
+  onUpdateOverpayment: (overpaymentId: string, amount: number, date: string, note?: string) => void
+  onRemoveOverpayment: (overpaymentId: string) => void
+  overpaymentPrefill: OverpaymentPrefill | null
+  onPrefillConsumed: () => void
 }) {
-  const [draft, setDraft] = useState<LoanDraft>(() => draftFromLoan(loan))
-  const [savedMessage, setSavedMessage] = useState<string | null>(null)
-  const [loggingOverpayment, setLoggingOverpayment] = useState(false)
+  // A 'recurring' prefill (from the What-if page's "Make this a real
+  // recurring overpayment" button) seeds the draft's recurringOverpayment
+  // straight away rather than the loan's current saved value — the user
+  // still has to hit Save to actually commit it. A 'payoff' prefill
+  // instead pre-opens the one-off log form below (see loggingOverpayment).
+  const [draft, setDraft] = useState<LoanDraft>(() => {
+    const base = draftFromLoan(loan)
+    if (overpaymentPrefill && overpaymentPrefill.mode === 'recurring') {
+      return { ...base, recurringOverpayment: { startDate: todayIso(), amount: { type: 'fixed', amount: overpaymentPrefill.amount } } }
+    }
+    return base
+  })
+  const [loggingOverpayment, setLoggingOverpayment] = useState(overpaymentPrefill?.mode === 'payoff')
+
+  // Prefill only needs to seed the initial draft/form state above — once
+  // this panel has mounted with it, tell the parent to forget it so a
+  // later manual close/reopen of this same row starts fresh.
+  useEffect(() => {
+    if (overpaymentPrefill) onPrefillConsumed()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   function update(patch: Partial<LoanDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
-    setSavedMessage(null)
   }
 
   // Live preview of the schedule impact of unsaved edits — merges the draft
@@ -275,6 +468,7 @@ function LoanEditPanel({
       {(hasJointBills || draft.location === 'joint') && (
         <LocationEditor
           people={people}
+          canBeJoint={canBeJoint}
           location={draft.location}
           ownerId={draft.ownerId}
           payee={draft.payee}
@@ -283,18 +477,16 @@ function LoanEditPanel({
         />
       )}
 
-      {loan.overpayments.length > 0 && (
-        <div className="text-xs text-[var(--color-ink-muted)]">
-          {loan.overpayments.length} overpayment{loan.overpayments.length === 1 ? '' : 's'} logged, totalling £
-          {formatCurrency(loan.overpayments.reduce((sum, o) => sum + o.amount, 0))}
-        </div>
-      )}
+      {/* Editable, matching how a credit card's logged lump payments appear — each overpayment is its own row, tappable to edit or delete, not just a rolled-up summary line. */}
+      <LoggedPaymentList payments={loan.overpayments} onUpdate={onUpdateOverpayment} onRemove={onRemoveOverpayment} />
       {!loggingOverpayment ? (
         <button onClick={() => setLoggingOverpayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
           + Log an overpayment
         </button>
       ) : (
         <OverpaymentForm
+          initialAmount={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.amount : undefined}
+          initialDate={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.date : undefined}
           onLog={(amount, date, note) => {
             onLogOverpayment(amount, date, note)
             setLoggingOverpayment(false)
@@ -304,17 +496,8 @@ function LoanEditPanel({
 
       <RecurringOverpaymentEditor value={draft.recurringOverpayment} onChange={(recurringOverpayment) => update({ recurringOverpayment })} />
 
-      {savedMessage && (
-        <p className="text-xs" style={{ color: 'var(--color-positive)' }}>
-          {savedMessage}
-        </p>
-      )}
-
       <button
-        onClick={() => {
-          onSave(draft)
-          setSavedMessage('Saved.')
-        }}
+        onClick={() => onSave(draft)}
         className="w-full py-2.5 rounded-full text-sm font-semibold text-white"
         style={{ background: 'var(--color-coral)' }}
       >
@@ -338,6 +521,8 @@ function CreditCardEditPanel({
   onUpdateLumpPayment,
   onRemoveLumpPayment,
   onLogLumpPayment,
+  overpaymentPrefill,
+  onPrefillConsumed,
 }: {
   card: CreditCard
   people: { id: string; name: string }[]
@@ -345,13 +530,18 @@ function CreditCardEditPanel({
   onUpdateLumpPayment: (lumpPaymentId: string, amount: number, date: string, note?: string) => void
   onRemoveLumpPayment: (lumpPaymentId: string) => void
   onLogLumpPayment: (amount: number, date: string, note?: string) => void
+  overpaymentPrefill: OverpaymentPrefill | null
+  onPrefillConsumed: () => void
 }) {
   const [draft, setDraft] = useState<CreditCardDraft>(() => draftFromCard(card))
-  const [savedMessage, setSavedMessage] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (overpaymentPrefill) onPrefillConsumed()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   function update(patch: Partial<CreditCardDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
-    setSavedMessage(null)
   }
 
   return (
@@ -388,19 +578,15 @@ function CreditCardEditPanel({
       )}
 
       <LumpPaymentList payments={card.lumpPayments} onUpdate={onUpdateLumpPayment} onRemove={onRemoveLumpPayment} />
-      <OverpaymentForm label="Log a payment" onLog={onLogLumpPayment} />
-
-      {savedMessage && (
-        <p className="text-xs" style={{ color: 'var(--color-positive)' }}>
-          {savedMessage}
-        </p>
-      )}
+      <OverpaymentForm
+        label="Log a payment"
+        initialAmount={overpaymentPrefill?.amount}
+        initialDate={overpaymentPrefill?.date}
+        onLog={onLogLumpPayment}
+      />
 
       <button
-        onClick={() => {
-          onSave(draft)
-          setSavedMessage('Saved.')
-        }}
+        onClick={() => onSave(draft)}
         className="w-full py-2.5 rounded-full text-sm font-semibold text-white"
         style={{ background: 'var(--color-coral)' }}
       >
@@ -412,9 +598,19 @@ function CreditCardEditPanel({
 
 // ── Overpayment / lump-payment logging — shared shape for both loans and credit cards ──
 
-function OverpaymentForm({ label = 'Log an overpayment', onLog }: { label?: string; onLog: (amount: number, date: string, note?: string) => void }) {
-  const [amount, setAmount] = useState('')
-  const [date, setDate] = useState(todayIso())
+function OverpaymentForm({
+  label = 'Log an overpayment',
+  initialAmount,
+  initialDate,
+  onLog,
+}: {
+  label?: string
+  initialAmount?: number
+  initialDate?: string
+  onLog: (amount: number, date: string, note?: string) => void
+}) {
+  const [amount, setAmount] = useState(initialAmount != null ? String(initialAmount) : '')
+  const [date, setDate] = useState(initialDate ?? todayIso())
   const [note, setNote] = useState('')
   const amountNumber = Number(amount)
 
@@ -442,16 +638,25 @@ function OverpaymentForm({ label = 'Log an overpayment', onLog }: { label?: stri
   )
 }
 
-// ── Logged lump payments — listed individually with edit/delete, not just a summary total. Editing is reverse-then-relog under the hood (see LedgerContext), so it correctly reverses an already-cleared payment's balance effect before reapplying the new values. ──
+// ── Logged payments — a one-off overpayment/lump payment listed
+// individually with edit/delete, not just a rolled-up summary total.
+// Shared between credit card lump payments and loan overpayments — both
+// are the same {id, date, amount, note?} shape. Credit card editing is
+// reverse-then-relog under the hood (see LedgerContext) so it correctly
+// reverses an already-cleared payment's balance effect before reapplying
+// the new values; loan overpayments don't need that step since a loan's
+// balance is always derived fresh from its schedule, never stored. ──
 
-function LumpPaymentList({
+type LoggedPayment = { id: string; date: string; amount: number; note?: string }
+
+function LoggedPaymentList({
   payments,
   onUpdate,
   onRemove,
 }: {
-  payments: CreditCardLumpPayment[]
-  onUpdate: (lumpPaymentId: string, amount: number, date: string, note?: string) => void
-  onRemove: (lumpPaymentId: string) => void
+  payments: LoggedPayment[]
+  onUpdate: (paymentId: string, amount: number, date: string, note?: string) => void
+  onRemove: (paymentId: string) => void
 }) {
   const [editingId, setEditingId] = useState<string | null>(null)
   if (payments.length === 0) return null
@@ -474,7 +679,7 @@ function LumpPaymentList({
             <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(p.amount)}</span>
           </button>
           {editingId === p.id && (
-            <LumpPaymentEditForm
+            <LoggedPaymentEditForm
               payment={p}
               onSave={(amount, date, note) => {
                 onUpdate(p.id, amount, date, note)
@@ -493,13 +698,16 @@ function LumpPaymentList({
   )
 }
 
-function LumpPaymentEditForm({
+// Kept as an alias so the credit card call site below reads clearly.
+const LumpPaymentList = LoggedPaymentList
+
+function LoggedPaymentEditForm({
   payment,
   onSave,
   onDelete,
   onCancel,
 }: {
-  payment: CreditCardLumpPayment
+  payment: LoggedPayment
   onSave: (amount: number, date: string, note?: string) => void
   onDelete: () => void
   onCancel: () => void
@@ -674,6 +882,7 @@ function LoanForm({
   defaultOwnerId,
   initial,
   hasJointBills,
+  canBeJoint,
   onAddCategory,
   onSave,
   onCancel,
@@ -683,6 +892,7 @@ function LoanForm({
   defaultOwnerId: string
   initial?: LoanPrefill
   hasJointBills: boolean
+  canBeJoint: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (loan: Omit<Loan, 'id' | 'overpayments'>) => void
   onCancel: () => void
@@ -691,7 +901,7 @@ function LoanForm({
   const [monthlyPayment, setMonthlyPayment] = useState(initial?.monthlyPayment ? String(initial.monthlyPayment) : '')
   const [termMonths, setTermMonths] = useState(initial?.termMonths ? String(initial.termMonths) : '')
   const [startDate, setStartDate] = useState(initial?.startDate ?? todayIso())
-  const [categoryId, setCategoryId] = useState(initial?.categoryId ?? categories[0]?.id ?? '')
+  const [categoryId, setCategoryId] = useState(initial?.categoryId ?? (categories.some((c) => c.id === DEFAULT_LOAN_CATEGORY_ID) ? DEFAULT_LOAN_CATEGORY_ID : categories[0]?.id ?? ''))
   const [location, setLocation] = useState<BillLocation>(initial?.location ?? 'personal')
   const [ownerId, setOwnerId] = useState(initial?.ownerId || defaultOwnerId)
   const [payee, setPayee] = useState(initial?.payee || (people[0]?.id ?? ''))
@@ -711,6 +921,7 @@ function LoanForm({
       {(hasJointBills || location === 'joint') && (
         <LocationEditor
           people={people}
+          canBeJoint={canBeJoint}
           location={location}
           ownerId={ownerId}
           payee={payee}

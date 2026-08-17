@@ -64,6 +64,10 @@ interface LedgerContextValue {
   removeLoan: (id: string) => void
   /** Records a real overpayment against a loan right now — updates the loan's overpayments (shrinking its remaining schedule) and inserts the matching cleared loan_payment transaction. Unrelated to the What-if page's hypothetical overpayment scenario action. */
   logLoanOverpayment: (loanId: string, amount: number, date: string, note?: string) => void
+  /** Edits a logged loan overpayment's amount/date/note in place — updates both the LoanOverpayment record (which buildLoanSchedule reads fresh every call, so the schedule just reflects the new value automatically) and its matching transaction. No balance-reversal step needed here unlike credit cards: a loan's remaining balance is always derived from the schedule, never stored separately. */
+  updateLoanOverpayment: (loanId: string, overpaymentId: string, amount: number, date: string, note?: string) => void
+  /** Removes a logged loan overpayment entirely — the record AND its transaction. */
+  removeLoanOverpayment: (loanId: string, overpaymentId: string) => void
 
   addCreditCard: (card: Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>) => string
   updateCreditCard: (id: string, updates: Partial<Omit<CreditCard, 'id'>>) => void
@@ -287,6 +291,37 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     })
   }
 
+  const updateLoanOverpayment: LedgerContextValue['updateLoanOverpayment'] = (loanId, overpaymentId, amount, date, note) => {
+    setDataState((prev) => {
+      const loan = prev.loans.find((l) => l.id === loanId)
+      if (!loan) return prev
+      const updatedLoan = {
+        ...loan,
+        overpayments: loan.overpayments.map((o) => (o.id === overpaymentId ? { ...o, amount, date, note } : o)),
+      }
+      return {
+        ...prev,
+        loans: prev.loans.map((l) => (l.id === loanId ? updatedLoan : l)),
+        transactions: prev.transactions.map((t) =>
+          t.sourceType === 'loan_overpayment' && t.sourceId === overpaymentId ? { ...t, amount, date, note } : t,
+        ),
+      }
+    })
+  }
+
+  const removeLoanOverpayment: LedgerContextValue['removeLoanOverpayment'] = (loanId, overpaymentId) => {
+    setDataState((prev) => {
+      const loan = prev.loans.find((l) => l.id === loanId)
+      if (!loan) return prev
+      const updatedLoan = { ...loan, overpayments: loan.overpayments.filter((o) => o.id !== overpaymentId) }
+      return {
+        ...prev,
+        loans: prev.loans.map((l) => (l.id === loanId ? updatedLoan : l)),
+        transactions: prev.transactions.filter((t) => !(t.sourceType === 'loan_overpayment' && t.sourceId === overpaymentId)),
+      }
+    })
+  }
+
   const addCreditCard: LedgerContextValue['addCreditCard'] = (card) => {
     const id = nanoid(8)
     setDataState((prev) => ({ ...prev, creditCards: [...prev.creditCards, { ...card, id, lumpPayments: [], active: true }] }))
@@ -448,6 +483,8 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     updateLoan,
     removeLoan,
     logLoanOverpayment,
+    updateLoanOverpayment,
+    removeLoanOverpayment,
     addCreditCard,
     updateCreditCard,
     removeCreditCard,

@@ -9,7 +9,7 @@ import { calculateNetSalary } from '../lib/tax'
 import { personalBillsTotal, jointContributionForPerson } from '../lib/bills'
 import { summarizeLoan, combineBillsWithLoans } from '../lib/loans'
 import { totalMonthlySavingsForPerson } from '../lib/savings'
-import { calculateHouseholdFigures } from '../lib/household'
+import { calculateHouseholdFigures, legacyPeopleWithSalaryCount } from '../lib/household'
 import { calculateFinanceAgreement } from '../lib/finance'
 import { Plus, Trash2, ChevronDown, ChevronUp, Layers, Pencil } from 'lucide-react'
 import type { Scenario, ScenarioActionType, ScenarioTargetKind, BillLocation } from '../types/models'
@@ -32,6 +32,13 @@ const ACTION_LABELS: Record<ScenarioActionType, string> = {
 const NEEDS_VALUE: ScenarioActionType[] = ['sell_asset', 'pay_off_loan', 'new_bill', 'loan_overpayment', 'salary_change', 'savings_lump_sum']
 const NEEDS_SPLIT: ScenarioActionType[] = ['new_bill', 'new_finance_agreement']
 
+// These three action types are meaningless without a loan/credit card to
+// point at — a lump sum has nowhere to go, "exclude" has nothing to
+// exclude, and a recurring extra payment has nothing to add to. Selling
+// an asset is deliberately NOT in this list: the sale can just be cash in
+// hand, with no loan/card involved at all.
+const REQUIRES_LOAN_TARGET: ScenarioActionType[] = ['pay_off_loan', 'exclude_loan', 'loan_overpayment']
+
 const VALUE_LABELS: Partial<Record<ScenarioActionType, string>> = {
   sell_asset: 'Sale value (£)',
   pay_off_loan: 'Lump sum (£)',
@@ -42,7 +49,8 @@ const VALUE_LABELS: Partial<Record<ScenarioActionType, string>> = {
 }
 
 export function Scenarios() {
-  const { data: ledgerData, addScenario, updateScenario, removeScenario, logLoanOverpayment, logCreditCardLumpPayment, updateLoan } = useLedgerData()
+  const { data: ledgerData, addScenario, updateScenario, removeScenario } = useLedgerData()
+  const navigate = useNavigate()
   // Bridges live ledger data (people/loans/bills/credit cards) into the
   // shape this page's existing simulation engine expects — see
   // lib/legacyBridge.ts for why this is an adapter rather than a
@@ -71,18 +79,37 @@ export function Scenarios() {
     return me ? calculateScenarioImpact(scenario, data, me.id, monthlyAvailableBefore) : null
   }
 
-  // "Convert to real" for a loan/credit-card impact — a lump sum becomes an
-  // actual logged payment today; a recurring overpayment becomes an actual
-  // ongoing commitment on the loan (credit cards have no field to persist
-  // an ongoing overpayment into, so this only ever applies when
-  // targetKind is 'loan' — the button itself is only shown in that case,
-  // see ImpactSummary below).
+  // "Convert to real" for a loan/credit-card impact — rather than
+  // auto-saving here, the user is transported to the Loans page with the
+  // target row already open and the relevant fields pre-populated (a
+  // one-off payoff pre-fills the log-an-overpayment/log-a-payment form; a
+  // recurring overpayment pre-fills the loan's recurring overpayment
+  // fields), and saves it themselves from there. See Loans.tsx's
+  // OverpaymentPrefill/overpaymentPrefill handling.
   function makeImpactReal(li: LoanImpact) {
     if (li.kind === 'payoff') {
-      if (li.targetKind === 'loan') logLoanOverpayment(li.loanId, li.lumpSumApplied, todayIso())
-      else logCreditCardLumpPayment(li.loanId, li.lumpSumApplied, todayIso())
+      navigate('/loans', {
+        state: {
+          overpaymentPrefill: {
+            targetKind: li.targetKind,
+            targetId: li.loanId,
+            mode: 'payoff',
+            amount: li.lumpSumApplied,
+            date: todayIso(),
+          },
+        },
+      })
     } else if (li.kind === 'overpayment' && li.targetKind === 'loan') {
-      updateLoan(li.loanId, { recurringOverpayment: { startDate: todayIso(), amount: { type: 'fixed', amount: li.overpaymentPerMonth } } })
+      navigate('/loans', {
+        state: {
+          overpaymentPrefill: {
+            targetKind: 'loan',
+            targetId: li.loanId,
+            mode: 'recurring',
+            amount: li.overpaymentPerMonth,
+          },
+        },
+      })
     }
   }
 
@@ -476,25 +503,13 @@ function ImpactSummary({ impact, viewerId, onMakeReal }: { impact: ScenarioImpac
   )
 }
 
-/** Turns a lump-sum or recurring-overpayment impact into an actual logged payment / actual ongoing recurring overpayment. One-shot per render — once pressed it shows a brief confirmation rather than staying clickable, since pressing it again would just log a duplicate payment. */
+/** Sends a lump-sum or recurring-overpayment impact over to the Loans page, pre-filled and ready to review — see makeImpactReal above for why this navigates rather than saving directly. */
 function MakeRealButton({ impact, onMakeReal }: { impact: LoanImpact; onMakeReal: (li: LoanImpact) => void }) {
-  const [done, setDone] = useState(false)
   const label = impact.kind === 'payoff' ? `Log £${formatCurrency(impact.lumpSumApplied)} as a real payment` : 'Make this a real recurring overpayment'
-
-  if (done) {
-    return (
-      <p className="text-xs mt-2" style={{ color: 'var(--color-positive)' }}>
-        {impact.kind === 'payoff' ? 'Logged.' : 'Added.'}
-      </p>
-    )
-  }
 
   return (
     <button
-      onClick={() => {
-        onMakeReal(impact)
-        setDone(true)
-      }}
+      onClick={() => onMakeReal(impact)}
       className="text-xs font-medium mt-2"
       style={{ color: 'var(--color-coral)' }}
     >
@@ -519,6 +534,15 @@ function ScenarioForm({
   const [name, setName] = useState(initial?.name ?? '')
   const [actions, setActions] = useState<Scenario['actions']>(initial?.actions ?? [])
   const hasAnySavingsGoal = data.people.some((p) => p.savingsEntries.some((e) => e.type === 'goal'))
+  // Same rule as the Bills/Loans location pickers — "Joint" only makes
+  // sense once 2+ people actually have a salary configured, not just 2+
+  // people existing. See lib/household.ts's legacyPeopleWithSalaryCount
+  // for why this is the legacy-shape variant of that check.
+  const canBeJoint = legacyPeopleWithSalaryCount(data.people) >= 2
+
+  // A lump-sum/exclude/recurring-overpayment action with nothing linked is
+  // never valid to save — see REQUIRES_LOAN_TARGET.
+  const actionsAllLinkedWhereRequired = actions.every((a) => !REQUIRES_LOAN_TARGET.includes(a.type) || resolveTargets(a).length > 0)
 
   function round2(n: number): number {
     return Math.round(n * 100) / 100
@@ -718,30 +742,37 @@ function ScenarioForm({
               })()}
 
             {showSingleLoanPicker && (
-              <select
-                value={currentTargets[0] ? `${currentTargets[0].kind}:${currentTargets[0].id}` : ''}
-                onChange={(e) => {
-                  if (!e.target.value) {
-                    updateAction({ linkedTargetKind: undefined, linkedTargetId: undefined, linkedLoanId: undefined })
-                    return
-                  }
-                  const [kind, id] = e.target.value.split(':') as [ScenarioTargetKind, string]
-                  updateAction({ linkedTargetKind: kind, linkedTargetId: id, linkedLoanId: undefined })
-                }}
-                className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
-              >
-                <option value="">Choose a loan or credit card…</option>
-                {data.loans.map((l) => (
-                  <option key={`loan:${l.id}`} value={`loan:${l.id}`}>
-                    {l.name}
-                  </option>
-                ))}
-                {data.creditCards.map((c) => (
-                  <option key={`credit_card:${c.id}`} value={`credit_card:${c.id}`}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
+              <>
+                <select
+                  value={currentTargets[0] ? `${currentTargets[0].kind}:${currentTargets[0].id}` : ''}
+                  onChange={(e) => {
+                    if (!e.target.value) {
+                      updateAction({ linkedTargetKind: undefined, linkedTargetId: undefined, linkedLoanId: undefined })
+                      return
+                    }
+                    const [kind, id] = e.target.value.split(':') as [ScenarioTargetKind, string]
+                    updateAction({ linkedTargetKind: kind, linkedTargetId: id, linkedLoanId: undefined })
+                  }}
+                  className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                >
+                  <option value="">Choose a loan or credit card…</option>
+                  {data.loans.map((l) => (
+                    <option key={`loan:${l.id}`} value={`loan:${l.id}`}>
+                      {l.name}
+                    </option>
+                  ))}
+                  {data.creditCards.map((c) => (
+                    <option key={`credit_card:${c.id}`} value={`credit_card:${c.id}`}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                {currentTargets.length === 0 && (
+                  <p className="col-span-2 text-[11px]" style={{ color: 'var(--color-negative)' }}>
+                    {action.type === 'exclude_loan' ? 'Select the loan or credit card to exclude.' : 'Select which loan or credit card this extra payment goes toward.'}
+                  </p>
+                )}
+              </>
             )}
 
             {showMultiLoanPicker && (
@@ -796,7 +827,13 @@ function ScenarioForm({
                   }}
                   className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
                 >
-                  <option value="">{currentTargets.length === 0 ? 'No linked loan/credit card (optional)' : '+ Add another target…'}</option>
+                  <option value="">
+                    {currentTargets.length === 0
+                      ? action.type === 'pay_off_loan'
+                        ? 'Choose a loan or credit card…'
+                        : 'No linked loan/credit card (optional)'
+                      : '+ Add another target…'}
+                  </option>
                   {data.loans
                     .filter((l) => !currentTargets.some((t) => t.kind === 'loan' && t.id === l.id))
                     .map((l) => (
@@ -818,6 +855,11 @@ function ScenarioForm({
                     cap what goes to that one instead.
                   </p>
                 )}
+                {action.type === 'pay_off_loan' && currentTargets.length === 0 && (
+                  <p className="text-[11px]" style={{ color: 'var(--color-negative)' }}>
+                    Select at least one loan or credit card for this lump sum to go toward.
+                  </p>
+                )}
               </div>
             )}
 
@@ -835,20 +877,24 @@ function ScenarioForm({
             {showSplit && (
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
-                <select
-                  value={action.location ?? 'personal'}
-                  onChange={(e) => {
-                    const loc = e.target.value as BillLocation
-                    updateAction(loc === 'joint' ? { location: loc, payee: action.payee || people[0]?.id } : { location: loc })
-                  }}
-                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
-                >
-                  <option value="personal">Personal</option>
-                  <option value="joint">Joint</option>
-                </select>
+                {canBeJoint ? (
+                  <select
+                    value={action.location ?? 'personal'}
+                    onChange={(e) => {
+                      const loc = e.target.value as BillLocation
+                      updateAction(loc === 'joint' ? { location: loc, payee: action.payee || people[0]?.id } : { location: loc })
+                    }}
+                    className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                  >
+                    <option value="personal">Personal</option>
+                    <option value="joint">Joint</option>
+                  </select>
+                ) : (
+                  <span className="text-sm text-[var(--color-ink-faint)] py-1">Personal (add a second person's salary on the Salary page to split costs)</span>
+                )}
               </label>
             )}
-            {showSplit && (action.location ?? 'personal') === 'personal' && (
+            {showSplit && people.length > 1 && (action.location ?? 'personal') === 'personal' && (
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-[var(--color-ink-muted)]">Owner</span>
                 <select
@@ -887,15 +933,15 @@ function ScenarioForm({
         </button>
       </div>
       <button
+        disabled={!name.trim() || actions.length === 0 || !actionsAllLinkedWhereRequired}
         onClick={() => {
-          if (!name.trim() || actions.length === 0) return
           onSave({
             name: name.trim(),
             includeInCumulative: initial?.includeInCumulative ?? true,
             actions: actions.map((a) => ({ ...a, label: ACTION_LABELS[a.type] })),
           })
         }}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white"
+        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
         style={{ background: 'var(--color-coral)' }}
       >
         {initial ? 'Save changes' : 'Save scenario'}

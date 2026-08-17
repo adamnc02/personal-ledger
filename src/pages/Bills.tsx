@@ -13,6 +13,8 @@ import { visibleCategoriesFor } from '../lib/categories'
 import { CategoryManagerButton } from '../components/CategoryManagerModal'
 import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
+import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
+import { peopleWithSalaryCount } from '../lib/household'
 
 const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   cash: 'Cash',
@@ -41,6 +43,10 @@ export function Bills() {
   const routerLocation = useLocation()
   const navigate = useNavigate()
   const prefill = (routerLocation.state as { billPrefill?: BillPrefill } | null)?.billPrefill
+  // "Joint" is only offered as a location choice once 2+ people actually
+  // have a salary configured — see lib/household.ts's hasSalaryConfigured
+  // for why this differs from a plain people.length check.
+  const canBeJoint = peopleWithSalaryCount(data.people) >= 2
 
   useEffect(() => {
     if (prefill) setAdding(true)
@@ -71,6 +77,7 @@ export function Bills() {
       {adding && (
         <BillForm
           people={data.people}
+          canBeJoint={canBeJoint}
           categories={visibleCategoriesFor(data)}
           defaultOwnerId={data.primaryPersonId}
           initial={prefill}
@@ -114,6 +121,7 @@ export function Bills() {
             key={template.id}
             template={template}
             people={data.people}
+            canBeJoint={canBeJoint}
             categories={visibleCategoriesFor(data, template.categoryId)}
             onAddCategory={addCategory}
             onUpdate={(u) => updateRecurringTemplate(template.id, u)}
@@ -193,6 +201,7 @@ function PaymentMethodEditor({ value, onChange }: { value: PaymentMethod; onChan
 function BillRow({
   template,
   people,
+  canBeJoint,
   categories,
   onAddCategory,
   onUpdate,
@@ -200,6 +209,7 @@ function BillRow({
 }: {
   template: RecurringTemplate
   people: { id: string; name: string }[]
+  canBeJoint: boolean
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
   onUpdate: (u: Partial<Omit<RecurringTemplate, 'id'>>) => void
@@ -207,10 +217,11 @@ function BillRow({
 }) {
   const [open, setOpen] = useState(false)
   const category = categories.find((c) => c.id === template.categoryId)
+  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={template.name}>
-      <div className="rounded-xl px-4 py-3" style={{ background: 'var(--color-surface)', opacity: template.active ? 1 : 0.55 }}>
+      <div className="relative rounded-xl px-4 py-3" style={{ background: 'var(--color-surface)', opacity: template.active ? 1 : 0.55 }}>
         <div className="flex items-center justify-between cursor-pointer" onClick={() => setOpen(!open)}>
           <div className="flex items-center gap-2">
             <CategoryIcon category={category} />
@@ -234,12 +245,19 @@ function BillRow({
           <BillEditPanel
             template={template}
             people={people}
+            canBeJoint={canBeJoint}
             categories={categories}
             onAddCategory={onAddCategory}
-            onSave={onUpdate}
+            onSave={(patch) => {
+              onUpdate(patch)
+              setOpen(false)
+              triggerFlash()
+            }}
             onDelete={onRemove}
           />
         )}
+
+        <SavedFlashOverlay active={flashActive} />
       </div>
     </SwipeToDelete>
   )
@@ -261,6 +279,7 @@ function draftFromTemplate(template: RecurringTemplate): BillDraft {
 function BillEditPanel({
   template,
   people,
+  canBeJoint,
   categories,
   onAddCategory,
   onSave,
@@ -268,17 +287,16 @@ function BillEditPanel({
 }: {
   template: RecurringTemplate
   people: { id: string; name: string }[]
+  canBeJoint: boolean
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onDelete: () => void
 }) {
   const [draft, setDraft] = useState<BillDraft>(() => draftFromTemplate(template))
-  const [savedMessage, setSavedMessage] = useState<string | null>(null)
 
   function update(patch: Partial<BillDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
-    setSavedMessage(null)
   }
 
   return (
@@ -291,6 +309,7 @@ function BillEditPanel({
       </div>
       <LocationEditor
         people={people}
+        canBeJoint={canBeJoint}
         location={draft.location}
         ownerId={draft.ownerId}
         payee={draft.payee}
@@ -307,17 +326,8 @@ function BillEditPanel({
         <Trash2 size={13} /> Delete bill
       </button>
 
-      {savedMessage && (
-        <p className="col-span-2 text-xs" style={{ color: 'var(--color-positive)' }}>
-          {savedMessage}
-        </p>
-      )}
-
       <button
-        onClick={() => {
-          onSave(draft)
-          setSavedMessage('Saved.')
-        }}
+        onClick={() => onSave(draft)}
         className="col-span-2 w-full py-2.5 rounded-full text-sm font-semibold text-white mt-1"
         style={{ background: 'var(--color-coral)' }}
       >
@@ -329,6 +339,7 @@ function BillEditPanel({
 
 function BillForm({
   people,
+  canBeJoint,
   categories,
   defaultOwnerId,
   initial,
@@ -337,6 +348,7 @@ function BillForm({
   onCancel,
 }: {
   people: { id: string; name: string }[]
+  canBeJoint: boolean
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   defaultOwnerId: string
   initial?: BillPrefill
@@ -385,6 +397,7 @@ function BillForm({
 
       <LocationEditor
         people={people}
+        canBeJoint={canBeJoint}
         location={location}
         ownerId={ownerId}
         payee={payee}

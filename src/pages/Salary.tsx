@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency } from '../lib/format'
 import { useLedgerData } from '../context/LedgerContext'
@@ -12,6 +12,7 @@ import type { AppDataV2, PayCycleConfig, Person, SavingsEntry } from '../types/l
 import { nanoid } from 'nanoid'
 import { DeductionModal } from '../components/DeductionModal'
 import { SwipeToDelete } from '../components/SwipeToDelete'
+import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 
 const STUDENT_LOAN_LABELS: Record<StudentLoanPlan, string> = {
   none: 'No student loan',
@@ -570,10 +571,33 @@ function PayPeriodsSection({
 }) {
   const [expandedDate, setExpandedDate] = useState<string | null>(null)
   const [showHistory, setShowHistory] = useState(false)
+  const [flashDates, setFlashDates] = useState<string[]>([])
+
+  useEffect(() => {
+    if (flashDates.length === 0) return
+    const t = window.setTimeout(() => setFlashDates([]), 1300)
+    return () => window.clearTimeout(t)
+  }, [flashDates])
 
   const today = new Date()
   const upcoming = upcomingPaydays(payCycle, today, 3).map(toLocalIsoDate)
   const closed = closedPaydays(payCycle, today, 6).map(toLocalIsoDate)
+
+  // Saving "just this" period only ever affects the one row being edited.
+  function handleSaveJustThis(dateIso: string, fields: ReturnType<typeof emptySalaryFields>) {
+    onSaveJustThis(dateIso, fields)
+    setExpandedDate(null)
+    setFlashDates([dateIso])
+  }
+
+  // "This and all future payments" affects every upcoming payday from
+  // dateIso onward, so flash all of those rows — not just the one that
+  // was expanded — so the user can see everything that changed.
+  function handleSaveAllFuture(dateIso: string, fields: ReturnType<typeof emptySalaryFields>) {
+    onSaveAllFuture(dateIso, fields)
+    setExpandedDate(null)
+    setFlashDates(upcoming.filter((d) => d >= dateIso))
+  }
 
   return (
     <div className="mb-4">
@@ -586,9 +610,10 @@ function PayPeriodsSection({
             dateIso={dateIso}
             isClosed={false}
             isOpen={expandedDate === dateIso}
+            flashing={flashDates.includes(dateIso)}
             onToggle={() => setExpandedDate(expandedDate === dateIso ? null : dateIso)}
-            onSaveJustThis={(fields) => onSaveJustThis(dateIso, fields)}
-            onSaveAllFuture={(fields) => onSaveAllFuture(dateIso, fields)}
+            onSaveJustThis={(fields) => handleSaveJustThis(dateIso, fields)}
+            onSaveAllFuture={(fields) => handleSaveAllFuture(dateIso, fields)}
             editingDeduction={editingDeduction}
             setEditingDeduction={setEditingDeduction}
           />
@@ -608,9 +633,10 @@ function PayPeriodsSection({
               dateIso={dateIso}
               isClosed
               isOpen={expandedDate === dateIso}
+              flashing={flashDates.includes(dateIso)}
               onToggle={() => setExpandedDate(expandedDate === dateIso ? null : dateIso)}
-              onSaveJustThis={(fields) => onSaveJustThis(dateIso, fields)}
-              onSaveAllFuture={(fields) => onSaveAllFuture(dateIso, fields)}
+              onSaveJustThis={(fields) => handleSaveJustThis(dateIso, fields)}
+              onSaveAllFuture={(fields) => handleSaveAllFuture(dateIso, fields)}
               editingDeduction={editingDeduction}
               setEditingDeduction={setEditingDeduction}
             />
@@ -627,6 +653,7 @@ function PayPeriodRow({
   dateIso,
   isClosed,
   isOpen,
+  flashing,
   onToggle,
   onSaveJustThis,
   onSaveAllFuture,
@@ -637,6 +664,7 @@ function PayPeriodRow({
   dateIso: string
   isClosed: boolean
   isOpen: boolean
+  flashing: boolean
   onToggle: () => void
   onSaveJustThis: (fields: ReturnType<typeof emptySalaryFields>) => void
   onSaveAllFuture: (fields: ReturnType<typeof emptySalaryFields>) => void
@@ -647,7 +675,7 @@ function PayPeriodRow({
   const existingOverride = person.salaryOverrides.find((o) => o.payPeriodDate === dateIso)
 
   return (
-    <div className="rounded-xl overflow-hidden" style={{ background: 'var(--color-bg-elevated)' }}>
+    <div className="relative rounded-xl overflow-hidden" style={{ background: 'var(--color-bg-elevated)' }}>
       <button onClick={onToggle} className="w-full flex items-center justify-between px-3 py-2.5 text-left">
         <span className="text-sm text-[var(--color-ink)]">
           {dateIso}
@@ -666,6 +694,7 @@ function PayPeriodRow({
           setEditingDeduction={setEditingDeduction}
         />
       )}
+      <SavedFlashOverlay active={flashing} />
     </div>
   )
 }
@@ -705,7 +734,6 @@ function PeriodEditor({
       : emptySalaryFields(),
   )
   const [confirming, setConfirming] = useState(false)
-  const [savedMessage, setSavedMessage] = useState<string | null>(null)
 
   if (!applicableSnapshot) {
     return (
@@ -884,17 +912,10 @@ function PeriodEditor({
         <AttachBonusButton personId={person.id} fixedDate={dateIso} />
       </div>
 
-      {savedMessage && (
-        <p className="text-xs" style={{ color: 'var(--color-positive)' }}>
-          {savedMessage}
-        </p>
-      )}
-
       <button
         onClick={() => {
           if (isClosed) {
             onSaveJustThis(fullDraft)
-            setSavedMessage('Saved.')
           } else {
             setConfirming(true)
           }
@@ -912,12 +933,10 @@ function PeriodEditor({
           onJustNext={() => {
             onSaveJustThis(fullDraft)
             setConfirming(false)
-            setSavedMessage(`Applied to ${dateIso} only.`)
           }}
           onAllFuture={() => {
             onSaveAllFuture(fullDraft)
             setConfirming(false)
-            setSavedMessage(`Applied from ${dateIso} onward.`)
           }}
         />
       )}
@@ -1021,12 +1040,13 @@ function SavingsEntryCard({
 }) {
   const [editing, setEditing] = useState(!entry.name)
   const monthly = monthlyAmountForEntry(entry)
+  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
 
   const percent = entry.type === 'goal' && entry.targetAmount ? Math.min(100, ((entry.currentAmount ?? 0) / entry.targetAmount) * 100) : 0
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={entry.name || 'this entry'}>
-      <div className="rounded-xl p-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="relative rounded-xl p-4" style={{ background: 'var(--color-bg-elevated)' }}>
         <div className="flex items-center justify-between mb-2 cursor-pointer" onClick={() => setEditing(!editing)}>
           <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-ink-faint)' }}>
             {entry.type === 'goal' ? 'Goal' : 'Monthly plan'}
@@ -1035,7 +1055,14 @@ function SavingsEntryCard({
         </div>
 
         {editing ? (
-          <SavingsEntryEditForm entry={entry} onSave={onUpdate} />
+          <SavingsEntryEditForm
+            entry={entry}
+            onSave={(patch) => {
+              onUpdate(patch)
+              setEditing(false)
+              triggerFlash()
+            }}
+          />
         ) : (
           <>
             <div className="flex items-baseline justify-between mb-1">
@@ -1064,6 +1091,8 @@ function SavingsEntryCard({
             </p>
           </>
         )}
+
+        <SavedFlashOverlay active={flashActive} />
       </div>
     </SwipeToDelete>
   )
@@ -1073,18 +1102,17 @@ function SavingsEntryCard({
 // convention as the other panels: nothing persists until Save is pressed.
 // Mounted fresh (guarded by `editing` in the parent) each time the entry is
 // opened for editing, so the draft always starts from the current saved
-// values. ──
+// values. Save feedback (collapse + green flash) is owned by the parent
+// SavingsEntryCard, matching Bills/Loans/pay-periods — see SavedFlash.tsx. ──
 
 function SavingsEntryEditForm({ entry, onSave }: { entry: SavingsEntry; onSave: (patch: Partial<SavingsEntry>) => void }) {
   const [draft, setDraft] = useState<Omit<SavingsEntry, 'id'>>(() => {
     const { id: _id, ...rest } = entry
     return rest
   })
-  const [savedMessage, setSavedMessage] = useState<string | null>(null)
 
   function update(patch: Partial<Omit<SavingsEntry, 'id'>>) {
     setDraft((d) => ({ ...d, ...patch }))
-    setSavedMessage(null)
   }
 
   return (
@@ -1168,17 +1196,8 @@ function SavingsEntryEditForm({ entry, onSave }: { entry: SavingsEntry; onSave: 
         )}
       </div>
 
-      {savedMessage && (
-        <p className="col-span-2 text-xs" style={{ color: 'var(--color-positive)' }}>
-          {savedMessage}
-        </p>
-      )}
-
       <button
-        onClick={() => {
-          onSave(draft)
-          setSavedMessage('Saved.')
-        }}
+        onClick={() => onSave(draft)}
         className="col-span-2 w-full py-2.5 rounded-full text-sm font-semibold text-white mt-1"
         style={{ background: 'var(--color-coral)' }}
       >
