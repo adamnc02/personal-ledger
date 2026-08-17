@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
 import { useNavigate } from 'react-router-dom'
@@ -64,6 +64,20 @@ export function Scenarios() {
 
   const me = data.people.find((p) => p.id === data.primaryPersonId) ?? data.people[0]
   const allBills = combineBillsWithLoans(data.bills, data.loans)
+  // Same rule as the summary page's deck (Home.tsx's hasJointItem) — the
+  // Household view only makes sense once there's an actual joint bill or
+  // loan to combine; otherwise it's identical to Personal and just adds
+  // clutter. See lib/household.ts's peopleWithSalaryCount for the related
+  // "2+ salaries" rule used elsewhere on this page's own location picker.
+  const hasJointItem = data.bills.some((b) => b.location === 'joint') || data.loans.some((l) => l.location === 'joint')
+
+  // If the joint bill/loan that made Household relevant gets removed (or
+  // excluded via a scenario) while it's the active view, fall back to
+  // Personal rather than leaving the page stuck on a view whose toggle no
+  // longer shows.
+  useEffect(() => {
+    if (!hasJointItem && viewMode === 'household') setViewMode('personal')
+  }, [hasJointItem, viewMode])
 
   const personalAvailableBefore = me
     ? calculateNetSalary(me.salary).netPerPeriod -
@@ -129,21 +143,23 @@ export function Scenarios() {
         </button>
       </header>
 
-      <div className="flex gap-1 rounded-full p-0.5 mb-6 w-fit" style={{ background: 'var(--color-surface)' }}>
-        {(['personal', 'household'] as const).map((mode) => (
-          <button
-            key={mode}
-            onClick={() => setViewMode(mode)}
-            className="px-3.5 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wide capitalize transition-colors"
-            style={{
-              background: viewMode === mode ? 'var(--color-coral)' : 'transparent',
-              color: viewMode === mode ? '#fff' : 'var(--color-ink-muted)',
-            }}
-          >
-            {mode}
-          </button>
-        ))}
-      </div>
+      {hasJointItem && (
+        <div className="flex gap-1 rounded-full p-0.5 mb-6 w-fit" style={{ background: 'var(--color-surface)' }}>
+          {(['personal', 'household'] as const).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setViewMode(mode)}
+              className="px-3.5 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wide capitalize transition-colors"
+              style={{
+                background: viewMode === mode ? 'var(--color-coral)' : 'transparent',
+                color: viewMode === mode ? '#fff' : 'var(--color-ink-muted)',
+              }}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+      )}
 
       {combinedImpact && (
         <div className="rounded-2xl p-5 mb-6 border" style={{ background: 'var(--color-surface)', borderColor: 'var(--color-coral)' }}>
