@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react'
 import { formatCurrency } from '../lib/format'
-import { toLocalIsoDate } from '../lib/date'
+import { toLocalIsoDate, todayIso } from '../lib/date'
 import { useNavigate } from 'react-router-dom'
 import { useLedgerData } from '../context/LedgerContext'
 import { buildLegacyAppData } from '../lib/legacyBridge'
-import { calculateScenarioImpact, calculateHouseholdScenarioImpact, mergeScenarios, resolveLoanAllocations, type ScenarioImpact } from '../lib/scenarios'
+import { calculateScenarioImpact, calculateHouseholdScenarioImpact, mergeScenarios, resolveTargets, type ScenarioImpact, type LoanImpact } from '../lib/scenarios'
 import { calculateNetSalary } from '../lib/tax'
 import { personalBillsTotal, jointContributionForPerson } from '../lib/bills'
 import { summarizeLoan, combineBillsWithLoans } from '../lib/loans'
@@ -12,7 +12,7 @@ import { totalMonthlySavingsForPerson } from '../lib/savings'
 import { calculateHouseholdFigures } from '../lib/household'
 import { calculateFinanceAgreement } from '../lib/finance'
 import { Plus, Trash2, ChevronDown, ChevronUp, Layers, Pencil } from 'lucide-react'
-import type { Scenario, ScenarioActionType, BillLocation } from '../types/models'
+import type { Scenario, ScenarioActionType, ScenarioTargetKind, BillLocation } from '../types/models'
 import type { RecurringTemplate, Loan } from '../types/ledger'
 import { BILLS_CATEGORY_ID } from '../types/ledger'
 import { SplitEditor } from '../components/SplitEditor'
@@ -20,11 +20,11 @@ import { nanoid } from 'nanoid'
 
 const ACTION_LABELS: Record<ScenarioActionType, string> = {
   sell_asset: 'Sell an asset',
-  pay_off_loan: 'Lump sum toward a loan',
+  pay_off_loan: 'Lump sum toward a loan/credit card',
   new_bill: 'New bill',
   new_finance_agreement: 'New finance agreement',
-  exclude_loan: "Exclude a loan (what if it just didn't count)",
-  loan_overpayment: 'Regular extra payment on a loan',
+  exclude_loan: "Exclude a loan/credit card (what if it just didn't count)",
+  loan_overpayment: 'Regular extra payment on a loan/credit card',
   salary_change: 'Salary change',
   savings_lump_sum: 'Lump sum toward a savings goal',
 }
@@ -42,7 +42,7 @@ const VALUE_LABELS: Partial<Record<ScenarioActionType, string>> = {
 }
 
 export function Scenarios() {
-  const { data: ledgerData, addScenario, updateScenario, removeScenario } = useLedgerData()
+  const { data: ledgerData, addScenario, updateScenario, removeScenario, logLoanOverpayment, logCreditCardLumpPayment, updateLoan } = useLedgerData()
   // Bridges live ledger data (people/loans/bills/credit cards) into the
   // shape this page's existing simulation engine expects — see
   // lib/legacyBridge.ts for why this is an adapter rather than a
@@ -69,6 +69,21 @@ export function Scenarios() {
   function getImpact(scenario: Scenario) {
     if (viewMode === 'household') return calculateHouseholdScenarioImpact(scenario, data, monthlyAvailableBefore)
     return me ? calculateScenarioImpact(scenario, data, me.id, monthlyAvailableBefore) : null
+  }
+
+  // "Convert to real" for a loan/credit-card impact — a lump sum becomes an
+  // actual logged payment today; a recurring overpayment becomes an actual
+  // ongoing commitment on the loan (credit cards have no field to persist
+  // an ongoing overpayment into, so this only ever applies when
+  // targetKind is 'loan' — the button itself is only shown in that case,
+  // see ImpactSummary below).
+  function makeImpactReal(li: LoanImpact) {
+    if (li.kind === 'payoff') {
+      if (li.targetKind === 'loan') logLoanOverpayment(li.loanId, li.lumpSumApplied, todayIso())
+      else logCreditCardLumpPayment(li.loanId, li.lumpSumApplied, todayIso())
+    } else if (li.kind === 'overpayment' && li.targetKind === 'loan') {
+      updateLoan(li.loanId, { recurringOverpayment: { startDate: todayIso(), amount: { type: 'fixed', amount: li.overpaymentPerMonth } } })
+    }
   }
 
   const includedScenarios = data.scenarios.filter((s) => s.includeInCumulative)
@@ -204,11 +219,12 @@ export function Scenarios() {
                       <span className="text-[var(--color-ink-muted)]">
                         {action.name || ACTION_LABELS[action.type]}
                         {(() => {
-                          const targets = resolveLoanAllocations(action)
+                          const targets = resolveTargets(action)
                           if (targets.length === 0) return null
                           const parts = targets.map((t) => {
-                            const loanName = data.loans.find((l) => l.id === t.loanId)?.name ?? 'loan'
-                            return t.amount != null ? `${loanName} (£${formatCurrency(t.amount)})` : loanName
+                            const name = t.kind === 'loan' ? data.loans.find((l) => l.id === t.id)?.name : data.creditCards.find((c) => c.id === t.id)?.name
+                            const label = name ?? (t.kind === 'loan' ? 'loan' : 'credit card')
+                            return t.amount != null ? `${label} (£${formatCurrency(t.amount)})` : label
                           })
                           return ` → ${parts.join(' → ')}`
                         })()}
@@ -230,7 +246,7 @@ export function Scenarios() {
 
                   <div className="h-px my-1" style={{ background: 'var(--color-track)' }} />
 
-                  <ImpactSummary impact={impact} viewerId={viewMode === 'personal' ? me?.id : undefined} />
+                  <ImpactSummary impact={impact} viewerId={viewMode === 'personal' ? me?.id : undefined} onMakeReal={makeImpactReal} />
                 </div>
               )}
             </div>
@@ -305,7 +321,7 @@ function ConvertButtons({ action, people }: { action: Scenario['actions'][number
   )
 }
 
-function ImpactSummary({ impact, viewerId }: { impact: ScenarioImpact; viewerId?: string }) {
+function ImpactSummary({ impact, viewerId, onMakeReal }: { impact: ScenarioImpact; viewerId?: string; onMakeReal?: (li: LoanImpact) => void }) {
   return (
     <div className="flex flex-col gap-3">
       {impact.savingsImpacts.map((si, i) => (
@@ -418,6 +434,9 @@ function ImpactSummary({ impact, viewerId }: { impact: ScenarioImpact; viewerId?
               </span>
             </div>
           )}
+          {onMakeReal && (li.kind === 'payoff' || (li.kind === 'overpayment' && li.targetKind === 'loan')) && (
+            <MakeRealButton impact={li} onMakeReal={onMakeReal} />
+          )}
         </div>
       ))}
 
@@ -457,6 +476,33 @@ function ImpactSummary({ impact, viewerId }: { impact: ScenarioImpact; viewerId?
   )
 }
 
+/** Turns a lump-sum or recurring-overpayment impact into an actual logged payment / actual ongoing recurring overpayment. One-shot per render — once pressed it shows a brief confirmation rather than staying clickable, since pressing it again would just log a duplicate payment. */
+function MakeRealButton({ impact, onMakeReal }: { impact: LoanImpact; onMakeReal: (li: LoanImpact) => void }) {
+  const [done, setDone] = useState(false)
+  const label = impact.kind === 'payoff' ? `Log £${formatCurrency(impact.lumpSumApplied)} as a real payment` : 'Make this a real recurring overpayment'
+
+  if (done) {
+    return (
+      <p className="text-xs mt-2" style={{ color: 'var(--color-positive)' }}>
+        {impact.kind === 'payoff' ? 'Logged.' : 'Added.'}
+      </p>
+    )
+  }
+
+  return (
+    <button
+      onClick={() => {
+        onMakeReal(impact)
+        setDone(true)
+      }}
+      className="text-xs font-medium mt-2"
+      style={{ color: 'var(--color-coral)' }}
+    >
+      {label}
+    </button>
+  )
+}
+
 function ScenarioForm({
   people,
   initial,
@@ -478,21 +524,29 @@ function ScenarioForm({
     return Math.round(n * 100) / 100
   }
 
+  // A target's current remaining balance, whichever kind it is — used to
+  // work out how much a lump sum actually needs without duplicating the
+  // loan-vs-card branch everywhere it's needed.
+  function remainingForTarget(target: { kind: ScenarioTargetKind; id: string }): number {
+    if (target.kind === 'loan') {
+      const loan = data.loans.find((l) => l.id === target.id)
+      return loan ? summarizeLoan(loan).remaining : 0
+    }
+    const card = data.creditCards.find((c) => c.id === target.id)
+    return card ? card.currentBalance : 0
+  }
+
   function addAction() {
-    // If the previous action was a loan payoff/sale, default the new one's
-    // value to whatever was left over after its target(s) were cleared —
-    // you can still adjust it manually. With a single action now able to
-    // cascade through several loans itself (see the loan picker below),
-    // this mostly matters for chaining a genuinely separate action.
+    // If the previous action was a loan/card payoff/sale, default the new
+    // one's value to whatever was left over after its target(s) were
+    // cleared — you can still adjust it manually. With a single action now
+    // able to cascade through several targets itself (see the picker
+    // below), this mostly matters for chaining a genuinely separate action.
     const prev = actions[actions.length - 1]
     let defaultValue = 0
     if (prev && (prev.type === 'sell_asset' || prev.type === 'pay_off_loan') && prev.value > 0) {
-      const targets = resolveLoanAllocations(prev)
-      const totalNeeded = targets.reduce((sum, t) => {
-        if (t.amount != null) return sum + t.amount // a manual override takes exactly that much, not the loan's full balance
-        const loan = data.loans.find((l) => l.id === t.loanId)
-        return sum + (loan ? summarizeLoan(loan).remaining : 0)
-      }, 0)
+      const targets = resolveTargets(prev)
+      const totalNeeded = targets.reduce((sum, t) => sum + (t.amount != null ? t.amount : remainingForTarget(t)), 0)
       if (targets.length > 0) defaultValue = Math.max(0, round2(prev.value - totalNeeded))
     }
     setActions((p) => [...p, { id: nanoid(6), type: 'sell_asset', label: '', value: defaultValue }])
@@ -511,12 +565,8 @@ function ScenarioForm({
       </label>
 
       {actions.map((action, i) => {
-        const currentTargets = resolveLoanAllocations(action)
-        const totalNeededForTargets = currentTargets.reduce((sum, t) => {
-          if (t.amount != null) return sum + t.amount
-          const loan = data.loans.find((l) => l.id === t.loanId)
-          return sum + (loan ? summarizeLoan(loan).remaining : 0)
-        }, 0)
+        const currentTargets = resolveTargets(action)
+        const totalNeededForTargets = currentTargets.reduce((sum, t) => sum + (t.amount != null ? t.amount : remainingForTarget(t)), 0)
         const showMultiLoanPicker = action.type === 'sell_asset' || action.type === 'pay_off_loan'
         const showSingleLoanPicker = action.type === 'exclude_loan' || action.type === 'loan_overpayment'
         const showFullPayoffHint = showMultiLoanPicker && currentTargets.length > 0
@@ -669,14 +719,26 @@ function ScenarioForm({
 
             {showSingleLoanPicker && (
               <select
-                value={action.linkedLoanId ?? ''}
-                onChange={(e) => updateAction({ linkedLoanId: e.target.value || undefined })}
+                value={currentTargets[0] ? `${currentTargets[0].kind}:${currentTargets[0].id}` : ''}
+                onChange={(e) => {
+                  if (!e.target.value) {
+                    updateAction({ linkedTargetKind: undefined, linkedTargetId: undefined, linkedLoanId: undefined })
+                    return
+                  }
+                  const [kind, id] = e.target.value.split(':') as [ScenarioTargetKind, string]
+                  updateAction({ linkedTargetKind: kind, linkedTargetId: id, linkedLoanId: undefined })
+                }}
                 className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
               >
-                <option value="">Choose a loan…</option>
+                <option value="">Choose a loan or credit card…</option>
                 {data.loans.map((l) => (
-                  <option key={l.id} value={l.id}>
+                  <option key={`loan:${l.id}`} value={`loan:${l.id}`}>
                     {l.name}
+                  </option>
+                ))}
+                {data.creditCards.map((c) => (
+                  <option key={`credit_card:${c.id}`} value={`credit_card:${c.id}`}>
+                    {c.name}
                   </option>
                 ))}
               </select>
@@ -687,27 +749,35 @@ function ScenarioForm({
                 {currentTargets.length > 0 && (
                   <div className="flex flex-col gap-1">
                     {currentTargets.map((target, idx) => {
-                      const loan = data.loans.find((l) => l.id === target.loanId)
-                      const autoAmount = Math.max(0, action.value - currentTargets.slice(0, idx).reduce((s, t) => s + (t.amount ?? (loan ? summarizeLoan(loan).remaining : 0)), 0))
-                      function updateTarget(patch: Partial<{ loanId: string; amount?: number }>) {
+                      const name =
+                        target.kind === 'loan' ? data.loans.find((l) => l.id === target.id)?.name : data.creditCards.find((c) => c.id === target.id)?.name
+                      const targetRemaining = remainingForTarget(target)
+                      const autoAmount = Math.max(0, action.value - currentTargets.slice(0, idx).reduce((s, t) => s + (t.amount ?? remainingForTarget(t)), 0))
+                      function updateTarget(patch: Partial<{ kind: ScenarioTargetKind; id: string; amount?: number }>) {
                         const next = currentTargets.map((t, tIdx) => (tIdx === idx ? { ...t, ...patch } : t))
-                        updateAction({ loanAllocations: next, linkedLoanId: undefined })
+                        updateAction({ targets: next, loanAllocations: undefined, linkedLoanId: undefined })
                       }
                       return (
-                        <div key={target.loanId} className="flex items-center gap-2 text-xs rounded-lg px-2 py-1.5" style={{ background: 'var(--color-track)' }}>
+                        <div key={`${target.kind}:${target.id}`} className="flex items-center gap-2 text-xs rounded-lg px-2 py-1.5" style={{ background: 'var(--color-track)' }}>
                           <span className="text-[var(--color-ink)] flex-1">
-                            {idx + 1}. {loan?.name ?? 'Unknown loan'}
+                            {idx + 1}. {name ?? (target.kind === 'loan' ? 'Unknown loan' : 'Unknown credit card')}
                           </span>
                           <input
                             type="number"
                             inputMode="decimal"
-                            placeholder={`auto (£${formatCurrency(Math.min(autoAmount, loan ? summarizeLoan(loan).remaining : 0))})`}
+                            placeholder={`auto (£${formatCurrency(Math.min(autoAmount, targetRemaining))})`}
                             value={target.amount ?? ''}
                             onChange={(e) => updateTarget({ amount: e.target.value === '' ? undefined : Number(e.target.value) })}
                             className="w-24 bg-transparent border-b border-[var(--color-ink-faint)] py-0.5 text-[var(--color-ink)] outline-none font-mono text-right"
                           />
                           <button
-                            onClick={() => updateAction({ loanAllocations: currentTargets.filter((t) => t.loanId !== target.loanId), linkedLoanId: undefined })}
+                            onClick={() =>
+                              updateAction({
+                                targets: currentTargets.filter((t) => !(t.kind === target.kind && t.id === target.id)),
+                                loanAllocations: undefined,
+                                linkedLoanId: undefined,
+                              })
+                            }
                             className="text-[var(--color-ink-faint)]"
                           >
                             <Trash2 size={12} />
@@ -721,18 +791,24 @@ function ScenarioForm({
                   value=""
                   onChange={(e) => {
                     if (!e.target.value) return
-                    updateAction({ loanAllocations: [...currentTargets, { loanId: e.target.value }], linkedLoanId: undefined })
+                    const [kind, id] = e.target.value.split(':') as [ScenarioTargetKind, string]
+                    updateAction({ targets: [...currentTargets, { kind, id }], loanAllocations: undefined, linkedLoanId: undefined })
                   }}
                   className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
                 >
-                  <option value="">
-                    {currentTargets.length === 0 ? 'No linked loan (optional)' : '+ Add another loan target…'}
-                  </option>
+                  <option value="">{currentTargets.length === 0 ? 'No linked loan/credit card (optional)' : '+ Add another target…'}</option>
                   {data.loans
-                    .filter((l) => !currentTargets.some((t) => t.loanId === l.id))
+                    .filter((l) => !currentTargets.some((t) => t.kind === 'loan' && t.id === l.id))
                     .map((l) => (
-                      <option key={l.id} value={l.id}>
+                      <option key={`loan:${l.id}`} value={`loan:${l.id}`}>
                         {l.name}
+                      </option>
+                    ))}
+                  {data.creditCards
+                    .filter((c) => !currentTargets.some((t) => t.kind === 'credit_card' && t.id === c.id))
+                    .map((c) => (
+                      <option key={`credit_card:${c.id}`} value={`credit_card:${c.id}`}>
+                        {c.name}
                       </option>
                     ))}
                 </select>
@@ -751,7 +827,7 @@ function ScenarioForm({
                 className="col-span-2 text-xs font-medium text-left mt-1"
                 style={{ color: 'var(--color-coral)' }}
               >
-                Use total needed to clear {currentTargets.length > 1 ? 'all listed loans' : "the loan's remaining balance"} (£
+                Use total needed to clear {currentTargets.length > 1 ? 'all listed targets' : "the target's remaining balance"} (£
                 {formatCurrency(totalNeededForTargets)})
               </button>
             )}

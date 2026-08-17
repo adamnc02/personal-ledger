@@ -43,9 +43,10 @@ export function applyMonthlyInterest(balance: number, interestRatePercent: numbe
 /**
  * The minimum payment for a GIVEN balance — the pure calculation shared
  * by both the "what's due right now" single-point query below and the
- * forward-simulating generator further down.
+ * forward-simulating generator further down (and, via simulateCardPayoffMonths,
+ * the What-if page's card payoff/overpayment simulation).
  */
-function minimumPaymentForBalance(minimumPayment: CreditCard['minimumPayment'], balance: number): number {
+export function minimumPaymentForBalance(minimumPayment: CreditCard['minimumPayment'], balance: number): number {
   if (balance <= 0) return 0
   if (minimumPayment.type === 'fixed') return round2(Math.min(minimumPayment.amount, balance))
   return round2((balance * minimumPayment.percent) / 100)
@@ -222,6 +223,39 @@ export function recordCreditCardLumpPayment(
     note,
   }
   return { updatedCard, transaction, lumpPayment }
+}
+
+/**
+ * How many months until this card would be paid off making only the
+ * minimum payment plus an optional fixed extra amount every month — used
+ * by the What-if page to compare "as things stand" against a hypothetical
+ * lump sum or recurring overpayment, the credit-card equivalent of a
+ * loan's buildLoanSchedule/summarizeLoan. Genuinely simulates month by
+ * month (interest compounds, and a percent-of-balance minimum shrinks as
+ * the balance does) rather than a closed-form estimate — same reasoning
+ * as generateMinimumPaymentTransactions above. Capped at 600 months (50
+ * years) as a safety net against a balance that never reaches zero (e.g.
+ * a fixed minimum smaller than the interest accruing against it).
+ */
+export function simulateCardPayoffMonths(card: CreditCard, extraPerMonth = 0, maxMonths = 600): { months: number; totalInterestPaid: number } {
+  let balance = card.currentBalance
+  let totalInterestPaid = 0
+  let months = 0
+
+  while (balance > 0 && months < maxMonths) {
+    const balanceAfterInterest = applyMonthlyInterest(balance, card.interestRatePercent)
+    totalInterestPaid = round2(totalInterestPaid + round2(balanceAfterInterest - balance))
+    const payment = Math.min(balanceAfterInterest, round2(minimumPaymentForBalance(card.minimumPayment, balanceAfterInterest) + extraPerMonth))
+    // A payment of £0 (e.g. minimum payment rounds to nothing on a tiny
+    // balance, and there's no extra) would loop forever — bail out rather
+    // than spin to maxMonths for a balance that's genuinely never going to
+    // clear under these terms.
+    if (payment <= 0) break
+    balance = round2(Math.max(0, balanceAfterInterest - payment))
+    months++
+  }
+
+  return { months, totalInterestPaid }
 }
 
 /** Round-robins through CREDIT_CARD_COLORS by however many cards already exist — same auto-assignment idea as pickColorForIndex in categories.ts, but on the separate palette described in types/ledger.ts. */

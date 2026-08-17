@@ -72,6 +72,7 @@ export function migrateAppData(data: AppData): AppData {
       payee: l.payee ?? fallbackPersonId,
       payeeSharePercent: typeof l.payeeSharePercent === 'number' ? l.payeeSharePercent : 50,
     })),
+    creditCards: data.creditCards ?? [],
     scenarios: (data.scenarios ?? []).map((s) => ({
       ...s,
       includeInCumulative: s.includeInCumulative ?? true,
@@ -108,6 +109,7 @@ export function defaultAppData(): AppData {
     ],
     bills: [],
     loans: [],
+    creditCards: [],
     scenarios: [],
   }
 }

@@ -1,4 +1,5 @@
 import type { PayFrequency, SalaryDeduction, StudentLoanPlan } from '../lib/tax'
+import type { CreditCard } from './ledger'
 
 export interface SavingsEntry {
   id: string
@@ -74,13 +75,20 @@ export interface LoanPayment {
 
 export type ScenarioActionType =
   | 'sell_asset'
-  | 'pay_off_loan' // one-off lump sum toward a loan
+  | 'pay_off_loan' // one-off lump sum toward a loan or credit card
   | 'new_bill' // a new (or changed) simple recurring monthly cost, not linked to a loan
   | 'new_finance_agreement' // a new loan-like recurring cost, computed from amount/APR/term
-  | 'exclude_loan' // simulate as if a loan's monthly cost didn't count at all
-  | 'loan_overpayment' // a recurring extra amount on top of a loan's normal payment
+  | 'exclude_loan' // simulate as if a loan or credit card's monthly cost didn't count at all
+  | 'loan_overpayment' // a recurring extra amount on top of a loan or credit card's normal payment
   | 'salary_change' // hypothetical new gross annual salary, for a chosen person
   | 'savings_lump_sum' // one-off lump sum toward a savings goal
+
+// What kind of real thing a scenario action's target points at — a loan or
+// a credit card. Both are valid targets for pay_off_loan/exclude_loan/
+// loan_overpayment; kept as a named union rather than a boolean since a
+// third kind is more likely to show up over time than a flip to boolean
+// ever being reversed.
+export type ScenarioTargetKind = 'loan' | 'credit_card'
 
 export interface Scenario {
   id: string
@@ -92,8 +100,19 @@ export interface Scenario {
     type: ScenarioActionType
     label: string
     value: number // sale proceeds, purchase cost, extra/overpayment amount, new gross salary, or the computed monthly cost for new_bill/new_finance_agreement
-    linkedLoanId?: string // single-loan target for exclude_loan/loan_overpayment, or legacy sell_asset/pay_off_loan data
-    loanAllocations?: { loanId: string; amount?: number }[] // ordered multi-loan target for sell_asset/pay_off_loan. Cascades in order, clearing each as far as possible; `amount` omitted means "auto — take whatever's left in the pool", set means "exactly this much, no more"
+    // Single-target actions (exclude_loan, loan_overpayment): which loan or
+    // credit card this action points at.
+    linkedTargetKind?: ScenarioTargetKind
+    linkedTargetId?: string
+    /** @deprecated Superseded by linkedTargetKind/linkedTargetId — kept only so scenarios saved before credit-card targets existed keep working. Always loan-kind when present. */
+    linkedLoanId?: string
+    // Multi-target actions (sell_asset, pay_off_loan): an ordered, mixed
+    // loan/credit-card cascade. Clears each target as far as possible in
+    // order; `amount` omitted means "auto — take whatever's left in the
+    // pool", set means "exactly this much, no more".
+    targets?: { kind: ScenarioTargetKind; id: string; amount?: number }[]
+    /** @deprecated Superseded by `targets` — kept only so scenarios saved before credit-card targets existed keep working. Always loan-kind when present. */
+    loanAllocations?: { loanId: string; amount?: number }[]
     personId?: string // for 'salary_change' and 'savings_lump_sum' — whose salary/goal this applies to (defaults to the viewer)
     savingsEntryId?: string // for 'savings_lump_sum' — which of that person's savings goals it targets
     // Used by 'new_bill' and 'new_finance_agreement' — where the new cost sits and how it's split
@@ -115,6 +134,13 @@ export interface AppData {
   people: Person[]
   bills: Bill[]
   loans: Loan[]
+  // Real CreditCard entities so scenario actions can target one directly —
+  // NOT the same as the minimum-payment-folded-into-bills adaptation
+  // legacyBridge also does for baseline monthly totals; that's a separate,
+  // unrelated use of the same underlying ledger data. Only active cards are
+  // exposed here (see legacyBridge.ts), same filtering convention as the
+  // bills-folding step.
+  creditCards: CreditCard[]
   scenarios: Scenario[]
   // which person's "personal" view is currently active (the app's owner/user)
   primaryPersonId: string

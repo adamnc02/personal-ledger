@@ -50,6 +50,11 @@ export function Loans() {
   const navigate = useNavigate()
   const loanPrefill = (routerLocation.state as { loanPrefill?: LoanPrefill } | null)?.loanPrefill
 
+  // Loans only offer a Personal/Joint choice once there's actually a joint
+  // bill to make that split meaningful — see LoanEditPanel/LoanForm's
+  // "hasJointBills" prop for the full reasoning.
+  const hasJointBills = data.recurringTemplates.some((t) => t.location === 'joint')
+
   useEffect(() => {
     if (loanPrefill) setAddingLoan(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -73,6 +78,7 @@ export function Loans() {
             categories={visibleCategoriesFor(data)}
             defaultOwnerId={data.primaryPersonId}
             initial={loanPrefill}
+            hasJointBills={hasJointBills}
             onAddCategory={addCategory}
             onCancel={() => {
               setAddingLoan(false)
@@ -119,6 +125,7 @@ export function Loans() {
                       loan={loan}
                       categories={visibleCategoriesFor(data, loan.categoryId)}
                       people={data.people}
+                      hasJointBills={hasJointBills}
                       onAddCategory={addCategory}
                       onSave={(u) => updateLoan(loan.id, u)}
                       onLogOverpayment={(amount, date, note) => logLoanOverpayment(loan.id, amount, date, note)}
@@ -225,6 +232,7 @@ function LoanEditPanel({
   loan,
   categories,
   people,
+  hasJointBills,
   onAddCategory,
   onSave,
   onLogOverpayment,
@@ -232,12 +240,14 @@ function LoanEditPanel({
   loan: Loan
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   people: { id: string; name: string }[]
+  hasJointBills: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
   onLogOverpayment: (amount: number, date: string, note?: string) => void
 }) {
   const [draft, setDraft] = useState<LoanDraft>(() => draftFromLoan(loan))
   const [savedMessage, setSavedMessage] = useState<string | null>(null)
+  const [loggingOverpayment, setLoggingOverpayment] = useState(false)
 
   function update(patch: Partial<LoanDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
@@ -262,14 +272,16 @@ function LoanEditPanel({
 
       <CategoryPicker categories={categories} value={draft.categoryId} onChange={(categoryId) => update({ categoryId })} onAddCategory={onAddCategory} />
 
-      <LocationEditor
-        people={people}
-        location={draft.location}
-        ownerId={draft.ownerId}
-        payee={draft.payee}
-        payeeSharePercent={draft.payeeSharePercent}
-        onChange={update}
-      />
+      {(hasJointBills || draft.location === 'joint') && (
+        <LocationEditor
+          people={people}
+          location={draft.location}
+          ownerId={draft.ownerId}
+          payee={draft.payee}
+          payeeSharePercent={draft.payeeSharePercent}
+          onChange={update}
+        />
+      )}
 
       {loan.overpayments.length > 0 && (
         <div className="text-xs text-[var(--color-ink-muted)]">
@@ -277,7 +289,18 @@ function LoanEditPanel({
           {formatCurrency(loan.overpayments.reduce((sum, o) => sum + o.amount, 0))}
         </div>
       )}
-      <OverpaymentForm onLog={onLogOverpayment} />
+      {!loggingOverpayment ? (
+        <button onClick={() => setLoggingOverpayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+          + Log an overpayment
+        </button>
+      ) : (
+        <OverpaymentForm
+          onLog={(amount, date, note) => {
+            onLogOverpayment(amount, date, note)
+            setLoggingOverpayment(false)
+          }}
+        />
+      )}
 
       <RecurringOverpaymentEditor value={draft.recurringOverpayment} onChange={(recurringOverpayment) => update({ recurringOverpayment })} />
 
@@ -650,6 +673,7 @@ function LoanForm({
   categories,
   defaultOwnerId,
   initial,
+  hasJointBills,
   onAddCategory,
   onSave,
   onCancel,
@@ -658,6 +682,7 @@ function LoanForm({
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   defaultOwnerId: string
   initial?: LoanPrefill
+  hasJointBills: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (loan: Omit<Loan, 'id' | 'overpayments'>) => void
   onCancel: () => void
@@ -683,19 +708,21 @@ function LoanForm({
       </div>
       <EditField label="Start date" type="date" value={startDate} onChange={setStartDate} />
       <CategoryPicker categories={categories} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
-      <LocationEditor
-        people={people}
-        location={location}
-        ownerId={ownerId}
-        payee={payee}
-        payeeSharePercent={payeeSharePercent}
-        onChange={(patch) => {
-          setLocation(patch.location)
-          if (patch.ownerId) setOwnerId(patch.ownerId)
-          if (patch.payee) setPayee(patch.payee)
-          if (patch.payeeSharePercent !== undefined) setPayeeSharePercent(patch.payeeSharePercent)
-        }}
-      />
+      {(hasJointBills || location === 'joint') && (
+        <LocationEditor
+          people={people}
+          location={location}
+          ownerId={ownerId}
+          payee={payee}
+          payeeSharePercent={payeeSharePercent}
+          onChange={(patch) => {
+            setLocation(patch.location)
+            if (patch.ownerId) setOwnerId(patch.ownerId)
+            if (patch.payee) setPayee(patch.payee)
+            if (patch.payeeSharePercent !== undefined) setPayeeSharePercent(patch.payeeSharePercent)
+          }}
+        />
+      )}
       <div className="flex gap-2 justify-end">
         <button onClick={onCancel} className="px-3 py-1.5 rounded-lg text-sm text-[var(--color-ink-muted)]">
           Cancel

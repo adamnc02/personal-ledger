@@ -133,6 +133,11 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
     people,
     bills,
     loans,
+    // Real CreditCard entities, unchanged from the ledger shape — this is
+    // separate from the minimum-payment-folded-into-bills loop above
+    // (which only feeds baseline monthly totals). Only active cards are
+    // exposed as scenario targets, same filter as that loop.
+    creditCards: ledgerData.creditCards.filter((c) => c.active),
     scenarios: ledgerData.scenarios,
     primaryPersonId: ledgerData.primaryPersonId,
   }
