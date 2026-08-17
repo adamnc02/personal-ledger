@@ -679,7 +679,8 @@ function PayPeriodRow({
       <button onClick={onToggle} className="w-full flex items-center justify-between px-3 py-2.5 text-left">
         <span className="text-sm text-[var(--color-ink)]">
           {dateIso}
-          {existingOverride && <span className="text-xs text-[var(--color-coral)]"> · Adjusted</span>}
+          {existingOverride?.bonusGrossAmount && <span className="text-xs text-[var(--color-coral)]"> · Bonus attached</span>}
+          {existingOverride && !existingOverride.bonusGrossAmount && <span className="text-xs text-[var(--color-coral)]"> · Adjusted</span>}
         </span>
         <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(netPay ?? 0)}</span>
       </button>
@@ -688,6 +689,7 @@ function PayPeriodRow({
           person={person}
           dateIso={dateIso}
           isClosed={isClosed}
+          existingOverride={existingOverride}
           onSaveJustThis={onSaveJustThis}
           onSaveAllFuture={onSaveAllFuture}
           editingDeduction={editingDeduction}
@@ -707,6 +709,7 @@ function PeriodEditor({
   person,
   dateIso,
   isClosed,
+  existingOverride,
   onSaveJustThis,
   onSaveAllFuture,
   editingDeduction,
@@ -715,6 +718,7 @@ function PeriodEditor({
   person: Person
   dateIso: string
   isClosed: boolean
+  existingOverride?: Person['salaryOverrides'][number]
   onSaveJustThis: (fields: SalaryDraftFields) => void
   onSaveAllFuture: (fields: SalaryDraftFields) => void
   editingDeduction: { personId: string; deductionId: string } | null
@@ -908,8 +912,10 @@ function PeriodEditor({
         )}
       </div>
 
+      <NetPayOverrideControl personId={person.id} dateIso={dateIso} snapshotNetPay={breakdown.netPerPeriod} existingOverride={existingOverride} />
+
       <div className="flex justify-end">
-        <AttachBonusButton personId={person.id} fixedDate={dateIso} />
+        <AttachBonusButton personId={person.id} fixedDate={dateIso} existingOverride={existingOverride} />
       </div>
 
       <button
@@ -944,6 +950,103 @@ function PeriodEditor({
   )
 }
 
+/**
+ * A direct, quick net-pay override for exactly one pay period — the "one-off"
+ * path from SalaryOverride's design comment in types/ledger.ts, distinct
+ * from editing gross salary/deductions above (which represents a change to
+ * the standing snapshot and offers "just this / all future"). Typing a
+ * number here and hitting Set ALWAYS affects only this one period; there's
+ * no scope choice because there's nothing to choose between.
+ *
+ * Hidden when this period's override is actually a bonus attachment
+ * (existingOverride.bonusGrossAmount set) — that number is edited via the
+ * Bonus control instead, so there's only ever one place a given override's
+ * figure gets changed from.
+ */
+function NetPayOverrideControl({
+  personId,
+  dateIso,
+  snapshotNetPay,
+  existingOverride,
+}: {
+  personId: string
+  dateIso: string
+  snapshotNetPay: number
+  existingOverride?: Person['salaryOverrides'][number]
+}) {
+  const { addSalaryOverride, updateSalaryOverride, removeSalaryOverride } = useLedgerData()
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState('')
+
+  if (existingOverride?.bonusGrossAmount) {
+    return <p className="text-xs text-[var(--color-ink-faint)]">Net pay for this period is adjusted by an attached bonus — edit or remove it below.</p>
+  }
+
+  if (!editing) {
+    return (
+      <div className="flex items-center justify-between gap-2">
+        {existingOverride ? (
+          <span className="text-xs text-[var(--color-ink-muted)]">
+            Net pay manually overridden to £{formatCurrency(existingOverride.netPayOverride)} for this period only.
+          </span>
+        ) : (
+          <span className="text-xs text-[var(--color-ink-faint)]">Net pay for this period will be £{formatCurrency(snapshotNetPay)}.</span>
+        )}
+        <div className="flex items-center gap-3 shrink-0">
+          {existingOverride && (
+            <button onClick={() => removeSalaryOverride(personId, existingOverride.id)} className="text-xs font-medium" style={{ color: 'var(--color-negative)' }}>
+              Remove
+            </button>
+          )}
+          <button
+            onClick={() => {
+              setValue(String(existingOverride?.netPayOverride ?? snapshotNetPay))
+              setEditing(true)
+            }}
+            className="text-xs font-medium"
+            style={{ color: 'var(--color-coral)' }}
+          >
+            {existingOverride ? 'Edit override' : 'Override net pay'}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const numeric = Number(value)
+  const canSave = value.trim() !== '' && !Number.isNaN(numeric) && numeric >= 0
+
+  function save() {
+    if (!canSave) return
+    const reason = 'Net pay manually overridden (this payment only)'
+    if (existingOverride) updateSalaryOverride(personId, existingOverride.id, { netPayOverride: numeric, reason, bonusGrossAmount: undefined })
+    else addSalaryOverride(personId, { payPeriodDate: dateIso, netPayOverride: numeric, reason })
+    setEditing(false)
+  }
+
+  return (
+    <div className="flex items-end gap-2">
+      <label className="flex-1 flex flex-col gap-1">
+        <span className="text-xs text-[var(--color-ink-muted)]">Override net pay for this period only (£)</span>
+        <input
+          type="number"
+          inputMode="decimal"
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+        />
+      </label>
+      <button onClick={save} disabled={!canSave} className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40" style={{ background: 'var(--color-coral)' }}>
+        Set
+      </button>
+      <button onClick={() => setEditing(false)} className="text-xs text-[var(--color-ink-muted)] py-1.5">
+        Cancel
+      </button>
+    </div>
+  )
+}
+
 function ConfirmSalaryChangeModal({
   nextPaydayLabel,
   onCancel,
@@ -955,9 +1058,23 @@ function ConfirmSalaryChangeModal({
   onJustNext: () => void
   onAllFuture: () => void
 }) {
-  return (
+  // Portalled to document.body (not rendered inline in the page tree) —
+  // otherwise it sits inside #app-shell, which is a fixed-height,
+  // overflow-hidden container the nav bar is absolutely positioned
+  // within. On iOS that combination clips/misorders a "position: fixed"
+  // descendant against the nav's own stacking context, so despite a
+  // higher z-index the confirm buttons rendered underneath the nav bar
+  // (see the rest of the app's modals — DeductionModal, IconPickerModal,
+  // etc. — which all portal for exactly this reason). Bottom padding
+  // matches those same modals so the buttons clear the nav bar itself,
+  // not just the safe-area inset.
+  return createPortal(
     <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onCancel}>
-      <div className="w-full max-w-md rounded-t-3xl p-5" style={{ background: 'var(--color-surface)' }} onClick={(e) => e.stopPropagation()}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
         <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-1">Apply this change to…</h3>
         <p className="text-sm text-[var(--color-ink-muted)] mb-4">
           {nextPaydayLabel ? `Just this payment (${nextPaydayLabel}), or every payment from then on?` : 'Just this payment, or every payment from then on?'}
@@ -974,7 +1091,8 @@ function ConfirmSalaryChangeModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -1110,6 +1228,15 @@ function SavingsEntryEditForm({ entry, onSave }: { entry: SavingsEntry; onSave: 
     const { id: _id, ...rest } = entry
     return rest
   })
+  // Held separately from `draft.pausedFrom` — committing straight to draft
+  // from the date input's onChange meant the moment iOS's native picker
+  // opened and defaulted its wheel to today, THAT counted as a change
+  // (fired even on a bare tap-to-dismiss, before any deliberate scroll),
+  // which flipped this whole block over to the "Paused from" view and
+  // yanked the input out from under the person mid-tap. Keeping the pick
+  // here until an explicit "Set" tap means opening/dismissing the picker
+  // no longer silently pauses anything.
+  const [pauseDatePick, setPauseDatePick] = useState('')
 
   function update(patch: Partial<Omit<SavingsEntry, 'id'>>) {
     setDraft((d) => ({ ...d, ...patch }))
@@ -1181,17 +1308,30 @@ function SavingsEntryEditForm({ entry, onSave }: { entry: SavingsEntry; onSave: 
             </button>
           </div>
         ) : (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button onClick={() => update({ pausedFrom: todayIso() })} className="text-xs font-medium" style={{ color: 'var(--color-negative)' }}>
               Pause now
             </button>
             <span className="text-xs text-[var(--color-ink-faint)]">or</span>
             <input
               type="date"
-              onChange={(e) => e.target.value && update({ pausedFrom: e.target.value })}
+              value={pauseDatePick}
+              onChange={(e) => setPauseDatePick(e.target.value)}
               className="bg-transparent border-b border-[var(--color-track)] py-0.5 text-xs text-[var(--color-ink-muted)] outline-none"
             />
             <span className="text-xs text-[var(--color-ink-faint)]">pause from a date</span>
+            {pauseDatePick && (
+              <button
+                onClick={() => {
+                  update({ pausedFrom: pauseDatePick })
+                  setPauseDatePick('')
+                }}
+                className="text-xs font-semibold px-2 py-0.5 rounded-full text-white"
+                style={{ background: 'var(--color-coral)' }}
+              >
+                Set
+              </button>
+            )}
           </div>
         )}
       </div>

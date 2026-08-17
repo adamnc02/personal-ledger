@@ -3,7 +3,7 @@ import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
-import { computeProjection, type ProjectionHorizon } from '../lib/projection'
+import { computeProjection, type ProjectionHorizon, type ProjectionResult } from '../lib/projection'
 import { summarizeLoan } from '../lib/ledgerLoans'
 import { computeJointSummary } from '../lib/jointLedger'
 import { computeMinimumPaymentAmount, totalPaidForCard } from '../lib/creditCards'
@@ -13,6 +13,8 @@ import { SwipeCards } from '../components/SwipeCards'
 import { BankCard } from '../components/BankCard'
 import { ProgressRing } from '../components/ProgressRing'
 import { CategoryIcon } from '../components/CategoryIcon'
+import { SAVINGS_CATEGORY_ID, CREDIT_CARD_CATEGORY_ID } from '../types/ledger'
+import { seededCategoryIdForIcon } from '../lib/categories'
 import type { AppDataV2, CreditCard, Transaction } from '../types/ledger'
 
 // ── Deck construction — doc addendum on Summary card visibility ────────
@@ -40,6 +42,38 @@ function buildDeck(data: AppDataV2): DeckEntry[] {
 const HORIZON_LABELS: Record<ProjectionHorizon, string> = { current_cycle: 'This cycle', three_cycles: 'Next 3 cycles' }
 type Grouping = 'list' | 'category'
 type Order = 'date' | 'amount'
+
+// The seeded "Loan" category (see lib/categories.ts's DEFAULT_LOAN_CATEGORY_ID
+// equivalent in Loans.tsx) doubles as the fixed group header for every
+// loan_payment transaction in the "group by category" view below — a
+// stable id to fold into, not the category any individual loan actually
+// carries (that stays freely assignable and still shows on each row).
+const LOANS_GROUP_CATEGORY_ID = seededCategoryIdForIcon('loan')
+
+/**
+ * The category a transaction's amount counts toward in the "group by
+ * category" summary view — distinct from `t.categoryId`, which is the
+ * transaction's own real, freely-assignable category and is what still
+ * shows on its individual row (via TransactionRow, unaffected by this).
+ * Loan payments and everything credit-card-related always fold into
+ * their own fixed bucket regardless of what category the underlying
+ * loan/card/bill is actually tagged with — so "how much went to loans"
+ * or "how much went on the card" stays answerable in one place, while
+ * each loan/card/bill is still free to carry its own category for its
+ * own icon everywhere else. Savings intentionally isn't handled here:
+ * savings_contribution transactions already always carry
+ * SAVINGS_CATEGORY_ID directly (no separate real category to preserve),
+ * so grouping by `categoryId` already does the right thing for them.
+ */
+function groupingCategoryId(t: Transaction): string {
+  if (t.type === 'loan_payment') return LOANS_GROUP_CATEGORY_ID
+  if (t.type === 'credit_card_payment' || t.type === 'credit_card_spend') return CREDIT_CARD_CATEGORY_ID
+  // Anything else paid by card — a bill on a "Card" payment method, an
+  // ad-hoc expense, etc. — folds into the same Credit Card bucket even
+  // though it isn't tied to a specific CreditCard entity at all.
+  if (t.paymentMethod === 'card') return CREDIT_CARD_CATEGORY_ID
+  return t.categoryId
+}
 
 /**
  * Sum of pending OUTGOING items only — loans, bills, future ad-hoc
@@ -430,9 +464,10 @@ function AmountOrderedList({ transactions, data }: { transactions: Transaction[]
 function CategoryGroupedList({ transactions, data }: { transactions: Transaction[]; data: AppDataV2 }) {
   const groups = new Map<string, Transaction[]>()
   for (const t of transactions) {
-    const list = groups.get(t.categoryId) ?? []
+    const key = groupingCategoryId(t)
+    const list = groups.get(key) ?? []
     list.push(t)
-    groups.set(t.categoryId, list)
+    groups.set(key, list)
   }
   const sortedGroups = Array.from(groups.entries()).sort((a, b) => {
     const totalA = a[1].reduce((s, t) => s + t.amount, 0)
@@ -442,14 +477,20 @@ function CategoryGroupedList({ transactions, data }: { transactions: Transaction
 
   return (
     <div className="flex flex-col gap-3">
-      {sortedGroups.map(([categoryId, items]) => {
-        const category = data.categories.find((c) => c.id === categoryId)
+      {sortedGroups.map(([groupKey, items]) => {
+        const category = data.categories.find((c) => c.id === groupKey)
+        // The Loans/Credit Card buckets fall back to their own name even
+        // if the underlying category record has been renamed away from
+        // it, or (for the Loans bucket, which is an ordinary deletable
+        // seeded category rather than a protected built-in) deleted
+        // outright — the bucket itself is still meaningful either way.
+        const fallbackName = groupKey === LOANS_GROUP_CATEGORY_ID ? 'Loans' : groupKey === CREDIT_CARD_CATEGORY_ID ? 'Credit Card' : 'Uncategorised'
         const total = items.reduce((s, t) => s + (t.direction === 'in' ? t.amount : -t.amount), 0)
         return (
-          <div key={categoryId}>
+          <div key={groupKey}>
             <div className="flex items-center gap-2 mb-1">
               <CategoryIcon category={category} size={13} />
-              <span className="text-xs font-semibold text-[var(--color-ink)] flex-1">{category?.name ?? 'Uncategorised'}</span>
+              <span className="text-xs font-semibold text-[var(--color-ink)] flex-1">{category?.name ?? fallbackName}</span>
               <span className="text-xs font-mono" style={{ color: total >= 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
                 {total >= 0 ? '+' : '-'}£{formatCurrency(Math.abs(total))}
               </span>
@@ -500,16 +541,25 @@ function PersonalDetail({
         <DateOrderedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.clearedBalance} showCleared={showCleared} onToggleCleared={() => setShowCleared(!showCleared)} />
       )}
 
-      <ProgressRingsSection data={data} />
+      <ProgressRingsSection data={data} horizon={horizon} projection={projection} />
     </div>
   )
 }
 
-function ProgressRingsSection({ data }: { data: AppDataV2 }) {
+function ProgressRingsSection({ data, horizon, projection }: { data: AppDataV2; horizon: ProjectionHorizon; projection: ProjectionResult }) {
   const person = data.people.find((p) => p.id === data.primaryPersonId)
   const loans = data.loans.filter((l) => l.location === 'personal' && l.ownerId === data.primaryPersonId)
   const goals = (person?.savingsEntries ?? []).filter((e) => e.type === 'goal' && e.includeInSummary)
   if (loans.length === 0 && goals.length === 0) return null
+
+  // Only the "Next 3 cycles" view shows a projected segment at all — "This
+  // cycle" stays exactly the plain paid-so-far/saved-so-far ring it always
+  // was. `projection` is already the projection for whichever horizon is
+  // currently selected (computed once by the parent), so its horizonEnd
+  // is the right future point to project against without recomputing
+  // anything here.
+  const showProjection = horizon === 'three_cycles'
+  const horizonEndDate = new Date(projection.horizonEnd)
 
   // Aggregate across every loan's own summary, not an average of their
   // individual percentages — same convention as the credit cards' combined
@@ -521,6 +571,19 @@ function ProgressRingsSection({ data }: { data: AppDataV2 }) {
   const totalLoansPaid = totalLoansPayable - totalLoansRemaining
   const totalLoansPercentRepaid = totalLoansPayable > 0 ? Math.min(100, (totalLoansPaid / totalLoansPayable) * 100) : 0
 
+  // Projected remaining balance as of the horizon's end date — reusing
+  // summarizeLoan with a future asOfDate rather than re-deriving anything
+  // from the projection's generated transactions: buildLoanSchedule
+  // already bakes in every scheduled payment, one-off overpayment, AND
+  // standing recurring overpayment between now and then, regardless of
+  // "today", so this is exactly "where the loan will genuinely be."
+  const projectedLoanSummaries = showProjection ? loans.map((loan) => summarizeLoan(loan, horizonEndDate)) : null
+  const totalLoansProjectedRemaining = projectedLoanSummaries?.reduce((sum, s) => sum + s.remainingBalance, 0) ?? totalLoansRemaining
+  const totalLoansProjectedPaid = totalLoansPayable - totalLoansProjectedRemaining
+  const totalLoansProjectedPercent = totalLoansPayable > 0 ? Math.min(100, (totalLoansProjectedPaid / totalLoansPayable) * 100) : 0
+
+  const savingsCategory = data.categories.find((c) => c.id === SAVINGS_CATEGORY_ID)
+
   return (
     <div className="mt-5 pt-5 border-t flex flex-col gap-5" style={{ borderColor: 'var(--color-track)' }}>
       {loans.length > 0 && (
@@ -530,10 +593,29 @@ function ProgressRingsSection({ data }: { data: AppDataV2 }) {
             {loans.map((loan, i) => {
               const summary = loanSummaries[i]
               const percentRepaid = summary.totalPayable > 0 ? Math.min(100, ((summary.totalPayable - summary.remainingBalance) / summary.totalPayable) * 100) : 0
+              const projectedSummary = projectedLoanSummaries?.[i]
+              const projectedPercent =
+                projectedSummary && summary.totalPayable > 0
+                  ? Math.min(100, ((summary.totalPayable - projectedSummary.remainingBalance) / summary.totalPayable) * 100)
+                  : undefined
+              const category = data.categories.find((c) => c.id === loan.categoryId)
               return (
                 <div key={loan.id} className="flex flex-col items-center gap-1">
-                  <ProgressRing percent={percentRepaid} value={`£${formatCurrency(summary.remainingBalance)}`} label={loan.name} size={110} strokeWidth={10} />
+                  <ProgressRing
+                    percent={percentRepaid}
+                    projectedPercent={projectedPercent}
+                    value={`£${formatCurrency(summary.remainingBalance)}`}
+                    label={loan.name}
+                    size={110}
+                    strokeWidth={10}
+                    icon={<CategoryIcon category={category} size={22} />}
+                  />
                   <p className="text-[11px] text-[var(--color-ink-faint)]">of £{formatCurrency(summary.totalPayable)}</p>
+                  {showProjection && projectedSummary && (
+                    <p className="text-[11px]" style={{ color: 'var(--color-coral)' }}>
+                      projected £{formatCurrency(projectedSummary.remainingBalance)} left by {HORIZON_LABELS[horizon].toLowerCase()}
+                    </p>
+                  )}
                 </div>
               )
             })}
@@ -545,14 +627,21 @@ function ProgressRingsSection({ data }: { data: AppDataV2 }) {
               >
                 <ProgressRing
                   percent={totalLoansPercentRepaid}
+                  projectedPercent={showProjection ? totalLoansProjectedPercent : undefined}
                   value={`£${formatCurrency(totalLoansRemaining)}`}
                   label="Total Loans"
                   size={160}
                   strokeWidth={14}
+                  icon={<Layers size={28} strokeWidth={1.75} />}
                 />
                 <p className="text-[11px] text-[var(--color-ink-faint)]">
                   £{formatCurrency(totalLoansPaid)} paid, of £{formatCurrency(totalLoansPayable)}
                 </p>
+                {showProjection && (
+                  <p className="text-[11px]" style={{ color: 'var(--color-coral)' }}>
+                    projected £{formatCurrency(totalLoansProjectedRemaining)} left by {HORIZON_LABELS[horizon].toLowerCase()}
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -567,10 +656,35 @@ function ProgressRingsSection({ data }: { data: AppDataV2 }) {
               const target = goal.targetAmount ?? 0
               const current = goal.currentAmount ?? 0
               const percent = target > 0 ? Math.min(100, (current / target) * 100) : 0
+              // Cleared contributions already live in `current` (see
+              // clearTransaction.ts). Only STILL-PENDING contributions
+              // within the horizon add anything on top — otherwise a
+              // contribution that already cleared this cycle would count
+              // twice, once in `current` and once again here.
+              const projectedContribution = showProjection
+                ? projection.transactions
+                    .filter((t) => t.type === 'savings_contribution' && t.sourceId === goal.id && t.status === 'pending')
+                    .reduce((sum, t) => sum + t.amount, 0)
+                : 0
+              const projectedCurrent = current + projectedContribution
+              const projectedPercent = showProjection && target > 0 ? Math.min(100, (projectedCurrent / target) * 100) : undefined
               return (
                 <div key={goal.id} className="flex flex-col items-center gap-1">
-                  <ProgressRing percent={percent} value={`£${formatCurrency(current)}`} label={goal.name || 'Goal'} size={110} strokeWidth={10} />
+                  <ProgressRing
+                    percent={percent}
+                    projectedPercent={projectedPercent}
+                    value={`£${formatCurrency(current)}`}
+                    label={goal.name || 'Goal'}
+                    size={110}
+                    strokeWidth={10}
+                    icon={<CategoryIcon category={savingsCategory} size={22} />}
+                  />
                   <p className="text-[11px] text-[var(--color-ink-faint)]">of £{formatCurrency(target)}</p>
+                  {showProjection && projectedContribution > 0 && (
+                    <p className="text-[11px]" style={{ color: 'var(--color-coral)' }}>
+                      projected £{formatCurrency(projectedCurrent)} by {HORIZON_LABELS[horizon].toLowerCase()}
+                    </p>
+                  )}
                 </div>
               )
             })}
@@ -673,6 +787,11 @@ function CreditCardDetail({ card, data }: { card: CreditCard; data: AppDataV2 })
   const activity = data.transactions
     .filter((t) => t.creditCardId === card.id && (t.type === 'credit_card_spend' || t.type === 'credit_card_payment'))
     .sort((a, b) => b.date.localeCompare(a.date))
+  // The card's own colour overrides the category's colour for display
+  // (types/ledger.ts: "categoryId: for icon; colour below overrides the
+  // category's colour") — so the icon SHAPE comes from the category, but
+  // is tinted with the card's own colour, not the category's.
+  const category = data.categories.find((c) => c.id === card.categoryId)
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
@@ -681,7 +800,15 @@ function CreditCardDetail({ card, data }: { card: CreditCard; data: AppDataV2 })
       </h2>
 
       <div className="flex justify-center my-4">
-        <ProgressRing percent={percentPaid} value={`£${formatCurrency(card.currentBalance)}`} label="Outstanding" size={160} strokeWidth={14} color={card.color} />
+        <ProgressRing
+          percent={percentPaid}
+          value={`£${formatCurrency(card.currentBalance)}`}
+          label="Outstanding"
+          size={160}
+          strokeWidth={14}
+          color={card.color}
+          icon={<CategoryIcon category={category ? { ...category, iconColor: card.color } : undefined} size={26} />}
+        />
       </div>
       <p className="text-xs text-[var(--color-ink-muted)] text-center mb-4">£{formatCurrency(paid)} paid to date</p>
 
@@ -709,7 +836,14 @@ function CreditCardsCombinedDetail({ data }: { data: AppDataV2 }) {
       <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">All Credit Cards</h2>
 
       <div className="flex justify-center my-4">
-        <ProgressRing percent={percentPaid} value={`£${formatCurrency(totalOutstanding)}`} label="Total outstanding" size={160} strokeWidth={14} />
+        <ProgressRing
+          percent={percentPaid}
+          value={`£${formatCurrency(totalOutstanding)}`}
+          label="Total outstanding"
+          size={160}
+          strokeWidth={14}
+          icon={<Layers size={28} strokeWidth={1.75} />}
+        />
       </div>
       <p className="text-xs text-[var(--color-ink-muted)] text-center mb-4">
         £{formatCurrency(totalPaid)} paid to date, across {myCards.length} cards

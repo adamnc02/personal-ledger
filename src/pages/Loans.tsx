@@ -174,8 +174,10 @@ export function Loans() {
         {addingCard && (
           <CreditCardForm
             people={data.people}
+            categories={visibleCategoriesFor(data, CREDIT_CARD_CATEGORY_ID)}
             defaultOwnerId={data.primaryPersonId}
             nextColor={pickCreditCardColor(data.creditCards.length)}
+            onAddCategory={addCategory}
             onCancel={() => setAddingCard(false)}
             onSave={(card) => {
               addCreditCard(card)
@@ -197,6 +199,8 @@ export function Loans() {
                 onToggle={() => setExpandedCard(isOpen ? null : card.id)}
                 onRemove={() => removeCreditCard(card.id)}
                 people={data.people}
+                categories={visibleCategoriesFor(data, card.categoryId)}
+                onAddCategory={addCategory}
                 onSave={(u) => updateCreditCard(card.id, u)}
                 onUpdateLumpPayment={(lumpPaymentId, amount, date, note) => updateCreditCardLumpPayment(card.id, lumpPaymentId, amount, date, note)}
                 onRemoveLumpPayment={(lumpPaymentId) => removeCreditCardLumpPayment(card.id, lumpPaymentId)}
@@ -322,6 +326,8 @@ function CreditCardRow({
   onToggle,
   onRemove,
   people,
+  categories,
+  onAddCategory,
   onSave,
   onUpdateLumpPayment,
   onRemoveLumpPayment,
@@ -335,6 +341,8 @@ function CreditCardRow({
   onToggle: () => void
   onRemove: () => void
   people: { id: string; name: string }[]
+  categories: { id: string; name: string; icon: string; iconColor: string }[]
+  onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>>) => void
   onUpdateLumpPayment: (lumpPaymentId: string, amount: number, date: string, note?: string) => void
   onRemoveLumpPayment: (lumpPaymentId: string) => void
@@ -367,6 +375,8 @@ function CreditCardRow({
           <CreditCardEditPanel
             card={card}
             people={people}
+            categories={categories}
+            onAddCategory={onAddCategory}
             onSave={(u) => {
               onSave(u)
               onToggle()
@@ -517,6 +527,8 @@ function draftFromCard(card: CreditCard): CreditCardDraft {
 function CreditCardEditPanel({
   card,
   people,
+  categories,
+  onAddCategory,
   onSave,
   onUpdateLumpPayment,
   onRemoveLumpPayment,
@@ -526,6 +538,8 @@ function CreditCardEditPanel({
 }: {
   card: CreditCard
   people: { id: string; name: string }[]
+  categories: { id: string; name: string; icon: string; iconColor: string }[]
+  onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>>) => void
   onUpdateLumpPayment: (lumpPaymentId: string, amount: number, date: string, note?: string) => void
   onRemoveLumpPayment: (lumpPaymentId: string) => void
@@ -559,6 +573,14 @@ function CreditCardEditPanel({
       </div>
 
       <MinimumPaymentEditor value={draft.minimumPayment} onChange={(minimumPayment) => update({ minimumPayment })} />
+
+      {/* Freely reassignable, same as a loan's — this only changes the
+          card's own icon/colour identity everywhere it's shown (its row
+          here, the pie-chart centre on Home). Every credit-card
+          transaction still always folds into the fixed "Credit Card"
+          bucket in the Home page's "group by category" view regardless
+          of what's picked here — see groupingCategoryId in Home.tsx. */}
+      <CategoryPicker categories={categories} value={draft.categoryId} onChange={(categoryId) => update({ categoryId })} onAddCategory={onAddCategory} />
 
       {people.length > 1 && (
         <label className="flex flex-col gap-1">
@@ -964,22 +986,28 @@ function LoanForm({
 }
 
 // ── New credit card form ──
-// categoryId is always the reserved built-in Credit Card category (see
-// types/ledger.ts) — not user-chosen, since every card-related
-// transaction is forced onto it regardless anyway. Colour is
-// auto-assigned round-robin, same idea as Category auto-colour, from the
-// separate CREDIT_CARD_COLORS palette.
+// categoryId defaults to the built-in Credit Card category but is freely
+// user-chosen from here, same as a loan's — only changes the card's own
+// icon/colour identity, never which bucket its transactions fold into on
+// the Home page's "group by category" view (see groupingCategoryId in
+// Home.tsx, and the long comment on CREDIT_CARD_CATEGORY_ID in
+// types/ledger.ts). Colour is auto-assigned round-robin, same idea as
+// Category auto-colour, from the separate CREDIT_CARD_COLORS palette.
 
 function CreditCardForm({
   people,
+  categories,
   defaultOwnerId,
   nextColor,
+  onAddCategory,
   onSave,
   onCancel,
 }: {
   people: { id: string; name: string }[]
+  categories: { id: string; name: string; icon: string; iconColor: string }[]
   defaultOwnerId: string
   nextColor: string
+  onAddCategory: (name: string) => { id: string }
   onSave: (card: Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>) => void
   onCancel: () => void
 }) {
@@ -989,6 +1017,7 @@ function CreditCardForm({
   const [paymentDayOfMonth, setPaymentDayOfMonth] = useState('1')
   const [minimumPayment, setMinimumPayment] = useState<CreditCardMinimumPayment>({ type: 'percent_of_balance', percent: 5 })
   const [ownerId, setOwnerId] = useState(defaultOwnerId)
+  const [categoryId, setCategoryId] = useState(CREDIT_CARD_CATEGORY_ID)
 
   const canSave = name.trim() && Number(currentBalance) >= 0 && Number(paymentDayOfMonth) >= 1 && Number(paymentDayOfMonth) <= 31
 
@@ -1001,6 +1030,7 @@ function CreditCardForm({
       </div>
       <EditField label="Payment day of month" type="number" value={paymentDayOfMonth} onChange={setPaymentDayOfMonth} />
       <MinimumPaymentEditor value={minimumPayment} onChange={setMinimumPayment} />
+      <CategoryPicker categories={categories} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
       {people.length > 1 && (
         <label className="flex flex-col gap-1">
           <span className="text-xs text-[var(--color-ink-muted)]">Owner</span>
@@ -1026,7 +1056,7 @@ function CreditCardForm({
           onClick={() =>
             onSave({
               name: name.trim(),
-              categoryId: CREDIT_CARD_CATEGORY_ID,
+              categoryId,
               color: nextColor,
               interestRatePercent: Number(interestRatePercent) || 0,
               currentBalance: Number(currentBalance) || 0,

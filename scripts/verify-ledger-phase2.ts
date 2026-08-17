@@ -240,7 +240,11 @@ check('3 months generated in one call, no repayment', threeMonthsNoRepayment.len
 check('Month 1: 5% of £500', threeMonthsNoRepayment[0].amount, 25)
 check('Month 2: 5% of £475 (compounds down from month 1, NOT the same static £25 again)', threeMonthsNoRepayment[1].amount, 23.75)
 check('Month 3: 5% of £451.25 (continues compounding)', threeMonthsNoRepayment[2].amount, 22.56)
-check('The generated transaction carries the card\'s own name as its note (not just falling back to the Credit Card category)', threeMonthsNoRepayment[0].note, 'Amex')
+check(
+  'The generated transaction carries the card\'s own name with " - Minimum Charge" appended (not just falling back to the Credit Card category)',
+  threeMonthsNoRepayment[0].note,
+  'Amex - Minimum Charge',
+)
 
 // A lump payment logged for a date BEFORE the next minimum-payment date
 // (but still in the future relative to "today") must be folded into

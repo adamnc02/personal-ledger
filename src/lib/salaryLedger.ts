@@ -95,6 +95,19 @@ export function computeNetBonusAmount(person: Person, payPeriodDate: string, gro
 }
 
 /**
+ * The tax-engine-computed net pay for this period from the applicable
+ * salary snapshot alone — deliberately ignoring any SalaryOverride. This
+ * is the "base" figure a bonus gets added on top of, and what an override
+ * reverts to when removed. Returns null when there's no applicable
+ * snapshot at all.
+ */
+export function computeSnapshotNetPayForPeriod(person: Person, payPeriodDate: string): number | null {
+  const snapshot = findApplicableSnapshot(person, payPeriodDate)
+  if (!snapshot) return null
+  return round2(calculateNetSalary(snapshotToSalaryInput(snapshot)).netPerPeriod)
+}
+
+/**
  * Net pay for a specific pay period date. Returns null only when there's
  * no applicable snapshot at all (person has no salary history yet as of
  * that date) — a genuinely unanswerable case, not a zero.
@@ -103,10 +116,7 @@ export function computeNetPayForPeriod(person: Person, payPeriodDate: string): n
   const override = person.salaryOverrides.find((o) => o.payPeriodDate === payPeriodDate)
   if (override) return round2(override.netPayOverride)
 
-  const snapshot = findApplicableSnapshot(person, payPeriodDate)
-  if (!snapshot) return null
-
-  return round2(calculateNetSalary(snapshotToSalaryInput(snapshot)).netPerPeriod)
+  return computeSnapshotNetPayForPeriod(person, payPeriodDate)
 }
 
 /** Generates pending 'salary' transactions for each resolved payday in the range. Skips any period with no applicable snapshot rather than emitting a zero-amount transaction. */

@@ -85,14 +85,13 @@ export type RecurrenceFrequency = 'weekly' | 'every_n_weeks' | 'monthly' | 'quar
 // icon+colour chosen automatically); the picker/"key" UI goes away.
 
 // Reserved built-in category id, seeded at app init (isBuiltIn: true,
-// undeletable). Every credit_card_payment transaction — the only credit-
-// card-related transaction type that appears on the Personal card's
-// list — has its categoryId forced to this, always. (credit_card_spend
-// transactions also carry this categoryId for consistency on the card's
-// own list, even though they never reach the Personal list to display it
-// there.) This REPLACES whatever category an underlying card-charged
-// expense would otherwise carry (e.g. a card-charged grocery run shows
-// as "Credit Card", not "Groceries", everywhere).
+// undeletable). Every credit_card_payment/credit_card_spend transaction
+// carries the owning CreditCard's own (freely user-assignable)
+// categoryId, NOT this one directly — this id exists so there's always a
+// sensible default to assign a new card to, and so the "group by
+// category" summary view (Home.tsx's groupingCategoryId) has a fixed,
+// stable bucket to fold every credit-card-related transaction into
+// regardless of what real category any individual card carries.
 export const CREDIT_CARD_CATEGORY_ID = 'category-credit-card'
 
 // Reserved built-in category id for generated 'salary' transactions
@@ -378,6 +377,15 @@ export interface SalaryOverride {
   // override net pay" caveat.
   netPayOverride: number
   reason?: string // e.g. "April bonus"
+  // Set only when this override was produced by "Attach a bonus to a pay"
+  // (the GROSS bonus figure the person typed in) rather than a plain manual
+  // net-pay override. netPayOverride in that case = the snapshot's ordinary
+  // computed net pay for this period + the bonus's taxed net value — kept
+  // around purely so the bonus can be edited/removed later without the
+  // person having to re-derive what the "extra" amount even was. A plain
+  // manual override (typed directly into "override net pay") never sets
+  // this field.
+  bonusGrossAmount?: number
 }
 
 export interface Person {

@@ -130,6 +130,13 @@ export function generateMinimumPaymentTransactions(card: CreditCard, rangeStart:
           date: paymentDateIso,
           amount,
           direction: 'out',
+          // Deliberately the fixed builtin Credit Card category, NOT
+          // card.categoryId — unlike a logged spend or lump payment
+          // (which carry the card's own real, freely-assignable
+          // category), the generated minimum-charge payment is always
+          // hardcoded to Credit Card so it reads unambiguously as "this
+          // card's minimum" in the category view, distinct from whatever
+          // category the card itself has been given for its own icon.
           categoryId: CREDIT_CARD_CATEGORY_ID,
           paymentMethod: 'direct_debit',
           status: 'pending',
@@ -137,10 +144,11 @@ export function generateMinimumPaymentTransactions(card: CreditCard, rangeStart:
           location: 'personal',
           ownerId: card.ownerId,
           creditCardId: card.id,
-          // The card's own name — without this, a row falls back to its
-          // category's name, duplicating the category group header when
-          // viewed grouped by category.
-          note: card.name,
+          // The card's own name, with "Minimum Charge" appended — without
+          // this suffix, a row would show only the card's name, which
+          // reads identically to a logged lump payment against the same
+          // card once both sit together in the Credit Card group.
+          note: `${card.name} - Minimum Charge`,
         })
         workingBalance = round2(Math.max(0, workingBalance - amount))
       }
@@ -169,7 +177,7 @@ export function recordCreditCardSpend(
     date,
     amount,
     direction: 'out',
-    categoryId: CREDIT_CARD_CATEGORY_ID,
+    categoryId: card.categoryId,
     paymentMethod: 'card',
     status: date <= toIso(new Date()) ? 'cleared' : 'pending',
     type: 'credit_card_spend',
@@ -211,7 +219,7 @@ export function recordCreditCardLumpPayment(
     date,
     amount,
     direction: 'out',
-    categoryId: CREDIT_CARD_CATEGORY_ID,
+    categoryId: card.categoryId,
     paymentMethod: 'bank_transfer',
     status: date <= toIso(new Date()) ? 'cleared' : 'pending',
     type: 'credit_card_payment',

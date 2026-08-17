@@ -1,110 +1,125 @@
 import { useState } from 'react'
 import { formatCurrency } from '../lib/format'
-import { Plus, X } from 'lucide-react'
+import { Pencil, Plus, X } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { EditField } from './EditField'
-import { INCOME_CATEGORY_ID } from '../types/ledger'
-import { resolvePayday } from '../lib/payCycle'
-import { computeNetBonusAmount } from '../lib/salaryLedger'
-
-import { toLocalIsoDate as toIso } from '../lib/date'
-
-/** The nearest upcoming payday for this ledger person, used only as a sensible default date — the transaction itself isn't mechanically linked to the generated salary transaction in any way (confirmed: a bonus is just a plain incoming amount, same as logging it from the Expenses page). */
-function nearestUpcomingPayday(personId: string, ledgerData: ReturnType<typeof useLedgerData>['data']): string {
-  const payCycle = ledgerData.payCycles.find((pc) => pc.personId === personId)
-  const today = new Date()
-  if (!payCycle) return toIso(today)
-  const thisMonth = resolvePayday(today.getFullYear(), today.getMonth(), payCycle.paydayDayOfMonth, payCycle.paydayAdjustForNonWorkingDay)
-  if (thisMonth >= today) return toIso(thisMonth)
-  const nextMonth = resolvePayday(today.getFullYear(), today.getMonth() + 1, payCycle.paydayDayOfMonth, payCycle.paydayAdjustForNonWorkingDay)
-  return toIso(nextMonth)
-}
+import type { SalaryOverride } from '../types/ledger'
+import { computeNetBonusAmount, computeSnapshotNetPayForPeriod } from '../lib/salaryLedger'
 
 /**
+ * A bonus is folded straight into that pay period's SalaryOverride — the
+ * gross figure inflates the period's gross before tax/NI/deductions are
+ * applied, and the resulting net pay is what shows as that period's salary
+ * everywhere (Salary page, Home summary, projections). There is no separate
+ * transaction and nothing shows on the Expenses page: the whole thing lives
+ * on the Salary page, same as any other salary adjustment.
+ *
  * personId is a real ledger Person id — the Salary page now runs on the
  * ledger model directly, so there's no longer a need to bridge between
  * two different Person id spaces by matching names.
  */
-export function AttachBonusButton({ personId, fixedDate }: { personId: string; fixedDate?: string }) {
+export function AttachBonusButton({ personId, fixedDate, existingOverride }: { personId: string; fixedDate: string; existingOverride?: SalaryOverride }) {
   const [open, setOpen] = useState(false)
+  const hasBonus = !!existingOverride?.bonusGrossAmount
 
   return (
     <>
       <button onClick={() => setOpen(true)} className="text-xs font-medium flex items-center gap-1" style={{ color: 'var(--color-coral)' }}>
-        <Plus size={12} /> Bonus
+        {hasBonus ? (
+          <>
+            <Pencil size={12} /> Bonus: £{formatCurrency(existingOverride!.bonusGrossAmount!)} gross
+          </>
+        ) : (
+          <>
+            <Plus size={12} /> Bonus
+          </>
+        )}
       </button>
-      {open && <AttachBonusForm personId={personId} fixedDate={fixedDate} onClose={() => setOpen(false)} />}
+      {open && <AttachBonusForm personId={personId} fixedDate={fixedDate} existingOverride={hasBonus ? existingOverride : undefined} onClose={() => setOpen(false)} />}
     </>
   )
 }
 
-function AttachBonusForm({ personId, fixedDate, onClose }: { personId: string; fixedDate?: string; onClose: () => void }) {
-  const { data, addAdHocTransaction } = useLedgerData()
-  const [grossAmount, setGrossAmount] = useState('')
-  const [date, setDate] = useState(() => fixedDate ?? nearestUpcomingPayday(personId, data))
-  const [note, setNote] = useState('')
+function AttachBonusForm({
+  personId,
+  fixedDate,
+  existingOverride,
+  onClose,
+}: {
+  personId: string
+  fixedDate: string
+  existingOverride?: SalaryOverride
+  onClose: () => void
+}) {
+  const { data, addSalaryOverride, updateSalaryOverride, removeSalaryOverride } = useLedgerData()
+  const [grossAmount, setGrossAmount] = useState(existingOverride?.bonusGrossAmount ? String(existingOverride.bonusGrossAmount) : '')
   const grossNumber = Number(grossAmount)
 
   const person = data.people.find((p) => p.id === personId)
-  const netAmount = person && grossNumber > 0 ? computeNetBonusAmount(person, date, grossNumber) : null
+  const baseNetPay = person ? computeSnapshotNetPayForPeriod(person, fixedDate) : null
+  const netBonusAmount = person && grossNumber > 0 ? computeNetBonusAmount(person, fixedDate, grossNumber) : null
+
+  function save() {
+    if (netBonusAmount === null || baseNetPay === null) return
+    const netPayOverride = baseNetPay + netBonusAmount
+    const reason = `Bonus (£${formatCurrency(grossNumber)} gross)`
+    if (existingOverride) {
+      updateSalaryOverride(personId, existingOverride.id, { netPayOverride, reason, bonusGrossAmount: grossNumber })
+    } else {
+      addSalaryOverride(personId, { payPeriodDate: fixedDate, netPayOverride, reason, bonusGrossAmount: grossNumber })
+    }
+    onClose()
+  }
+
+  function remove() {
+    if (existingOverride) removeSalaryOverride(personId, existingOverride.id)
+    onClose()
+  }
 
   return (
     <div className="mt-3 rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
       <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-[var(--color-ink)]">Attach a bonus to a pay</span>
+        <span className="text-xs font-medium text-[var(--color-ink)]">{existingOverride ? 'Edit bonus' : 'Attach a bonus to a pay'}</span>
         <button onClick={onClose} className="text-[var(--color-ink-muted)]">
           <X size={14} />
         </button>
       </div>
-      <p className="text-[11px] text-[var(--color-ink-faint)] -mt-1">
-        Enter the gross bonus — tax, NI, and student loan are worked out at your marginal rate for this pay date, same
-        as your salary. The taxed amount logs as a plain incoming transaction; it doesn't change your computed salary
-        figure itself.
-      </p>
       <div className="grid grid-cols-2 gap-2">
         <EditField label="Gross bonus (£)" type="number" value={grossAmount} onChange={setGrossAmount} />
-        {fixedDate ? (
-          <div>
-            <span className="text-xs text-[var(--color-ink-muted)] block mb-1">Pay date</span>
-            <span className="text-sm text-[var(--color-ink)]">{fixedDate}</span>
-          </div>
-        ) : (
-          <EditField label="Pay date" type="date" value={date} onChange={setDate} />
-        )}
+        <div>
+          <span className="text-xs text-[var(--color-ink-muted)] block mb-1">Pay date</span>
+          <span className="text-sm text-[var(--color-ink)]">{fixedDate}</span>
+        </div>
       </div>
       {grossNumber > 0 && (
         <p className="text-xs text-[var(--color-ink)]">
-          {netAmount === null ? (
+          {netBonusAmount === null || baseNetPay === null ? (
             <span className="text-[var(--color-ink-faint)]">No salary set up for this date yet — can't estimate tax.</span>
           ) : (
             <>
-              You'll receive <span className="font-semibold">£{formatCurrency(netAmount)}</span> after tax, NI &amp; student loan
-              {netAmount < grossNumber && <span className="text-[var(--color-ink-faint)]"> (£{formatCurrency(grossNumber - netAmount)} deducted)</span>}
+              This period's net pay becomes <span className="font-semibold">£{formatCurrency(baseNetPay + netBonusAmount)}</span> (base £
+              {formatCurrency(baseNetPay)} + £{formatCurrency(netBonusAmount)} net bonus)
             </>
           )}
         </p>
       )}
-      <EditField label="Note (optional)" value={note} onChange={setNote} />
-      <button
-        disabled={!(grossNumber > 0 && date && netAmount !== null && netAmount > 0)}
-        onClick={() => {
-          if (netAmount === null) return
-          addAdHocTransaction({
-            type: 'bonus',
-            amount: netAmount,
-            date,
-            categoryId: INCOME_CATEGORY_ID,
-            paymentMethod: 'bank_transfer',
-            personId,
-            note: note ? `${note} (gross £${formatCurrency(grossNumber)})` : `Gross £${formatCurrency(grossNumber)}`,
-          })
-          onClose()
-        }}
-        className="self-end px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Attach
-      </button>
+      <div className="flex items-center justify-between mt-1">
+        {existingOverride ? (
+          <button onClick={remove} className="text-xs font-medium" style={{ color: 'var(--color-negative)' }}>
+            Remove bonus
+          </button>
+        ) : (
+          <span />
+        )}
+        <button
+          disabled={!(grossNumber > 0 && netBonusAmount !== null && baseNetPay !== null)}
+          onClick={save}
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
+          style={{ background: 'var(--color-coral)' }}
+        >
+          {existingOverride ? 'Save changes' : 'Attach'}
+        </button>
+      </div>
     </div>
   )
 }

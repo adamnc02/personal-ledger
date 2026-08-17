@@ -18,6 +18,14 @@ import type { BillLocation } from '../types/models'
  * choice — onChange's caller should ideally have migrated it back to
  * 'personal' at that point (see LedgerContext.removePerson, which doesn't
  * currently reassign existing joint items — a known follow-up).
+ *
+ * With one salary configured, `canBeJoint` is false and there's only one
+ * person to own anything anyway — the whole "Location" concept is moot,
+ * not just the Joint option within it. This renders nothing at all in
+ * that case, rather than a "Personal (add a second person's salary...)"
+ * placeholder: a field with a single, unchangeable, unexplained value is
+ * not useful information, it's just noise on a form for something that
+ * hasn't happened yet.
  */
 export function LocationEditor({
   people,
@@ -36,11 +44,17 @@ export function LocationEditor({
   payeeSharePercent: number
   onChange: (patch: { location: BillLocation; ownerId?: string; payee?: string; payeeSharePercent?: number }) => void
 }) {
+  const showLocationField = canBeJoint
+  const showOwnerField = location === 'personal' && people.length > 1
+  const showSplitEditor = location === 'joint' && canBeJoint
+
+  if (!showLocationField && !showOwnerField && !showSplitEditor) return null
+
   return (
     <div className="grid grid-cols-2 gap-3">
-      <label className="flex flex-col gap-1">
-        <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
-        {canBeJoint ? (
+      {showLocationField && (
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
           <select
             value={location}
             onChange={(e) => {
@@ -60,11 +74,9 @@ export function LocationEditor({
               Joint
             </option>
           </select>
-        ) : (
-          <span className="text-sm text-[var(--color-ink-faint)] py-1">Personal (add a second person's salary on the Salary page to split costs)</span>
-        )}
-      </label>
-      {location === 'personal' && people.length > 1 && (
+        </label>
+      )}
+      {showOwnerField && (
         <label className="flex flex-col gap-1">
           <span className="text-xs text-[var(--color-ink-muted)]">Owner</span>
           <select
@@ -80,7 +92,7 @@ export function LocationEditor({
           </select>
         </label>
       )}
-      {location === 'joint' && canBeJoint && (
+      {showSplitEditor && (
         <SplitEditor
           people={people}
           payee={payee || people[0]?.id || ''}

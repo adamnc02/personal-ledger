@@ -125,15 +125,19 @@ if (!(DEFAULT_ICON_KEY in BILL_ICONS)) {
 
 // ── Built-in, seeded categories ─────────────────────────────────────────
 // isBuiltIn categories can be renamed but not deleted (enforced in the UI
-// layer, not here). CREDIT_CARD_CATEGORY_ID is the reserved id every
-// credit_card_spend/credit_card_payment transaction is forced onto — see
-// the long comment on that constant in types/ledger.ts for why.
+// layer, not here). CREDIT_CARD_CATEGORY_ID is the default a new credit
+// card is assigned on creation, and the fixed bucket every credit-card
+// transaction folds into on the Home page's "group by category" view
+// regardless of what category the card is actually assigned — see the
+// long comment on the constant itself in types/ledger.ts.
 
 // ── Built-in, seeded categories ─────────────────────────────────────────
 // isBuiltIn categories can be renamed but not deleted (enforced in the UI
-// layer, not here). CREDIT_CARD_CATEGORY_ID is the reserved id every
-// credit_card_spend/credit_card_payment transaction is forced onto — see
-// the long comment on that constant in types/ledger.ts for why.
+// layer, not here). CREDIT_CARD_CATEGORY_ID is the default a new credit
+// card is assigned on creation, and the fixed bucket every credit-card
+// transaction folds into on the Home page's "group by category" view
+// regardless of what category the card is actually assigned — see the
+// long comment on the constant itself in types/ledger.ts.
 //
 // Beyond the three locked built-ins, every OTHER icon in the shared
 // library gets its own pre-seeded, ordinary (deletable, renameable)

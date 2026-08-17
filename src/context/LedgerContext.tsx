@@ -27,7 +27,7 @@ import { toLocalIsoDate as toIso } from '../lib/date'
 const todayIso = () => toIso(new Date())
 
 interface AdHocInput {
-  type: 'expense' | 'income' | 'bonus'
+  type: 'expense' | 'income'
   amount: number
   date: string // ISO date
   categoryId: string
@@ -45,7 +45,7 @@ interface LedgerContextValue {
   /** No-ops for built-in categories (isBuiltIn: true) — those can be renamed via updateCategory but never deleted, since transactions are hard-forced onto them (see CREDIT_CARD_CATEGORY_ID in types/ledger.ts). */
   removeCategory: (id: string) => void
 
-  /** Plain ad-hoc expense/income/bonus — never touches a credit card. Status defaults to 'cleared' if dated today or earlier, 'pending' if dated in the future. */
+  /** Plain ad-hoc expense/income — never touches a credit card. Status defaults to 'cleared' if dated today or earlier, 'pending' if dated in the future. A bonus is NOT logged this way — see addSalaryOverride, which folds it into the relevant pay period instead. */
   addAdHocTransaction: (input: AdHocInput) => void
   /** Edits any transaction in place — used for correcting/renaming an ad-hoc entry after the fact. Does NOT re-run the credit-card-balance side effects that logCreditCardSpend/logCreditCardLumpPayment apply on creation — editing the amount of an already-recorded card transaction does not retroactively adjust that card's currentBalance. Delete and re-log if the card balance itself needs correcting. */
   updateTransaction: (id: string, updates: Partial<Omit<Transaction, 'id'>>) => void
@@ -160,7 +160,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
       type: input.type,
       location: 'personal',
       ownerId: input.personId,
-      personId: input.type === 'income' || input.type === 'bonus' ? input.personId : undefined,
+      personId: input.type === 'income' ? input.personId : undefined,
       note: input.note,
     }
     setDataState((prev) => ({ ...prev, transactions: [...prev.transactions, transaction] }))
