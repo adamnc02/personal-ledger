@@ -21,6 +21,7 @@ import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/credi
 import { applyLoanOverpayment } from '../lib/ledgerLoans'
 import { autoClearDuePayments } from '../lib/autoClear'
 import { applyClearSideEffects } from '../lib/clearTransaction'
+import { reconcilePersonReferences } from '../lib/household'
 
 import { toLocalIsoDate as toIso } from '../lib/date'
 const todayIso = () => toIso(new Date())
@@ -363,12 +364,17 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     setDataState((prev) => {
       if (prev.people.length <= 1) return prev // always at least one person
       const remaining = prev.people.filter((p) => p.id !== id)
-      return {
+      // Removing a person can orphan bills/loans/cards that reference
+      // them (ownerId on personal items, payee on joint ones) and can
+      // make an existing 'joint' item stop being meaningful if fewer
+      // than 2 people are left — reconcilePersonReferences handles both,
+      // and is also run on every load/restore so data already saved
+      // before this existed self-heals too. See lib/household.ts.
+      return reconcilePersonReferences({
         ...prev,
         people: remaining,
         payCycles: prev.payCycles.filter((pc) => pc.personId !== id),
-        primaryPersonId: prev.primaryPersonId === id ? remaining[0].id : prev.primaryPersonId,
-      }
+      })
     })
   }
   const setPrimaryPerson: LedgerContextValue['setPrimaryPerson'] = (id) => {

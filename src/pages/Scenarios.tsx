@@ -647,7 +647,7 @@ function ScenarioForm({
                 placeholder={action.type === 'new_finance_agreement' ? 'Name (e.g. Garden furniture finance)' : 'Name (e.g. Higher rent)'}
                 value={action.name ?? ''}
                 onChange={(e) => updateAction({ name: e.target.value })}
-                className="col-span-2 bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                className="col-span-2 w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
               />
             )}
 
@@ -658,7 +658,7 @@ function ScenarioForm({
                 placeholder={VALUE_LABELS[action.type] ?? 'Value (£)'}
                 value={action.value || ''}
                 onChange={(e) => updateAction({ value: Number(e.target.value) })}
-                className={`bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono ${showMultiLoanPicker || showSingleLoanPicker || showPersonPicker ? '' : 'col-span-2'}`}
+                className={`w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono ${showMultiLoanPicker || showSingleLoanPicker || showPersonPicker ? '' : 'col-span-2'}`}
               />
             )}
 
@@ -674,7 +674,7 @@ function ScenarioForm({
                     const result = calculateFinanceAgreement({ borrowAmount, aprPercent: action.aprPercent ?? 0, termMonths: action.termMonths ?? 0 })
                     updateAction({ borrowAmount, value: result.monthlyPayment, totalRepayable: result.totalRepayable })
                   }}
-                  className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono"
+                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono"
                 />
                 <input
                   type="number"
@@ -686,7 +686,7 @@ function ScenarioForm({
                     const result = calculateFinanceAgreement({ borrowAmount: action.borrowAmount ?? 0, aprPercent: action.aprPercent ?? 0, termMonths })
                     updateAction({ termMonths, value: result.monthlyPayment, totalRepayable: result.totalRepayable })
                   }}
-                  className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono"
+                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono"
                 />
                 <input
                   type="number"
@@ -695,7 +695,7 @@ function ScenarioForm({
                   placeholder="Interest rate % (informational)"
                   value={action.interestRatePercent || ''}
                   onChange={(e) => updateAction({ interestRatePercent: Number(e.target.value) })}
-                  className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono"
+                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono"
                 />
                 <input
                   type="number"
@@ -708,7 +708,7 @@ function ScenarioForm({
                     const result = calculateFinanceAgreement({ borrowAmount: action.borrowAmount ?? 0, aprPercent, termMonths: action.termMonths ?? 0 })
                     updateAction({ aprPercent, value: result.monthlyPayment, totalRepayable: result.totalRepayable })
                   }}
-                  className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono"
+                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono"
                 />
                 <p className="col-span-2 text-xs text-[var(--color-ink-muted)] -mt-1">
                   £{formatCurrency(action.value)}/month · £{formatCurrency(action.totalRepayable ?? 0)} total repayable
@@ -720,7 +720,7 @@ function ScenarioForm({
               <select
                 value={action.personId || people[0]?.id || ''}
                 onChange={(e) => updateAction({ personId: e.target.value, savingsEntryId: undefined })}
-                className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
               >
                 {people.map((p) => (
                   <option key={p.id} value={p.id}>
@@ -745,7 +745,7 @@ function ScenarioForm({
                   <select
                     value={action.savingsEntryId ?? ''}
                     onChange={(e) => updateAction({ savingsEntryId: e.target.value })}
-                    className="col-span-2 bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                    className="col-span-2 w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
                   >
                     <option value="">Choose a savings goal…</option>
                     {goals.map((g) => (
@@ -769,7 +769,7 @@ function ScenarioForm({
                     const [kind, id] = e.target.value.split(':') as [ScenarioTargetKind, string]
                     updateAction({ linkedTargetKind: kind, linkedTargetId: id, linkedLoanId: undefined })
                   }}
-                  className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
                 >
                   <option value="">Choose a loan or credit card…</option>
                   {data.loans.map((l) => (
@@ -841,7 +841,7 @@ function ScenarioForm({
                     const [kind, id] = e.target.value.split(':') as [ScenarioTargetKind, string]
                     updateAction({ targets: [...currentTargets, { kind, id }], loanAllocations: undefined, linkedLoanId: undefined })
                   }}
-                  className="bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
                 >
                   <option value="">
                     {currentTargets.length === 0

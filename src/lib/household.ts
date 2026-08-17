@@ -1,5 +1,6 @@
 import type { AppData, Person as LegacyPerson } from '../types/models'
-import type { Person } from '../types/ledger'
+import type { BillLocation } from '../types/models'
+import type { AppDataV2, Person } from '../types/ledger'
 import { calculateNetSalary } from './tax'
 import { combineBillsWithLoans } from './loans'
 
@@ -58,4 +59,43 @@ export function hasLegacySalaryConfigured(person: Pick<LegacyPerson, 'salary'>):
 
 export function legacyPeopleWithSalaryCount(people: Pick<LegacyPerson, 'salary'>[]): number {
   return people.filter(hasLegacySalaryConfigured).length
+}
+
+// ── Reconciling stale person references ─────────────────────────────────
+// Bills/loans/cards reference a person via ownerId (personal items) or
+// payee (the joint split target). Removing a person should always clean
+// these up (see LedgerContext.removePerson), but this is also run as part
+// of the regular load/migration pipeline (ledgerStorage.ts) so that data
+// already saved from before that fix — or a backup restored from that
+// state — self-heals rather than staying broken: a personal item with a
+// dangling ownerId silently drops out of that owner's totals/summary
+// rings everywhere (see lib/bills.ts's personalBillsTotal, Home.tsx's
+// loan/card filtering), and a leftover location: 'joint' item with fewer
+// than 2 people keeps joint-only UI (the What-if page's Household toggle,
+// Home.tsx's Joint summary card) visible with nothing real behind it.
+
+export function reconcilePersonReferences(data: AppDataV2): AppDataV2 {
+  if (data.people.length === 0) return data // nothing to reconcile against
+
+  const validIds = new Set(data.people.map((p) => p.id))
+  const fallbackOwnerId = validIds.has(data.primaryPersonId) ? data.primaryPersonId : data.people[0].id
+  const stillHasMultiplePeople = data.people.length >= 2
+
+  function reassign<T extends { location: BillLocation; ownerId: string; payee: string; payeeSharePercent: number }>(item: T): T {
+    if (item.location === 'joint') {
+      if (!stillHasMultiplePeople) {
+        return { ...item, location: 'personal', ownerId: fallbackOwnerId, payee: '', payeeSharePercent: 100 }
+      }
+      return validIds.has(item.payee) ? item : { ...item, payee: fallbackOwnerId }
+    }
+    return validIds.has(item.ownerId) ? item : { ...item, ownerId: fallbackOwnerId }
+  }
+
+  return {
+    ...data,
+    primaryPersonId: fallbackOwnerId,
+    recurringTemplates: data.recurringTemplates.map(reassign),
+    loans: data.loans.map(reassign),
+    creditCards: data.creditCards.map((c) => (validIds.has(c.ownerId) ? c : { ...c, ownerId: fallbackOwnerId })),
+  }
 }

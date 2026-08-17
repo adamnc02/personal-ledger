@@ -7,6 +7,7 @@
 import { nanoid } from 'nanoid'
 import type { AppDataV2, PayCycleConfig, Person } from '../types/ledger'
 import { defaultCategories } from './categories'
+import { reconcilePersonReferences } from './household'
 import { toLocalIsoDate } from './date'
 
 const STORAGE_KEY = 'ledger:app-data-v2:v1'
@@ -38,7 +39,7 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
   const existingIds = new Set(categories.map((c) => c.id))
   const missingBuiltIns = defaultCategories().filter((c) => c.isBuiltIn && !existingIds.has(c.id))
 
-  return {
+  const backfilled: AppDataV2 = {
     ...data,
     people: data.people ?? [],
     categories: [...categories, ...missingBuiltIns],
@@ -49,6 +50,10 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
     payCycles: data.payCycles ?? [],
     scenarios: data.scenarios ?? [],
   }
+
+  // Self-heals any bill/loan/card left pointing at a person who no longer
+  // exists — see lib/household.ts's reconcilePersonReferences for why.
+  return reconcilePersonReferences(backfilled)
 }
 
 export function saveLedgerData(data: AppDataV2): void {
