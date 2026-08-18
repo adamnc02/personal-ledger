@@ -42,7 +42,7 @@ export type TransactionType =
   | 'income' // ad-hoc, one-off incoming, no effect on standing salary — e.g. a cash gift, a bank transfer from family
   | 'bonus' // ad-hoc incoming that DOES add to that period's net pay — see SalaryOverride
   | 'salary' // the regular pay-day transaction, generated from Person.salary
-  // Something charged TO a credit card, logged from the Expenses page with
+  // Something charged TO a credit card, logged from the Transactions page with
   // paymentMethod: 'card'. Deliberately NOT real cash out: this does not
   // touch the ledger's running balance and does not appear on the
   // Personal card's transaction list — it only shows on the specific
@@ -164,7 +164,7 @@ export interface Transaction {
   // 'credit_card_lump_payment' links a credit_card_payment transaction
   // back to the specific CreditCardLumpPayment record (sourceId), when
   // it wasn't the generated monthly/minimum payment.
-  sourceType?: 'recurring_template' | 'loan' | 'loan_overpayment' | 'credit_card_lump_payment' | 'savings_entry'
+  sourceType?: 'recurring_template' | 'loan' | 'loan_overpayment' | 'loan_settlement' | 'credit_card_lump_payment' | 'savings_entry'
   sourceId?: string
   // Required when type is 'credit_card_spend' or 'credit_card_payment' —
   // which card this is against. See TransactionType above for how each
@@ -233,12 +233,56 @@ export interface Loan {
   // percent-of-balance case, same idea as a credit card's minimum
   // payment recalculating against the live balance every cycle.
   recurringOverpayment?: LoanRecurringOverpayment
+
+  // ── Amortisation-engine fields (loan-amortisation-engine scope) ──────
+  // `principal` is required, added during the amortisation-engine build:
+  // `monthlyPayment × termMonths` was usable as a stand-in "balance" for
+  // the old flat model (which had no concept of interest, so "total
+  // you'll ever pay" and "what you actually borrowed" were the same
+  // number by definition) but that stops being true the moment real
+  // interest exists — a real loan's total repayable is always MORE than
+  // its principal. The engine needs the true starting balance as its own
+  // input, not a derived one. See migrateLedgerData in ledgerStorage.ts
+  // for how a loan persisted before this field existed gets a one-time
+  // best-effort backfill.
+  principal: number
+  // Everything below is optional/derived at the type level so a loan
+  // still works with zero extra input beyond principal (scope §5.2's
+  // back-solved baseline) — calibration only refines what's already a
+  // strong estimate, it isn't required to make a loan usable.
+  lender?: string // free text (scope §4) — labels a saved calibration profile so a future loan from the same lender can offer to reuse it. Not used for hard-coded formulas.
+  advanceDate?: string // ISO — distinct from startDate/firstPaymentDate (scope §4): routinely 3-8 weeks earlier, and one known convention (Monzo) charges interest from this date, not the first payment date. Falls back to startDate when absent (baseline behaviour: no stub period).
+  interestConventionId?: string // matches InterestConvention.id in lib/interestConventions.ts — which candidate fitted best, once calibrated. Falls back to the flat-monthly baseline convention when absent — see resolveLoanRateAndConvention in ledgerLoans.ts.
+  calibratedMonthlyRate?: number // the fitted (or back-solved-from-payment, pre-calibration) monthly rate. Always a MONTHLY figure regardless of which convention uses it — see interestConventions.ts's file header for why.
+  settlementMultiplier?: number // 'k' in settlement ≈ balance × (1 + k × monthlyRate) (scope §6). Defaults applied (k=2 if >12 months remain, else k=1) when absent — only stored once calibrated/overridden against a real settlement quote.
+  statementCalibrationLines?: StatementCalibrationLine[] // raw entered calibration inputs, persisted so re-fitting always uses the whole accumulated set (scope §5.3), not just the newest line.
+  active: boolean // mirrors CreditCard.active (scope §7) — false once "Settle this loan" has been used to log a real payoff.
+  closedDate?: string // ISO date — set together with active: false, when the loan was actually settled. summarizeLoan uses this directly as payoffDate for a closed loan, rather than trusting whatever the mechanical schedule would otherwise predict.
+  settledAmount?: number // the REAL amount actually paid to close the loan (scope §7) — may genuinely differ from the app's own settlement estimate (§6). The source of truth for the ledger itself is still the logged Transaction (sourceType: 'loan_settlement'); this is kept on the loan too purely so the Borrowing page can show "Settled for £X" without a separate lookup.
+}
+
+export interface StatementCalibrationLine {
+  date: string // ISO date
+  capital: number
+  interest: number
 }
 
 export interface LoanRecurringOverpayment {
   startDate: string // ISO date — first month this applies from
   endDate?: string // ISO date, inclusive — last month it applies; unset = indefinite, until the loan itself is paid off
   amount: { type: 'fixed'; amount: number } | { type: 'percent_of_balance'; percent: number }
+  // Recast choice (loan-amortisation-engine scope §9, §11.3) — how the
+  // schedule responds once this overpayment lands. 'reduce_term'
+  // (default when absent, matching every recurring overpayment recorded
+  // before this field existed): keep the payment the same, the loan
+  // finishes sooner. 'reduce_payment': keep the same remaining period
+  // count, recompute a smaller payment via standard PMT against the new
+  // balance — for a RECURRING overpayment this means the effective
+  // payment can genuinely change at every period it's applied, not just
+  // once, since buildLoanSchedule.ts's own comment on this explains why
+  // the schedule tracks a per-period payment rather than one fixed
+  // figure once this combination is in play.
+  recastMode?: 'reduce_term' | 'reduce_payment'
 }
 
 export interface LoanOverpayment {
@@ -246,6 +290,14 @@ export interface LoanOverpayment {
   date: string // ISO date
   amount: number
   note?: string
+  // Same recast choice as LoanRecurringOverpayment.recastMode above, but
+  // for a one-off overpayment — applies once, at this overpayment's own
+  // date, recomputing the loan's effective payment from that point
+  // onward (until a later recast changes it again, or the loan pays
+  // off). Defaults to 'reduce_term' when absent (every overpayment
+  // recorded before this field existed keeps its original behaviour
+  // exactly — the fixed payment continuing, term shortening).
+  recastMode?: 'reduce_term' | 'reduce_payment'
 }
 
 // ── Pay cycle configuration ─────────────────────────────────────────────
@@ -273,14 +325,14 @@ export interface PayCycleConfig {
 }
 
 // ── Credit cards ─────────────────────────────────────────────────────────
-// Created/managed on the Loans page, alongside Loan. Personal only — no
+// Created/managed on the Borrowing page, alongside Loan. Personal only — no
 // joint/split model (confirmed). The card's minimum/monthly payment is
 // treated as a bill: it's a generator, same idea as RecurringTemplate/
 // Loan, producing a `credit_card_payment` Transaction on paymentDayOfMonth
 // each cycle. currentBalance is adjusted by two independent flows, which
 // are kept deliberately separate from each other in the ledger:
 //  - UP, when a `credit_card_spend` transaction is logged against this
-//    card from the Expenses page. This does NOT touch the ledger's
+//    card from the Transactions page. This does NOT touch the ledger's
 //    running balance and does NOT show on the Personal card's list —
 //    only on this card's own list, as a POSITIVE charge.
 //  - DOWN, when a `credit_card_payment` transaction is generated (the

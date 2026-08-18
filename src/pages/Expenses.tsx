@@ -46,7 +46,7 @@ export function Expenses() {
   return (
     <div className="max-w-md mx-auto px-4 pt-6">
       <header className="mb-6 flex items-center justify-between">
-        <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Expenses</h1>
+        <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Transactions</h1>
         <button
           onClick={() => setAdding(true)}
           className="w-9 h-9 rounded-full flex items-center justify-center"

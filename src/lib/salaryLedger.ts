@@ -9,7 +9,7 @@
 //    dedupes" contract as schedule.ts / ledgerLoans.ts / creditCards.ts.
 //
 // SIMPLIFICATION, stated explicitly: "Bonus" ad-hoc entries (TransactionType
-// 'bonus', loggable from the Expenses page and the Salary page's "Attach a
+// 'bonus', loggable from the Transactions page and the Salary page's "Attach a
 // bonus to a pay" button) DO use this file's tax engine now — via
 // computeNetBonusAmount below — to work out the correct net-of-tax amount
 // from a gross figure. What they still don't do is get folded into a

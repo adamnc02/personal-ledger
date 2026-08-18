@@ -79,6 +79,7 @@ check('An inactive template generates nothing', generateTransactionsForTemplate(
 const loan: Loan = {
   id: 'loan-1',
   name: 'Car finance',
+  principal: 3000, // 0%-equivalent (principal = monthlyPayment × termMonths) — this test suite is about overpayment/recurring-overpayment mechanics, not interest, which has its own dedicated fixtures in verify-interest-conventions.ts / verify-loan-amortisation.ts
   monthlyPayment: 250,
   termMonths: 12,
   startDate: '2026-01-15',
@@ -88,6 +89,7 @@ const loan: Loan = {
   payee: 'me',
   payeeSharePercent: 100,
   overpayments: [],
+  active: true,
 }
 check('nominalTotalPayable = monthly × term', nominalTotalPayable(loan), 3000)
 

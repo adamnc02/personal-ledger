@@ -1,6 +1,6 @@
 import type { AppData, Bill, Loan, Scenario, ScenarioTargetKind } from '../types/models'
 import type { CreditCard } from '../types/ledger'
-import { summarizeLoan, currentLoanMonthlyCost } from './loans'
+import { summarizeLoan, currentLoanMonthlyCost, estimateSettlementFigure } from './loans'
 import { computeMinimumPaymentAmount, simulateCardPayoffMonths } from './creditCards'
 import { costForPerson } from './bills'
 import { calculateNetSalary } from './tax'
@@ -96,7 +96,15 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
     if (!workingRemainingMap.has(key)) {
       if (kind === 'loan') {
         const loan = data.loans.find((l) => l.id === id)
-        workingRemainingMap.set(key, loan ? summarizeLoan(loan).remaining : 0)
+        // The cap on how much of a lump sum this target can genuinely
+        // absorb is the real cost to CLOSE it (loan-amortisation-engine
+        // scope §6's settlement figure), not its raw remaining balance —
+        // once real interest is involved, fully clearing a loan early
+        // costs more than what it currently shows as owed. Capping at
+        // the smaller, raw-balance figure would make a lump sum spill
+        // over into "leftover one-off cash" even when it was genuinely
+        // needed to close the loan out (scope §13 / handoff step 6).
+        workingRemainingMap.set(key, loan ? estimateSettlementFigure(loan) : 0)
       } else {
         const card = data.creditCards.find((c) => c.id === id)
         workingRemainingMap.set(key, card ? card.currentBalance : 0)
@@ -192,8 +200,16 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
       if (!loan) continue
 
       const original = summarizeLoan(loan)
-      const newRemaining = round2(Math.max(0, original.remaining - lumpSum))
-      const fullyPaidOff = newRemaining <= 0
+      // Whether this lump sum genuinely CLOSES the loan depends on the
+      // real settlement figure (which includes any early-settlement
+      // premium once real interest is involved), not on whether it
+      // merely covers the raw remaining balance — scope §13 / handoff
+      // step 6. A lump sum that covers the balance but not the full
+      // settlement premium is treated as a (large) partial payment
+      // below, same as any other partial overpayment.
+      const settlementNeeded = estimateSettlementFigure(loan)
+      const fullyPaidOff = lumpSum >= settlementNeeded
+      const newRemaining = fullyPaidOff ? 0 : round2(Math.max(0, original.remaining - lumpSum))
 
       // If not fully cleared, spread the reduced balance over the same
       // remaining term — a genuinely reduced monthly payment, not a shorter one.
@@ -325,7 +341,15 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
 
       const original = summarizeLoan(loan)
       const newMonthlyPayment = loan.monthlyPayment + extraPerMonth
-      const newMonthsRemaining = newMonthlyPayment > 0 ? Math.ceil(original.remaining / newMonthlyPayment) : original.monthsRemaining
+      // Genuinely re-simulate with the higher monthly payment through the
+      // same delegated engine (loan-amortisation-engine scope §1/§13,
+      // handoff step 6: "loan_overpayment scenario actions route through
+      // the same engine") rather than a linear division of
+      // remaining/newMonthlyPayment — that shortcut ignores how a bigger
+      // payment also means less interest accrues each period, so it
+      // understates how many months a real overpayment actually saves
+      // once the loan carries real interest.
+      const newMonthsRemaining = summarizeLoan({ ...loan, monthlyPayment: newMonthlyPayment }).monthsRemaining
 
       const originalMonthlyCostForPerson = costForPerson(virtualLoanBill(loan, currentLoanMonthlyCost(loan)), personId, data.people)
       const newMonthlyCostForPerson = costForPerson(virtualLoanBill(loan, Math.min(newMonthlyPayment, original.remaining)), personId, data.people)

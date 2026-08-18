@@ -65,6 +65,27 @@ export interface Loan {
   ownerId: string // whose personal account it belongs to, when location = 'personal'
   payee: string // for joint loans: who the percentage below is assigned to
   payeeSharePercent: number // for joint loans: their share, 0-100
+
+  // ── Amortisation-engine bridge fields (loan-amortisation-engine scope
+  // §1/handoff) ────────────────────────────────────────────────────────
+  // A loan reaching this shape via legacyBridge.ts (the only real
+  // producer of these in the live app — see legacyBridge.ts's own
+  // header) always carries a real, resolved monthlyRate (calibrated, or
+  // the back-solved baseline — resolveLoanRateAndConvention in
+  // ledgerLoans.ts never returns undefined). These three fields are how
+  // that gets carried through the bridge, so lib/loans.ts's engine can
+  // delegate to the SAME real amortisation maths for its forward
+  // simulations, instead of maintaining a second, parallel flat-only
+  // implementation that would silently drift from the real one over
+  // time. All three stay undefined for any Loan that never went through
+  // the bridge (there are none reachable in the live routed app today,
+  // but test fixtures construct these directly) — lib/loans.ts falls
+  // back to its original flat, interest-free arithmetic whenever
+  // calibratedMonthlyRate is absent, unchanged from before this field
+  // existed.
+  calibratedMonthlyRate?: number
+  interestConventionId?: string
+  settlementMultiplier?: number
 }
 
 export interface LoanPayment {

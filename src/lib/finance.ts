@@ -1,3 +1,5 @@
+import { aprToMonthlyRate, standardPayment } from './interestConventions'
+
 export interface FinanceAgreementInput {
   borrowAmount: number
   aprPercent: number // used for the actual repayment calculation
@@ -14,9 +16,17 @@ export interface FinanceAgreementResult {
  * Standard amortising-loan calculation: a fixed monthly payment that clears
  * the borrowed amount plus interest over the given term. Uses APR (rather
  * than a separate nominal "interest rate") as the actual cost driver, since
- * APR is the standardised figure meant for comparing credit costs — a
- * simplification of compounding, but the same one most consumer finance
- * calculators use.
+ * APR is the standardised figure meant for comparing credit costs.
+ *
+ * Delegates the APR->monthly-rate conversion and PMT formula to
+ * interestConventions.ts (loan-amortisation-engine scope §5.2) rather than
+ * a separate `aprPercent / 100 / 12` shortcut this function used to use —
+ * that shortcut understates the true rate (APR is a compound annual
+ * figure, not a nominal one divided evenly by 12), the exact class of bug
+ * the amortisation engine work was built to fix elsewhere. A "new finance
+ * agreement" scenario action is exactly the kind of loan-like calculation
+ * that should use the SAME correct maths as everything else, not a
+ * second, separately-wrong implementation.
  */
 export function calculateFinanceAgreement(input: FinanceAgreementInput): FinanceAgreementResult {
   const { borrowAmount, aprPercent, termMonths } = input
@@ -25,10 +35,8 @@ export function calculateFinanceAgreement(input: FinanceAgreementInput): Finance
     return { monthlyPayment: 0, totalRepayable: 0, totalInterest: 0 }
   }
 
-  const monthlyRate = aprPercent / 100 / 12
-
-  const monthlyPayment =
-    monthlyRate > 0 ? (borrowAmount * monthlyRate) / (1 - Math.pow(1 + monthlyRate, -termMonths)) : borrowAmount / termMonths
+  const monthlyRate = aprToMonthlyRate(aprPercent / 100)
+  const monthlyPayment = standardPayment(borrowAmount, monthlyRate, termMonths)
 
   const totalRepayable = round2(monthlyPayment * termMonths)
 

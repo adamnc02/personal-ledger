@@ -17,8 +17,26 @@ const REVEAL_WIDTH = 84
 // page misrouted back through this row's pointer handlers (symptom: every
 // click re-opens/closes whatever dropdown was last touched). Skip capture
 // entirely for taps that land on or inside any interactive control.
+//
+// `target instanceof Element`, NOT `HTMLElement` — an icon-only button's
+// actual pointerdown target is near-always the icon's own <svg>/<path>,
+// which is an SVGElement, NOT an HTMLElement (a real, separate branch of
+// the DOM class hierarchy). The narrower check silently failed for every
+// icon-only button in a swipeable row — confirmed directly as the root
+// cause of two real bugs: the loan ledger's info-icon button doing nothing
+// on tap, and the calibration modal's icon-only close button not closing
+// it. The second one is the more surprising confirmation this fix is
+// right: that modal is portalled to document.body, nowhere near this
+// component in the real DOM — but React bubbles synthetic events through
+// the REACT tree a portal's content logically belongs to, not the DOM
+// tree it's rendered into, so this row's own pointerdown handler genuinely
+// fires (and, before this fix, wrongly captured the pointer) for a tap
+// inside a modal that visually has nothing to do with this row at all.
+// `Element.closest` exists identically on both HTML and SVG elements, so
+// broadening this one check is the entire fix — nothing else here needs
+// to change.
 function isInteractiveTarget(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement && !!target.closest('select, input, textarea, button, a, label, [role="button"]')
+  return target instanceof Element && !!target.closest('select, input, textarea, button, a, label, [role="button"]')
 }
 
 export function SwipeToDelete({ children, onDelete, confirmLabel }: SwipeToDeleteProps) {

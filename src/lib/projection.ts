@@ -91,7 +91,7 @@ export function computeProjection(
   for (const template of data.recurringTemplates.filter((t) => t.location === 'personal' && t.ownerId === personId)) {
     generated.push(...generateTransactionsForTemplate(template, rangeStart, horizonEndDate))
   }
-  for (const loan of data.loans.filter((l) => l.location === 'personal' && l.ownerId === personId)) {
+  for (const loan of data.loans.filter((l) => l.location === 'personal' && l.ownerId === personId && l.active)) {
     generated.push(...generateLoanPaymentTransactions(loan, rangeStart, horizonEndDate))
   }
   for (const card of data.creditCards.filter((c) => c.ownerId === personId)) {

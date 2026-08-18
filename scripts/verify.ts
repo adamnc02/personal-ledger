@@ -198,7 +198,7 @@ check('0% APR: total repayable = borrowed amount', zeroApr.totalRepayable, 1000)
 check('0% APR: no interest', zeroApr.totalInterest, 0)
 
 const withApr = calculateFinanceAgreement({ borrowAmount: 1000, aprPercent: 12, termMonths: 12 })
-check('12% APR over 12mo: monthly payment ≈ £88.85 (standard amortisation)', withApr.monthlyPayment, 88.85, 0.1)
+check('12% APR over 12mo: monthly payment ≈ £88.56 (standard amortisation, compound APR->monthly conversion — not the incorrect APR/12 shortcut this used to use)', withApr.monthlyPayment, 88.56, 0.1)
 check('12% APR: total repayable > borrowed amount (interest applied)', withApr.totalRepayable > 1000, true)
 check('12% APR: totalRepayable = monthlyPayment × term', withApr.totalRepayable, withApr.monthlyPayment * 12, 0.05)
 

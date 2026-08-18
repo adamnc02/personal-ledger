@@ -12,13 +12,14 @@ import type {
   SalaryOverride,
   SalarySnapshot,
   SavingsEntry,
+  StatementCalibrationLine,
   Transaction,
 } from '../types/ledger'
 import type { Scenario } from '../types/models'
 import { defaultLedgerData, defaultPayCycleConfig, loadLedgerData, saveLedgerData } from '../lib/ledgerStorage'
 import { createCategory, removeCategorySafely } from '../lib/categories'
 import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/creditCards'
-import { applyLoanOverpayment } from '../lib/ledgerLoans'
+import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, type CalibrationResult } from '../lib/ledgerLoans'
 import { autoClearDuePayments } from '../lib/autoClear'
 import { applyClearSideEffects } from '../lib/clearTransaction'
 import { reconcilePersonReferences } from '../lib/household'
@@ -64,11 +65,15 @@ interface LedgerContextValue {
   updateLoan: (id: string, updates: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
   removeLoan: (id: string) => void
   /** Records a real overpayment against a loan right now — updates the loan's overpayments (shrinking its remaining schedule) and inserts the matching cleared loan_payment transaction. Unrelated to the What-if page's hypothetical overpayment scenario action. */
-  logLoanOverpayment: (loanId: string, amount: number, date: string, note?: string) => void
+  logLoanOverpayment: (loanId: string, amount: number, date: string, note?: string, recastMode?: 'reduce_term' | 'reduce_payment') => void
   /** Edits a logged loan overpayment's amount/date/note in place — updates both the LoanOverpayment record (which buildLoanSchedule reads fresh every call, so the schedule just reflects the new value automatically) and its matching transaction. No balance-reversal step needed here unlike credit cards: a loan's remaining balance is always derived from the schedule, never stored separately. */
   updateLoanOverpayment: (loanId: string, overpaymentId: string, amount: number, date: string, note?: string) => void
   /** Removes a logged loan overpayment entirely — the record AND its transaction. */
   removeLoanOverpayment: (loanId: string, overpaymentId: string) => void
+  /** Logs the real, actual amount paid to close a loan early (scope §7) — inserts a cleared loan_payment transaction (sourceType 'loan_settlement') and marks the loan inactive with a closedDate, so it reports as fully repaid regardless of what its mechanical schedule would have predicted. */
+  settleLoanAction: (loanId: string, actualAmountPaid: number, date: string, note?: string) => void
+  /** Merges new statement lines into the loan's calibration, re-fits every known convention against the whole accumulated set, and persists the winning convention/rate (scope §5.3). Returns the confidence result so the calibration modal can show the right message without a second read. */
+  calibrateLoanAction: (loanId: string, newLines: StatementCalibrationLine[]) => CalibrationResult | null
 
   addCreditCard: (card: Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>) => string
   updateCreditCard: (id: string, updates: Partial<Omit<CreditCard, 'id'>>) => void
@@ -279,11 +284,11 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
   const removeLoan: LedgerContextValue['removeLoan'] = (id) => {
     setDataState((prev) => ({ ...prev, loans: prev.loans.filter((l) => l.id !== id) }))
   }
-  const logLoanOverpayment: LedgerContextValue['logLoanOverpayment'] = (loanId, amount, date, note) => {
+  const logLoanOverpayment: LedgerContextValue['logLoanOverpayment'] = (loanId, amount, date, note, recastMode) => {
     setDataState((prev) => {
       const loan = prev.loans.find((l) => l.id === loanId)
       if (!loan) return prev
-      const { updatedLoan, transaction } = applyLoanOverpayment(loan, amount, date, note)
+      const { updatedLoan, transaction } = applyLoanOverpayment(loan, amount, date, note, recastMode)
       return {
         ...prev,
         loans: prev.loans.map((l) => (l.id === loanId ? updatedLoan : l)),
@@ -321,6 +326,27 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
         transactions: prev.transactions.filter((t) => !(t.sourceType === 'loan_overpayment' && t.sourceId === overpaymentId)),
       }
     })
+  }
+
+  const settleLoanAction: LedgerContextValue['settleLoanAction'] = (loanId, actualAmountPaid, date, note) => {
+    setDataState((prev) => {
+      const loan = prev.loans.find((l) => l.id === loanId)
+      if (!loan) return prev
+      const { updatedLoan, transaction } = settleLoan(loan, actualAmountPaid, date, note)
+      return {
+        ...prev,
+        loans: prev.loans.map((l) => (l.id === loanId ? updatedLoan : l)),
+        transactions: [...prev.transactions, { ...transaction, id: nanoid(8) }],
+      }
+    })
+  }
+
+  const calibrateLoanAction: LedgerContextValue['calibrateLoanAction'] = (loanId, newLines) => {
+    const loan = data.loans.find((l) => l.id === loanId)
+    if (!loan) return null
+    const result = calibrateLoanFromStatementLines(loan, newLines)
+    setDataState((prev) => ({ ...prev, loans: prev.loans.map((l) => (l.id === loanId ? result.updatedLoan : l)) }))
+    return result
   }
 
   const addCreditCard: LedgerContextValue['addCreditCard'] = (card) => {
@@ -491,6 +517,8 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     logLoanOverpayment,
     updateLoanOverpayment,
     removeLoanOverpayment,
+    settleLoanAction,
+    calibrateLoanAction,
     addCreditCard,
     updateCreditCard,
     removeCreditCard,

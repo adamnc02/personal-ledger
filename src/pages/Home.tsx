@@ -4,7 +4,7 @@ import { toLocalIsoDate } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, type ProjectionHorizon, type ProjectionResult } from '../lib/projection'
-import { summarizeLoan } from '../lib/ledgerLoans'
+import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary } from '../lib/jointLedger'
 import { computeMinimumPaymentAmount, totalPaidForCard } from '../lib/creditCards'
 import { cycleBoundsForDate } from '../lib/payCycle'
@@ -28,7 +28,7 @@ type DeckEntry = { kind: 'personal' } | { kind: 'joint' } | { kind: 'household' 
 function buildDeck(data: AppDataV2): DeckEntry[] {
   const deck: DeckEntry[] = [{ kind: 'personal' }]
 
-  const hasJointItem = data.recurringTemplates.some((t) => t.location === 'joint') || data.loans.some((l) => l.location === 'joint')
+  const hasJointItem = data.recurringTemplates.some((t) => t.location === 'joint') || data.loans.some((l) => l.location === 'joint' && l.active)
   if (data.people.length >= 2 && hasJointItem) deck.push({ kind: 'joint' })
   if (data.people.length >= 2) deck.push({ kind: 'household' })
 
@@ -481,7 +481,7 @@ function CategoryGroupedList({ transactions, data }: { transactions: Transaction
         const category = data.categories.find((c) => c.id === groupKey)
         // The Loans/Credit Card buckets fall back to their own name even
         // if the underlying category record has been renamed away from
-        // it, or (for the Loans bucket, which is an ordinary deletable
+        // it, or (for the Borrowing bucket, which is an ordinary deletable
         // seeded category rather than a protected built-in) deleted
         // outright — the bucket itself is still meaningful either way.
         const fallbackName = groupKey === LOANS_GROUP_CATEGORY_ID ? 'Loans' : groupKey === CREDIT_CARD_CATEGORY_ID ? 'Credit Card' : 'Uncategorised'
@@ -548,7 +548,7 @@ function PersonalDetail({
 
 function ProgressRingsSection({ data, horizon, projection }: { data: AppDataV2; horizon: ProjectionHorizon; projection: ProjectionResult }) {
   const person = data.people.find((p) => p.id === data.primaryPersonId)
-  const loans = data.loans.filter((l) => l.location === 'personal' && l.ownerId === data.primaryPersonId)
+  const loans = data.loans.filter((l) => l.location === 'personal' && l.ownerId === data.primaryPersonId && l.active)
   const goals = (person?.savingsEntries ?? []).filter((e) => e.type === 'goal' && e.includeInSummary)
   if (loans.length === 0 && goals.length === 0) return null
 
@@ -561,26 +561,36 @@ function ProgressRingsSection({ data, horizon, projection }: { data: AppDataV2; 
   const showProjection = horizon === 'three_cycles'
   const horizonEndDate = new Date(projection.horizonEnd)
 
-  // Aggregate across every loan's own summary, not an average of their
-  // individual percentages — same convention as the credit cards' combined
-  // ring (CreditCardsCombinedDetail), so a large loan properly outweighs a
-  // small one in the combined figure rather than each loan counting equally.
-  const loanSummaries = loans.map((loan) => summarizeLoan(loan))
-  const totalLoansPayable = loanSummaries.reduce((sum, s) => sum + s.totalPayable, 0)
-  const totalLoansRemaining = loanSummaries.reduce((sum, s) => sum + s.remainingBalance, 0)
-  const totalLoansPaid = totalLoansPayable - totalLoansRemaining
-  const totalLoansPercentRepaid = totalLoansPayable > 0 ? Math.min(100, (totalLoansPaid / totalLoansPayable) * 100) : 0
+  // Two genuinely different, both-legitimate loan figures (see
+  // summarizeLoanProgress's own comment): `totalPaid`/`nominalRemaining`
+  // is "how much cash will I ever hand over on this loan, including
+  // interest not yet accrued" — the headline figure here, by explicit
+  // request, since it's what a person budgeting against their real
+  // monthly outgoings wants to see first. `capitalRemaining` (true
+  // amortised principal — what a bank app's own "balance" figure shows)
+  // is still shown, just demoted to a smaller, clearly-separate line, so
+  // neither figure is lost or silently conflated with the other. The
+  // ring itself fills by CASH progress (percentPaid), matching whichever
+  // number is headlined, not by principal progress.
+  const loanProgress = loans.map((loan) => summarizeLoanProgress(loan))
+  const totalLoansBalance = loanProgress.reduce((sum, p) => sum + p.totalBalance, 0)
+  const totalLoansPaid = loanProgress.reduce((sum, p) => sum + p.totalPaid, 0)
+  const totalLoansNominalRemaining = loanProgress.reduce((sum, p) => sum + p.nominalRemaining, 0)
+  const totalLoansCapitalRemaining = loanProgress.reduce((sum, p) => sum + p.capitalRemaining, 0)
+  const totalLoansPercentPaid = totalLoansBalance > 0 ? Math.min(100, (totalLoansPaid / totalLoansBalance) * 100) : 0
 
-  // Projected remaining balance as of the horizon's end date — reusing
-  // summarizeLoan with a future asOfDate rather than re-deriving anything
-  // from the projection's generated transactions: buildLoanSchedule
-  // already bakes in every scheduled payment, one-off overpayment, AND
-  // standing recurring overpayment between now and then, regardless of
-  // "today", so this is exactly "where the loan will genuinely be."
-  const projectedLoanSummaries = showProjection ? loans.map((loan) => summarizeLoan(loan, horizonEndDate)) : null
-  const totalLoansProjectedRemaining = projectedLoanSummaries?.reduce((sum, s) => sum + s.remainingBalance, 0) ?? totalLoansRemaining
-  const totalLoansProjectedPaid = totalLoansPayable - totalLoansProjectedRemaining
-  const totalLoansProjectedPercent = totalLoansPayable > 0 ? Math.min(100, (totalLoansProjectedPaid / totalLoansPayable) * 100) : 0
+  // Projected progress as of the horizon's end date — reusing
+  // summarizeLoanProgress with a future asOfDate rather than re-deriving
+  // anything from the projection's generated transactions:
+  // buildLoanSchedule already bakes in every scheduled payment, one-off
+  // overpayment, AND standing recurring overpayment between now and
+  // then, regardless of "today", so this is exactly "where the loan will
+  // genuinely be."
+  const projectedLoanProgress = showProjection ? loans.map((loan) => summarizeLoanProgress(loan, horizonEndDate)) : null
+  const totalLoansProjectedPaid = projectedLoanProgress?.reduce((sum, p) => sum + p.totalPaid, 0) ?? totalLoansPaid
+  const totalLoansProjectedPercent = totalLoansBalance > 0 ? Math.min(100, (totalLoansProjectedPaid / totalLoansBalance) * 100) : 0
+  const totalLoansProjectedNominalRemaining = projectedLoanProgress?.reduce((sum, p) => sum + p.nominalRemaining, 0) ?? totalLoansNominalRemaining
+  const totalLoansProjectedCapitalRemaining = projectedLoanProgress?.reduce((sum, p) => sum + p.capitalRemaining, 0) ?? totalLoansCapitalRemaining
 
   const savingsCategory = data.categories.find((c) => c.id === SAVINGS_CATEGORY_ID)
 
@@ -591,29 +601,46 @@ function ProgressRingsSection({ data, horizon, projection }: { data: AppDataV2; 
           <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-3">Loans</h3>
           <div className="flex flex-col items-center gap-5">
             {loans.map((loan, i) => {
-              const summary = loanSummaries[i]
-              const percentRepaid = summary.totalPayable > 0 ? Math.min(100, ((summary.totalPayable - summary.remainingBalance) / summary.totalPayable) * 100) : 0
-              const projectedSummary = projectedLoanSummaries?.[i]
-              const projectedPercent =
-                projectedSummary && summary.totalPayable > 0
-                  ? Math.min(100, ((summary.totalPayable - projectedSummary.remainingBalance) / summary.totalPayable) * 100)
-                  : undefined
+              const progress = loanProgress[i]
+              const projected = projectedLoanProgress?.[i]
               const category = data.categories.find((c) => c.id === loan.categoryId)
               return (
                 <div key={loan.id} className="flex flex-col items-center gap-1">
                   <ProgressRing
-                    percent={percentRepaid}
-                    projectedPercent={projectedPercent}
-                    value={`£${formatCurrency(summary.remainingBalance)}`}
+                    percent={progress.percentPaid}
+                    projectedPercent={projected?.percentPaid}
+                    value={`£${formatCurrency(progress.totalPaid)}`}
                     label={loan.name}
                     size={110}
                     strokeWidth={10}
                     icon={<CategoryIcon category={category} size={22} />}
                   />
-                  <p className="text-[11px] text-[var(--color-ink-faint)]">of £{formatCurrency(summary.totalPayable)}</p>
-                  {showProjection && projectedSummary && (
-                    <p className="text-[11px]" style={{ color: 'var(--color-coral)' }}>
-                      projected £{formatCurrency(projectedSummary.remainingBalance)} left by {HORIZON_LABELS[horizon].toLowerCase()}
+                  <p className="text-[11px] text-[var(--color-ink-faint)]">
+                    of £{formatCurrency(progress.totalBalance)} · {progress.percentPaid.toFixed(0)}
+                    {showProjection && projected ? `→${projected.percentPaid.toFixed(0)}` : ''}% paid
+                  </p>
+                  {/* Next 3 cycles: every figure shown alongside its
+                      projected counterpart (arrow notation, actual→projected)
+                      rather than replacing the actual figure outright —
+                      This Cycle view is untouched, showing only today's
+                      real numbers, same as before. */}
+                  <p className="text-[11px] text-[var(--color-ink-muted)]">
+                    £{formatCurrency(progress.nominalRemaining)}
+                    {showProjection && projected && (
+                      <span style={{ color: 'var(--color-coral)' }}> → £{formatCurrency(projected.nominalRemaining)}</span>
+                    )}{' '}
+                    remaining
+                  </p>
+                  <p className="text-[10px] text-[var(--color-ink-faint)]">
+                    £{formatCurrency(progress.capitalRemaining)}
+                    {showProjection && projected && (
+                      <span style={{ color: 'var(--color-coral)' }}> → £{formatCurrency(projected.capitalRemaining)}</span>
+                    )}{' '}
+                    capital owed
+                  </p>
+                  {showProjection && projected && (
+                    <p className="text-[10px]" style={{ color: 'var(--color-coral)' }}>
+                      by {HORIZON_LABELS[horizon].toLowerCase()}
                     </p>
                   )}
                 </div>
@@ -626,20 +653,29 @@ function ProgressRingsSection({ data, horizon, projection }: { data: AppDataV2; 
                 style={{ borderColor: 'var(--color-track)' }}
               >
                 <ProgressRing
-                  percent={totalLoansPercentRepaid}
+                  percent={totalLoansPercentPaid}
                   projectedPercent={showProjection ? totalLoansProjectedPercent : undefined}
-                  value={`£${formatCurrency(totalLoansRemaining)}`}
+                  value={`£${formatCurrency(totalLoansPaid)}`}
                   label="Total Loans"
                   size={160}
                   strokeWidth={14}
                   icon={<Layers size={28} strokeWidth={1.75} />}
                 />
                 <p className="text-[11px] text-[var(--color-ink-faint)]">
-                  £{formatCurrency(totalLoansPaid)} paid, of £{formatCurrency(totalLoansPayable)}
+                  of £{formatCurrency(totalLoansBalance)} · {totalLoansPercentPaid.toFixed(0)}
+                  {showProjection ? `→${totalLoansProjectedPercent.toFixed(0)}` : ''}% paid
+                </p>
+                <p className="text-[11px] text-[var(--color-ink-muted)]">
+                  £{formatCurrency(totalLoansNominalRemaining)}
+                  {showProjection && <span style={{ color: 'var(--color-coral)' }}> → £{formatCurrency(totalLoansProjectedNominalRemaining)}</span>} remaining
+                </p>
+                <p className="text-[10px] text-[var(--color-ink-faint)]">
+                  £{formatCurrency(totalLoansCapitalRemaining)}
+                  {showProjection && <span style={{ color: 'var(--color-coral)' }}> → £{formatCurrency(totalLoansProjectedCapitalRemaining)}</span>} capital owed
                 </p>
                 {showProjection && (
-                  <p className="text-[11px]" style={{ color: 'var(--color-coral)' }}>
-                    projected £{formatCurrency(totalLoansProjectedRemaining)} left by {HORIZON_LABELS[horizon].toLowerCase()}
+                  <p className="text-[10px]" style={{ color: 'var(--color-coral)' }}>
+                    by {HORIZON_LABELS[horizon].toLowerCase()}
                   </p>
                 )}
               </div>

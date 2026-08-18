@@ -25,7 +25,7 @@
 import type { AppData, Bill as LegacyBill, Loan as LegacyLoan, Person as LegacyPerson } from '../types/models'
 import type { AppDataV2, RecurringTemplate } from '../types/ledger'
 import { findApplicableSnapshot } from './salaryLedger'
-import { summarizeLoan as summarizeLedgerLoan } from './ledgerLoans'
+import { summarizeLoan as summarizeLedgerLoan, resolveLoanRateAndConvention } from './ledgerLoans'
 import { computeMinimumPaymentAmount } from './creditCards'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -114,8 +114,16 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
   // makes the old engine's from-scratch schedule simulation correctly
   // pick up from wherever the loan actually is now, including any real
   // overpayments already logged against it in the ledger.
-  const loans: LegacyLoan[] = ledgerData.loans.map((loan) => {
+  //
+  // calibratedMonthlyRate/interestConventionId/settlementMultiplier are
+  // resolved from the REAL ledger loan (not just copied verbatim) so an
+  // uncalibrated loan still carries a real, usable rate through the
+  // bridge — resolveLoanRateAndConvention's back-solved baseline, same
+  // as ledgerLoans.ts itself falls back to. See lib/loans.ts for the
+  // delegation these enable.
+  const loans: LegacyLoan[] = ledgerData.loans.filter((loan) => loan.active).map((loan) => {
     const summary = summarizeLedgerLoan(loan, asOf)
+    const { monthlyRate, convention } = resolveLoanRateAndConvention(loan)
     return {
       id: loan.id,
       name: loan.name,
@@ -126,6 +134,9 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
       ownerId: loan.ownerId,
       payee: loan.payee,
       payeeSharePercent: loan.payeeSharePercent,
+      calibratedMonthlyRate: monthlyRate,
+      interestConventionId: convention.id,
+      settlementMultiplier: loan.settlementMultiplier,
     }
   })
 

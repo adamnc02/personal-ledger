@@ -9,6 +9,7 @@ import { computeProjection, horizonRangeEnd } from '../src/lib/projection'
 import { monthlyAmountForEntry } from '../src/lib/savings'
 import type { AppDataV2, Loan, Person, PayCycleConfig } from '../src/types/ledger'
 import { defaultLedgerData } from '../src/lib/ledgerStorage'
+import { toLocalIsoDate } from '../src/lib/date'
 
 function check(label: string, actual: unknown, expected: unknown) {
   const pass = JSON.stringify(actual) === JSON.stringify(expected)
@@ -20,6 +21,7 @@ function check(label: string, actual: unknown, expected: unknown) {
 const loan: Loan = {
   id: 'loan-1',
   name: 'Sofa',
+  principal: 1200, // 0%-equivalent (100 × 12) — this suite is about the projection horizon, not interest
   monthlyPayment: 100,
   termMonths: 12,
   startDate: '2026-01-01',
@@ -29,6 +31,7 @@ const loan: Loan = {
   payee: '',
   payeeSharePercent: 100,
   overpayments: [],
+  active: true,
 }
 
 const todaySummary = summarizeLoan(loan, new Date('2026-06-15'))
@@ -94,9 +97,12 @@ const projectedTotal = 500 + goalContributions.reduce((sum, t) => sum + t.amount
 check('Projected goal total after 3 cycles = 500 existing + 3× the required monthly amount', projectedTotal, 500 + expectedMonthly * 3)
 check('Projected total is comfortably under the £2000 target (percent calc will clamp correctly, not overflow)', projectedTotal <= 2000, true)
 
-function toIsoDate(d: Date): string {
-  return d.toISOString().slice(0, 10)
-}
-check('Horizon end used for the loan check and the savings check is the same kind of date (three_cycles)', toIsoDate(threeCycleEnd), projection.horizonEnd)
+// NB: date-only formatting here MUST go through the shared toLocalIsoDate
+// helper (src/lib/date.ts), never `d.toISOString().slice(0, 10)` — this
+// test previously reimplemented that exact banned pattern locally, which
+// silently rolled threeCycleEnd back a day during BST (Aug 31 -> Aug 30)
+// since toISOString() converts to UTC first. threeCycleEnd itself was
+// always correct; only this comparison's own formatting was broken.
+check('Horizon end used for the loan check and the savings check is the same kind of date (three_cycles)', toLocalIsoDate(threeCycleEnd), projection.horizonEnd)
 
 console.log(process.exitCode ? '\nSome checks FAILED.' : '\nAll projected-pie checks passed.')

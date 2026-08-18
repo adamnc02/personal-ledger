@@ -11,7 +11,7 @@ import { computeNetBonusAmount, computeSnapshotNetPayForPeriod } from '../lib/sa
  * gross figure inflates the period's gross before tax/NI/deductions are
  * applied, and the resulting net pay is what shows as that period's salary
  * everywhere (Salary page, Home summary, projections). There is no separate
- * transaction and nothing shows on the Expenses page: the whole thing lives
+ * transaction and nothing shows on the Transactions page: the whole thing lives
  * on the Salary page, same as any other salary adjustment.
  *
  * personId is a real ledger Person id — the Salary page now runs on the

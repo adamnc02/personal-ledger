@@ -5,7 +5,7 @@ import { Check } from 'lucide-react'
 // Used anywhere a row/card has a Save button: on save, the row collapses and
 // briefly flashes a solid green fill (--color-positive) with a check mark
 // and "Saved" in white, instead of a static inline "Saved." text. Keeps the
-// feedback consistent across Bills, pay periods, Loans, and Savings.
+// feedback consistent across Bills, pay periods, Borrowing, and Savings.
 
 export function useSavedFlash(duration = 1300) {
   const [active, setActive] = useState(false)

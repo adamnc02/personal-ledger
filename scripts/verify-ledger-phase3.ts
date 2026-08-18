@@ -202,6 +202,7 @@ const jointRent: RecurringTemplate = {
 const jointLoan: Loan = {
   id: 'joint-loan',
   name: 'Joint Car Loan',
+  principal: 4800, // 0%-equivalent (200 × 24) — this suite is about joint-split mechanics, not interest
   monthlyPayment: 200,
   termMonths: 24,
   startDate: '2026-01-01',
@@ -211,6 +212,7 @@ const jointLoan: Loan = {
   payee: 'alice',
   payeeSharePercent: 60,
   overpayments: [],
+  active: true,
 }
 
 const jointData: AppDataV2 = {

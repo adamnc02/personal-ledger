@@ -25,6 +25,7 @@ const me: Person = {
 const carLoan: Loan = {
   id: 'car-loan',
   name: 'Car Loan',
+  principal: 3000, // 0%-equivalent (250 × 12) — this suite is about the legacy-bridge adapter, not interest
   monthlyPayment: 250,
   termMonths: 12,
   startDate: '2026-01-15',
@@ -40,6 +41,7 @@ const carLoan: Loan = {
     { id: 'o1', date: '2026-02-10', amount: 700, note: 'Tax refund' },
     { id: 'o2', date: '2026-03-10', amount: 500 },
   ],
+  active: true,
 }
 
 const weeklyGroceries: RecurringTemplate = {

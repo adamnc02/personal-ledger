@@ -16,7 +16,7 @@ import type { Category } from '../types/ledger'
  * intentionally decoupled, since Bills itself (doc Section 4.3's chosen
  * location for this button) still runs on the pre-rebuild data model
  * until it's migrated to RecurringTemplate in a later phase. The
- * categories managed here are already live for Expenses and Loans.
+ * categories managed here are already live for Transactions and Borrowing.
  */
 export function CategoryManagerButton() {
   const [open, setOpen] = useState(false)

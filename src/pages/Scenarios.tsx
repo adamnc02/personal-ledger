@@ -94,7 +94,7 @@ export function Scenarios() {
   }
 
   // "Convert to real" for a loan/credit-card impact — rather than
-  // auto-saving here, the user is transported to the Loans page with the
+  // auto-saving here, the user is transported to the Borrowing page with the
   // target row already open and the relevant fields pre-populated (a
   // one-off payoff pre-fills the log-an-overpayment/log-a-payment form; a
   // recurring overpayment pre-fills the loan's recurring overpayment
@@ -519,7 +519,7 @@ function ImpactSummary({ impact, viewerId, onMakeReal }: { impact: ScenarioImpac
   )
 }
 
-/** Sends a lump-sum or recurring-overpayment impact over to the Loans page, pre-filled and ready to review — see makeImpactReal above for why this navigates rather than saving directly. */
+/** Sends a lump-sum or recurring-overpayment impact over to the Borrowing page, pre-filled and ready to review — see makeImpactReal above for why this navigates rather than saving directly. */
 function MakeRealButton({ impact, onMakeReal }: { impact: LoanImpact; onMakeReal: (li: LoanImpact) => void }) {
   const label = impact.kind === 'payoff' ? `Log £${formatCurrency(impact.lumpSumApplied)} as a real payment` : 'Make this a real recurring overpayment'
 
@@ -769,7 +769,7 @@ function ScenarioForm({
                     const [kind, id] = e.target.value.split(':') as [ScenarioTargetKind, string]
                     updateAction({ linkedTargetKind: kind, linkedTargetId: id, linkedLoanId: undefined })
                   }}
-                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                  className="col-span-2 w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
                 >
                   <option value="">Choose a loan or credit card…</option>
                   {data.loans.map((l) => (

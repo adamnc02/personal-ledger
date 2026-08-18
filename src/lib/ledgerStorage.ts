@@ -10,6 +10,8 @@ import { defaultCategories } from './categories'
 import { reconcilePersonReferences } from './household'
 import { toLocalIsoDate } from './date'
 
+const round2 = (n: number) => Math.round(n * 100) / 100
+
 const STORAGE_KEY = 'ledger:app-data-v2:v1'
 
 export function loadLedgerData(): AppDataV2 | null {
@@ -44,7 +46,29 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
     people: data.people ?? [],
     categories: [...categories, ...missingBuiltIns],
     recurringTemplates: data.recurringTemplates ?? [],
-    loans: data.loans ?? [],
+    // `active` was introduced by the amortisation-engine work (scope §7),
+    // mirroring CreditCard.active — any loan persisted before that field
+    // existed backfills to true (still open/ongoing), same reasoning as
+    // the built-in-category backfill above: never silently hide or
+    // deactivate something the person never touched. Every other new
+    // loan field (lender, advanceDate, calibration data) is genuinely
+    // optional at the type level and needs no backfill.
+    //
+    // `principal` is a NEW REQUIRED field (same scope of work) — a loan
+    // persisted before it existed has no real record of what was
+    // actually borrowed, only monthlyPayment × termMonths (the old flat
+    // model's "total payable", which is what the amortisation engine's
+    // baseline back-solve would treat as a 0%-interest loan if left as
+    // the principal too). Backfilling to that same figure is the only
+    // information-preserving default available — it reproduces the old
+    // flat model's numbers exactly (0% effective rate) until the person
+    // corrects it with the real amount borrowed via the loan's edit view,
+    // rather than guessing a non-zero rate from nothing.
+    loans: (data.loans ?? []).map((loan) => ({
+      ...loan,
+      active: loan.active ?? true,
+      principal: loan.principal ?? round2(loan.monthlyPayment * loan.termMonths),
+    })),
     creditCards: data.creditCards ?? [],
     transactions: data.transactions ?? [],
     payCycles: data.payCycles ?? [],

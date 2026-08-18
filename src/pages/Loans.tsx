@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
-import { formatCurrency } from '../lib/format'
+import { createPortal } from 'react-dom'
+import { formatCurrency, formatMonthYear } from '../lib/format'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Plus, ChevronDown, ChevronUp, CreditCard as CreditCardIcon } from 'lucide-react'
+import { Plus, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, X, Info, AlertTriangle } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
-import { summarizeLoan } from '../lib/ledgerLoans'
+import { summarizeLoan, summarizeLoanProgress, estimateSettlementFigure, findLenderCalibrationProfile, previewOverpaymentRecast, previewRecurringOverpaymentRecast, buildLoanLedgerRows, loanFinishInfo, isLoanConfidentlyCalibrated, MAX_CALIBRATION_LINES, type CalibrationResult, type LoanLedgerRowType } from '../lib/ledgerLoans'
 import { computeMinimumPaymentAmount, pickCreditCardColor } from '../lib/creditCards'
-import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment } from '../types/ledger'
+import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type StatementCalibrationLine } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
 import { CategoryIcon } from '../components/CategoryIcon'
@@ -57,6 +58,8 @@ export function Loans() {
     logLoanOverpayment,
     updateLoanOverpayment,
     removeLoanOverpayment,
+    settleLoanAction,
+    calibrateLoanAction,
     addCreditCard,
     updateCreditCard,
     removeCreditCard,
@@ -100,7 +103,7 @@ export function Loans() {
   return (
     <div className="max-w-md mx-auto px-4 pt-6">
       <header className="mb-6">
-        <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Loans</h1>
+        <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Borrowing</h1>
       </header>
 
       <CollapsibleSection title="Loans" className="mb-8" headerExtra={<AddButton onClick={() => setAddingLoan(true)} />}>
@@ -117,6 +120,7 @@ export function Loans() {
             initial={loanPrefill}
             hasJointBills={hasJointBills}
             canBeJoint={canBeJoint}
+            existingLoans={data.loans}
             onAddCategory={addCategory}
             onCancel={() => {
               setAddingLoan(false)
@@ -133,9 +137,8 @@ export function Loans() {
         <div className="flex flex-col gap-3">
           {data.loans.map((loan) => {
             const summary = summarizeLoan(loan)
+            const progress = summarizeLoanProgress(loan)
             const category = data.categories.find((c) => c.id === loan.categoryId)
-            const percentRepaid =
-              summary.totalPayable > 0 ? Math.min(100, ((summary.totalPayable - summary.remainingBalance) / summary.totalPayable) * 100) : 0
             const isOpen = expandedLoan === loan.id
             return (
               <LoanRow
@@ -143,7 +146,7 @@ export function Loans() {
                 loan={loan}
                 category={category}
                 summary={summary}
-                percentRepaid={percentRepaid}
+                progress={progress}
                 isOpen={isOpen}
                 onToggle={() => setExpandedLoan(isOpen ? null : loan.id)}
                 onRemove={() => removeLoan(loan.id)}
@@ -153,9 +156,11 @@ export function Loans() {
                 canBeJoint={canBeJoint}
                 onAddCategory={addCategory}
                 onSave={(u) => updateLoan(loan.id, u)}
-                onLogOverpayment={(amount, date, note) => logLoanOverpayment(loan.id, amount, date, note)}
+                onLogOverpayment={(amount, date, note, recastMode) => logLoanOverpayment(loan.id, amount, date, note, recastMode)}
                 onUpdateOverpayment={(overpaymentId, amount, date, note) => updateLoanOverpayment(loan.id, overpaymentId, amount, date, note)}
                 onRemoveOverpayment={(overpaymentId) => removeLoanOverpayment(loan.id, overpaymentId)}
+                onSettle={(amount, date, note) => settleLoanAction(loan.id, amount, date, note)}
+                onCalibrate={(lines) => calibrateLoanAction(loan.id, lines)}
                 overpaymentPrefill={overpaymentPrefill?.targetKind === 'loan' && overpaymentPrefill.targetId === loan.id ? overpaymentPrefill : null}
                 onPrefillConsumed={() => setOverpaymentPrefill(null)}
               />
@@ -234,7 +239,7 @@ function LoanRow({
   loan,
   category,
   summary,
-  percentRepaid,
+  progress,
   isOpen,
   onToggle,
   onRemove,
@@ -247,13 +252,15 @@ function LoanRow({
   onLogOverpayment,
   onUpdateOverpayment,
   onRemoveOverpayment,
+  onSettle,
+  onCalibrate,
   overpaymentPrefill,
   onPrefillConsumed,
 }: {
   loan: Loan
   category: { id: string; name: string; icon: string; iconColor: string } | undefined
   summary: ReturnType<typeof summarizeLoan>
-  percentRepaid: number
+  progress: ReturnType<typeof summarizeLoanProgress>
   isOpen: boolean
   onToggle: () => void
   onRemove: () => void
@@ -263,33 +270,52 @@ function LoanRow({
   canBeJoint: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
-  onLogOverpayment: (amount: number, date: string, note?: string) => void
+  onLogOverpayment: (amount: number, date: string, note?: string, recastMode?: 'reduce_term' | 'reduce_payment') => void
   onUpdateOverpayment: (overpaymentId: string, amount: number, date: string, note?: string) => void
   onRemoveOverpayment: (overpaymentId: string) => void
+  onSettle: (amount: number, date: string, note?: string) => void
+  onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
 }) {
   const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  const [ledgerOpen, setLedgerOpen] = useState(false)
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={loan.name}>
       <div className="relative rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
-        <button onClick={onToggle} className="w-full flex items-center justify-between text-left">
-          <div className="flex items-center gap-2">
-            <CategoryIcon category={category} />
-            <div>
-              <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">{loan.name}</h3>
-              <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
-                £{formatCurrency(summary.remainingBalance)} remaining · {summary.monthsRemaining} payment
-                {summary.monthsRemaining === 1 ? '' : 's'} left
-              </p>
+        <div className="flex items-center gap-2">
+          <button onClick={onToggle} className="flex-1 min-w-0 flex items-center justify-between text-left">
+            <div className="flex items-center gap-2 min-w-0">
+              <CategoryIcon category={category} />
+              <div className="min-w-0">
+                <h3 className="font-display text-base font-semibold text-[var(--color-ink)] truncate">{loan.name}</h3>
+                {/* Headline is the nominal remaining figure — "how much more
+                    cash will I hand over if I keep paying as scheduled,"
+                    including interest not yet accrued — matching the same
+                    figure now headlined on the Home page's pie chart. True
+                    capital/principal still owed (what a bank app's own
+                    balance figure shows) stays visible on the line below,
+                    clearly separate rather than silently swapped for it. */}
+                <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+                  £{formatCurrency(progress.nominalRemaining)} remaining · {summary.monthsRemaining} payment
+                  {summary.monthsRemaining === 1 ? '' : 's'} left
+                </p>
+                <p className="text-[11px] text-[var(--color-ink-faint)]">£{formatCurrency(progress.capitalRemaining)} capital owed</p>
+              </div>
             </div>
-          </div>
-          <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
-        </button>
+            <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
+          </button>
+          {/* Loan ledger modal entry point (D8, scope §10) — deliberately on THIS card, on the Loans/Borrowing page, not on the Home page's pie card as the scope doc originally described. */}
+          <button onClick={() => setLedgerOpen(true)} className="shrink-0 text-[var(--color-ink-faint)]" aria-label={`View ${loan.name}'s ledger`}>
+            <Info size={16} />
+          </button>
+        </div>
+
+        {ledgerOpen && <LoanLedgerModal loan={loan} onClose={() => setLedgerOpen(false)} />}
 
         <div className="h-1.5 rounded-full mt-3 overflow-hidden" style={{ background: 'var(--color-track)' }}>
-          <div className="h-full rounded-full" style={{ width: `${percentRepaid}%`, background: 'var(--color-coral)' }} />
+          <div className="h-full rounded-full" style={{ width: `${progress.percentPaid}%`, background: 'var(--color-coral)' }} />
         </div>
 
         {isOpen && (
@@ -308,6 +334,12 @@ function LoanRow({
             onLogOverpayment={onLogOverpayment}
             onUpdateOverpayment={onUpdateOverpayment}
             onRemoveOverpayment={onRemoveOverpayment}
+            onSettle={(amount, date, note) => {
+              onSettle(amount, date, note)
+              onToggle()
+              triggerFlash()
+            }}
+            onCalibrate={onCalibrate}
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
           />
@@ -415,6 +447,8 @@ function LoanEditPanel({
   onLogOverpayment,
   onUpdateOverpayment,
   onRemoveOverpayment,
+  onSettle,
+  onCalibrate,
   overpaymentPrefill,
   onPrefillConsumed,
 }: {
@@ -425,9 +459,11 @@ function LoanEditPanel({
   canBeJoint: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
-  onLogOverpayment: (amount: number, date: string, note?: string) => void
+  onLogOverpayment: (amount: number, date: string, note?: string, recastMode?: 'reduce_term' | 'reduce_payment') => void
   onUpdateOverpayment: (overpaymentId: string, amount: number, date: string, note?: string) => void
   onRemoveOverpayment: (overpaymentId: string) => void
+  onSettle: (amount: number, date: string, note?: string) => void
+  onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
 }) {
@@ -444,6 +480,8 @@ function LoanEditPanel({
     return base
   })
   const [loggingOverpayment, setLoggingOverpayment] = useState(overpaymentPrefill?.mode === 'payoff')
+  const [settlingLoan, setSettlingLoan] = useState(false)
+  const [calibratingLoan, setCalibratingLoan] = useState(false)
 
   // Prefill only needs to seed the initial draft/form state above — once
   // this panel has mounted with it, tell the parent to forget it so a
@@ -467,9 +505,28 @@ function LoanEditPanel({
     <div className="mt-4 flex flex-col gap-3">
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
+        <EditField label="Lender (optional)" value={draft.lender ?? ''} onChange={(v) => update({ lender: v || undefined })} />
+        <EditField label="Amount borrowed (£)" type="number" value={draft.principal} onChange={(v) => update({ principal: Number(v) })} />
         <EditField label="Monthly payment (£)" type="number" value={draft.monthlyPayment} onChange={(v) => update({ monthlyPayment: Number(v) })} />
         <EditField label="Term (months)" type="number" value={draft.termMonths} onChange={(v) => update({ termMonths: Number(v) })} />
-        <EditField label="Start date" type="date" value={draft.startDate} onChange={(v) => update({ startDate: v })} />
+        <EditField label="First payment date" type="date" value={draft.startDate} onChange={(v) => update({ startDate: v })} />
+        <EditField label="Advance date (optional)" type="date" value={draft.advanceDate ?? ''} onChange={(v) => update({ advanceDate: v || undefined })} />
+        {/* Deliberately no mention of WHICH interest convention matched
+            anywhere in the app — that's internal plumbing (loan-amortisation
+            scope §5.1/§5.5), not something to surface. This is purely a
+            status indicator: red + warning icon means the loan is still on
+            an uncalibrated estimate and would benefit from real statement
+            lines; green means a confident fit already exists. Always
+            visible (not hidden once confident) so the affordance to add
+            more lines for extra precision never disappears. */}
+        <button
+          onClick={() => setCalibratingLoan(true)}
+          className="flex items-center gap-1.5 text-xs font-medium self-end justify-self-start pb-1"
+          style={{ color: isLoanConfidentlyCalibrated(loan) ? 'var(--color-positive)' : 'var(--color-negative)' }}
+        >
+          {!isLoanConfidentlyCalibrated(loan) && <AlertTriangle size={12} />}
+          Calibrate
+        </button>
       </div>
       <p className="text-xs text-[var(--color-ink-faint)]">Total payable (nominal): £{formatCurrency(previewSummary.totalPayable)}</p>
 
@@ -494,17 +551,47 @@ function LoanEditPanel({
           + Log an overpayment
         </button>
       ) : (
-        <OverpaymentForm
+        <LoanOverpaymentForm
+          loan={{ ...loan, ...draft }}
           initialAmount={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.amount : undefined}
           initialDate={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.date : undefined}
-          onLog={(amount, date, note) => {
-            onLogOverpayment(amount, date, note)
+          onLog={(amount, date, note, recastMode) => {
+            onLogOverpayment(amount, date, note, recastMode)
             setLoggingOverpayment(false)
           }}
         />
       )}
 
-      <RecurringOverpaymentEditor value={draft.recurringOverpayment} onChange={(recurringOverpayment) => update({ recurringOverpayment })} />
+      <RecurringOverpaymentEditor loan={{ ...loan, ...draft }} value={draft.recurringOverpayment} onChange={(recurringOverpayment) => update({ recurringOverpayment })} />
+
+      {calibratingLoan && (
+        <CalibrationModal loanName={loan.name} existingLinesCount={loan.statementCalibrationLines?.length ?? 0} onCalibrate={onCalibrate} onClose={() => setCalibratingLoan(false)} />
+      )}
+
+      {loan.active ? (
+        <>
+          <button onClick={() => setSettlingLoan(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+            Settle this loan
+          </button>
+          {settlingLoan && (
+            <SettleLoanModal
+              loanName={loan.name}
+              estimatedSettlement={estimateSettlementFigure({ ...loan, ...draft })}
+              trueOutstandingBalance={previewSummary.remainingBalance}
+              onSettle={(amount, date, note) => {
+                onSettle(amount, date, note)
+                setSettlingLoan(false)
+              }}
+              onClose={() => setSettlingLoan(false)}
+            />
+          )}
+        </>
+      ) : (
+        <p className="text-xs text-[var(--color-ink-faint)]">
+          Settled for £{formatCurrency(loan.settledAmount ?? 0)}
+          {loan.closedDate ? ` on ${loan.closedDate}` : ''}
+        </p>
+      )}
 
       <button
         onClick={() => onSave(draft)}
@@ -619,6 +706,364 @@ function CreditCardEditPanel({
 }
 
 // ── Overpayment / lump-payment logging — shared shape for both loans and credit cards ──
+
+/**
+ * Read-only, scrollable, date-ascending record of every dated event on
+ * this loan (scope §10) — reached from the info icon on the loan's own
+ * card on THIS page (deliberately, not the Home page's pie card, which
+ * is where the scope doc originally placed it). A finish-date banner up
+ * top is computed live from the real schedule (loanFinishInfo), and each
+ * row is one dated event, not one period — a period with both a regular
+ * payment and an overpayment is two rows, keeping the three payment
+ * types visually distinguishable per scope's explicit requirement.
+ */
+function LoanLedgerModal({ loan, onClose }: { loan: Loan; onClose: () => void }) {
+  const rows = buildLoanLedgerRows(loan)
+  const finish = loanFinishInfo(loan)
+
+  const finishLabel = finish.settledEarly
+    ? `Settled${finish.finishDate ? ` ${finish.finishDate}` : ''}`
+    : finish.finishDate
+      ? `Finishes: ${formatMonthYear(finish.finishDate)}${finish.monthsEarly > 0 ? ` (${finish.monthsEarly} month${finish.monthsEarly === 1 ? '' : 's'} early due to overpayments)` : ''}`
+      : 'No schedule yet'
+
+  const typeStyles: Record<LoanLedgerRowType, { label: string; color: string }> = {
+    'Monthly Repayment': { label: 'Monthly', color: 'var(--color-ink-muted)' },
+    'Ad-hoc Overpayment': { label: 'Ad-hoc overpayment', color: 'var(--color-coral)' },
+    'Recurring Overpayment': { label: 'Recurring overpayment', color: 'var(--color-coral)' },
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] flex flex-col"
+        style={{
+          background: 'var(--color-surface)',
+          paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">{loan.name}</h3>
+          <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="rounded-xl p-3 mb-3" style={{ background: 'var(--color-bg-elevated)' }}>
+          <p className="text-sm font-medium text-[var(--color-ink)]">{finishLabel}</p>
+        </div>
+
+        <div className="overflow-y-auto flex-1 -mx-5 px-5">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-[var(--color-ink-faint)]" style={{ borderBottom: '1px solid var(--color-track)' }}>
+                <th className="py-1.5 font-medium">Date</th>
+                <th className="py-1.5 font-medium text-right">Amount</th>
+                <th className="py-1.5 font-medium text-right">Capital</th>
+                <th className="py-1.5 font-medium text-right">Interest</th>
+                <th className="py-1.5 font-medium text-right">Type</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={i} style={{ borderBottom: '1px solid var(--color-track)' }}>
+                  <td className="py-1.5 text-[var(--color-ink)] whitespace-nowrap">{row.date}</td>
+                  <td className="py-1.5 text-right text-[var(--color-ink)]">£{formatCurrency(row.amount)}</td>
+                  <td className="py-1.5 text-right text-[var(--color-ink-muted)]">£{formatCurrency(row.capital)}</td>
+                  <td className="py-1.5 text-right text-[var(--color-ink-muted)]">£{formatCurrency(row.interest)}</td>
+                  <td className="py-1.5 text-right whitespace-nowrap" style={{ color: typeStyles[row.type].color }}>
+                    {typeStyles[row.type].label}
+                  </td>
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-4 text-center text-[var(--color-ink-faint)]">
+                    No schedule yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function SettleLoanModal({
+  loanName,
+  estimatedSettlement,
+  trueOutstandingBalance,
+  onSettle,
+  onClose,
+}: {
+  loanName: string
+  estimatedSettlement: number
+  trueOutstandingBalance: number
+  onSettle: (amount: number, date: string, note?: string) => void
+  onClose: () => void
+}) {
+  const [amount, setAmount] = useState(estimatedSettlement > 0 ? String(estimatedSettlement) : '')
+  const [date, setDate] = useState(todayIso())
+  const [note, setNote] = useState('')
+  const amountNumber = Number(amount)
+  const canSave = amountNumber > 0 && date
+
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto"
+        style={{
+          background: 'var(--color-surface)',
+          paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">Settle this loan</h3>
+          <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+            <X size={20} />
+          </button>
+        </div>
+
+        <p className="text-xs text-[var(--color-ink-muted)] mb-4 leading-relaxed">
+          Log the real amount actually paid to close {loanName} early — this may differ from the estimate below.
+          Saving zeroes off the loan's balance and marks it settled, regardless of what its schedule predicted.
+        </p>
+
+        <div className="rounded-xl p-3 mb-4 flex flex-col gap-1" style={{ background: 'var(--color-bg-elevated)' }}>
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-[var(--color-ink-muted)]">True outstanding balance</span>
+            <span className="text-[var(--color-ink)] font-medium">£{formatCurrency(trueOutstandingBalance)}</span>
+          </div>
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-[var(--color-ink-muted)]">Estimated settlement figure</span>
+            <span className="text-[var(--color-ink)] font-medium">£{formatCurrency(estimatedSettlement)}</span>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <EditField label="Amount actually paid (£)" type="number" value={amount} onChange={setAmount} />
+          <EditField label="Date" type="date" value={date} onChange={setDate} />
+          <EditField label="Note (optional)" value={note} onChange={setNote} />
+        </div>
+
+        <button
+          disabled={!canSave}
+          onClick={() => onSettle(amountNumber, date, note || undefined)}
+          className="w-full mt-5 py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
+          style={{ background: 'var(--color-coral)' }}
+        >
+          Save
+        </button>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function CalibrationModal({
+  loanName,
+  existingLinesCount,
+  onCalibrate,
+  onClose,
+}: {
+  loanName: string
+  existingLinesCount: number
+  onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
+  onClose: () => void
+}) {
+  const [rows, setRows] = useState<{ date: string; capital: string; interest: string }[]>([{ date: todayIso(), capital: '', interest: '' }])
+  const [result, setResult] = useState<CalibrationResult | null>(null)
+
+  const canAddRow = existingLinesCount + rows.length < MAX_CALIBRATION_LINES
+  const validRows = rows.filter((r) => r.date && Number(r.capital) > 0 && Number(r.interest) >= 0)
+  const canSubmit = rows.length > 0 && validRows.length === rows.length
+
+  function submit() {
+    const lines: StatementCalibrationLine[] = rows.map((r) => ({ date: r.date, capital: Number(r.capital), interest: Number(r.interest) }))
+    setResult(onCalibrate(lines))
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto"
+        style={{
+          background: 'var(--color-surface)',
+          paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">Calibrate interest</h3>
+          <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+            <X size={20} />
+          </button>
+        </div>
+
+        {!result ? (
+          <>
+            <p className="text-xs text-[var(--color-ink-muted)] mb-4 leading-relaxed">
+              Enter real statement lines for {loanName} — the date, capital, and interest shown on each real payment. 2-3 is usually enough; up to{' '}
+              {MAX_CALIBRATION_LINES} in total including any already saved against this loan.
+            </p>
+            <div className="flex flex-col gap-3">
+              {rows.map((row, i) => (
+                <div key={i} className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+                  <div className="grid grid-cols-3 gap-2">
+                    <EditField label="Date" type="date" value={row.date} onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, date: v } : r)))} />
+                    <EditField label="Capital (£)" type="number" value={row.capital} onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, capital: v } : r)))} />
+                    <EditField label="Interest (£)" type="number" value={row.interest} onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, interest: v } : r)))} />
+                  </div>
+                  {rows.length > 1 && (
+                    <button onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))} className="text-xs self-start" style={{ color: 'var(--color-negative)' }}>
+                      Remove line
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            {canAddRow && (
+              <button
+                onClick={() => setRows((rs) => [...rs, { date: todayIso(), capital: '', interest: '' }])}
+                className="text-xs font-medium self-start mt-3"
+                style={{ color: 'var(--color-coral)' }}
+              >
+                + Add another line
+              </button>
+            )}
+            <button
+              disabled={!canSubmit}
+              onClick={submit}
+              className="w-full mt-5 py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
+              style={{ background: 'var(--color-coral)' }}
+            >
+              Calibrate
+            </button>
+          </>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {result.confidence === 'confident' ? (
+              <p className="text-sm text-[var(--color-ink)] leading-relaxed">This loan's real statements matched a known interest pattern — its schedule now uses it.</p>
+            ) : (
+              <p className="text-sm leading-relaxed" style={{ color: 'var(--color-coral)' }}>
+                {result.message}
+              </p>
+            )}
+            {/* No convention name surfaced here or anywhere else in the app —
+                which of the growable library's candidates matched is
+                internal plumbing, not something to show. Just whether
+                calibration succeeded (via the message above) and, on the
+                loan card itself, a colour-coded status (see LoanEditPanel). */}
+            {result.confidence !== 'confident' && existingLinesCount + rows.length < MAX_CALIBRATION_LINES && (
+              <button
+                onClick={() => {
+                  setResult(null)
+                  setRows([{ date: todayIso(), capital: '', interest: '' }])
+                }}
+                className="text-xs font-medium self-start"
+                style={{ color: 'var(--color-coral)' }}
+              >
+                + Add more lines
+              </button>
+            )}
+            <button onClick={onClose} className="w-full mt-2 py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
+              Done
+            </button>
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+/**
+ * The loan-specific one-off overpayment flow (D7's follow-up step,
+ * loan-amortisation-engine scope §9/§11.3) — a genuinely separate
+ * component from the shared OverpaymentForm below rather than an
+ * optional prop on it, since OverpaymentForm is also used for credit
+ * card lump payments, which have no recast concept at all. After
+ * amount/date/note are entered, this shows a follow-up step (not an
+ * inline choice) with both recast options as buttons, each carrying its
+ * own real preview computed via previewOverpaymentRecast — "keep the
+ * same length" shows the new monthly payment that choice would produce,
+ * "keep monthly payment the same" shows the new finish date and
+ * estimated final repayment.
+ */
+function LoanOverpaymentForm({
+  loan,
+  initialAmount,
+  initialDate,
+  onLog,
+}: {
+  loan: Loan
+  initialAmount?: number
+  initialDate?: string
+  onLog: (amount: number, date: string, note: string | undefined, recastMode: 'reduce_term' | 'reduce_payment') => void
+}) {
+  const [amount, setAmount] = useState(initialAmount != null ? String(initialAmount) : '')
+  const [date, setDate] = useState(initialDate ?? todayIso())
+  const [note, setNote] = useState('')
+  const [step, setStep] = useState<'entry' | 'choose'>('entry')
+  const amountNumber = Number(amount)
+  const canContinue = amountNumber > 0 && date
+
+  function commit(recastMode: 'reduce_term' | 'reduce_payment') {
+    onLog(amountNumber, date, note || undefined, recastMode)
+    setAmount('')
+    setNote('')
+    setStep('entry')
+  }
+
+  if (step === 'choose') {
+    const preview = previewOverpaymentRecast(loan, amountNumber, date)
+    return (
+      <div className="rounded-xl p-3 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
+        <span className="text-xs font-medium text-[var(--color-ink)]">How should this overpayment be applied?</span>
+        <button onClick={() => commit('reduce_payment')} className="rounded-lg p-3 text-left" style={{ background: 'var(--color-surface)' }}>
+          <p className="text-sm font-semibold text-[var(--color-ink)]">Keep the same length</p>
+          <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+            New monthly payment: £{preview.reducePayment.newMonthlyPayment != null ? formatCurrency(preview.reducePayment.newMonthlyPayment) : '—'}
+          </p>
+        </button>
+        <button onClick={() => commit('reduce_term')} className="rounded-lg p-3 text-left" style={{ background: 'var(--color-surface)' }}>
+          <p className="text-sm font-semibold text-[var(--color-ink)]">Keep monthly payment the same</p>
+          <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+            Ends {preview.reduceTerm.payoffDate ? formatMonthYear(preview.reduceTerm.payoffDate) : '—'} · estimated final repayment £
+            {preview.reduceTerm.finalPayment != null ? formatCurrency(preview.reduceTerm.finalPayment) : '—'}
+          </p>
+        </button>
+        <button onClick={() => setStep('entry')} className="text-xs self-start" style={{ color: 'var(--color-ink-muted)' }}>
+          Back
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+      <span className="text-xs font-medium text-[var(--color-ink)]">Log an overpayment</span>
+      <div className="grid grid-cols-2 gap-2">
+        <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+        <EditField label="Date" type="date" value={date} onChange={setDate} />
+      </div>
+      <EditField label="Note (optional)" value={note} onChange={setNote} />
+      <button
+        disabled={!canContinue}
+        onClick={() => setStep('choose')}
+        className="self-end px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
+        style={{ background: 'var(--color-coral)' }}
+      >
+        Continue
+      </button>
+    </div>
+  )
+}
 
 function OverpaymentForm({
   label = 'Log an overpayment',
@@ -773,18 +1218,72 @@ function LoggedPaymentEditForm({
 // starts with sensible defaults; toggling it off clears it entirely
 // (passes undefined, same as never having set one). ──
 
-function RecurringOverpaymentEditor({ value, onChange }: { value: LoanRecurringOverpayment | undefined; onChange: (v: LoanRecurringOverpayment | undefined) => void }) {
+function RecurringOverpaymentEditor({
+  loan,
+  value,
+  onChange,
+}: {
+  loan: Loan
+  value: LoanRecurringOverpayment | undefined
+  onChange: (v: LoanRecurringOverpayment | undefined) => void
+}) {
   const [showEndDate, setShowEndDate] = useState(!!value?.endDate)
+  const [choosingRecast, setChoosingRecast] = useState(false)
 
   if (!value) {
     return (
       <button
-        onClick={() => onChange({ startDate: todayIso(), amount: { type: 'fixed', amount: 50 } })}
+        onClick={() => {
+          onChange({ startDate: todayIso(), amount: { type: 'fixed', amount: 50 } })
+          setChoosingRecast(true)
+        }}
         className="text-xs font-medium self-start"
         style={{ color: 'var(--color-coral)' }}
       >
         + Add a recurring overpayment
       </button>
+    )
+  }
+
+  // D7's follow-up step (scope §9/§11.3 — recurring is in scope for the
+  // recast choice too, not one-off only): shown once, right after a
+  // recurring overpayment is first set up, with a real preview of each
+  // outcome computed via previewRecurringOverpaymentRecast. Reachable
+  // again later via the "Change" link below the live editor, so picking
+  // wrong at creation isn't a dead end.
+  if (choosingRecast) {
+    const preview = previewRecurringOverpaymentRecast(loan, value)
+    return (
+      <div className="rounded-xl p-3 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
+        <span className="text-xs font-medium text-[var(--color-ink)]">How should this recurring overpayment be applied?</span>
+        <button
+          onClick={() => {
+            onChange({ ...value, recastMode: 'reduce_payment' })
+            setChoosingRecast(false)
+          }}
+          className="rounded-lg p-3 text-left"
+          style={{ background: 'var(--color-surface)' }}
+        >
+          <p className="text-sm font-semibold text-[var(--color-ink)]">Keep the same length</p>
+          <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+            New monthly payment: £{preview.reducePayment.newMonthlyPayment != null ? formatCurrency(preview.reducePayment.newMonthlyPayment) : '—'}
+          </p>
+        </button>
+        <button
+          onClick={() => {
+            onChange({ ...value, recastMode: 'reduce_term' })
+            setChoosingRecast(false)
+          }}
+          className="rounded-lg p-3 text-left"
+          style={{ background: 'var(--color-surface)' }}
+        >
+          <p className="text-sm font-semibold text-[var(--color-ink)]">Keep monthly payment the same</p>
+          <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+            Ends {preview.reduceTerm.payoffDate ? formatMonthYear(preview.reduceTerm.payoffDate) : '—'} · estimated final repayment £
+            {preview.reduceTerm.finalPayment != null ? formatCurrency(preview.reduceTerm.finalPayment) : '—'}
+          </p>
+        </button>
+      </div>
     )
   }
 
@@ -807,6 +1306,12 @@ function RecurringOverpaymentEditor({ value, onChange }: { value: LoanRecurringO
         Added on top of the regular monthly payment, every month it's active — not its own separate line, just a
         bigger payment.
       </p>
+      <div className="flex items-center justify-between -mt-1">
+        <p className="text-[11px] text-[var(--color-ink-faint)]">{value.recastMode === 'reduce_payment' ? 'Keeping the same length' : 'Keeping the monthly payment the same'}</p>
+        <button onClick={() => setChoosingRecast(true)} className="text-[11px] font-medium" style={{ color: 'var(--color-coral)' }}>
+          Change
+        </button>
+      </div>
 
       <div className="flex gap-2">
         <button
@@ -905,6 +1410,7 @@ function LoanForm({
   initial,
   hasJointBills,
   canBeJoint,
+  existingLoans,
   onAddCategory,
   onSave,
   onCancel,
@@ -915,30 +1421,52 @@ function LoanForm({
   initial?: LoanPrefill
   hasJointBills: boolean
   canBeJoint: boolean
+  existingLoans: Loan[]
   onAddCategory: (name: string) => { id: string }
   onSave: (loan: Omit<Loan, 'id' | 'overpayments'>) => void
   onCancel: () => void
 }) {
   const [name, setName] = useState(initial?.name ?? '')
+  const [principal, setPrincipal] = useState(initial?.principal ? String(initial.principal) : '')
   const [monthlyPayment, setMonthlyPayment] = useState(initial?.monthlyPayment ? String(initial.monthlyPayment) : '')
   const [termMonths, setTermMonths] = useState(initial?.termMonths ? String(initial.termMonths) : '')
   const [startDate, setStartDate] = useState(initial?.startDate ?? todayIso())
+  const [advanceDate, setAdvanceDate] = useState(initial?.advanceDate ?? '')
+  const [lender, setLender] = useState('')
   const [categoryId, setCategoryId] = useState(initial?.categoryId ?? (categories.some((c) => c.id === DEFAULT_LOAN_CATEGORY_ID) ? DEFAULT_LOAN_CATEGORY_ID : categories[0]?.id ?? ''))
   const [location, setLocation] = useState<BillLocation>(initial?.location ?? 'personal')
   const [ownerId, setOwnerId] = useState(initial?.ownerId || defaultOwnerId)
   const [payee, setPayee] = useState(initial?.payee || (people[0]?.id ?? ''))
   const [payeeSharePercent, setPayeeSharePercent] = useState(initial?.payeeSharePercent ?? 50)
 
-  const canSave = name.trim() && Number(monthlyPayment) > 0 && Number(termMonths) > 0 && startDate && categoryId
+  // Scope §5.3 step 5: a new loan from a lender that's already been
+  // calibrated (or confidently back-solved) on a previous loan offers to
+  // reuse that same profile straight away, instead of starting from
+  // scratch — applied automatically on save when a match is found, no
+  // extra confirmation step needed beyond the note below being visible.
+  const matchedProfile = lender.trim() ? findLenderCalibrationProfile(existingLoans, lender) : null
+
+  const canSave = name.trim() && Number(principal) > 0 && Number(monthlyPayment) > 0 && Number(termMonths) > 0 && startDate && categoryId
 
   return (
     <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
       <EditField label="Name" value={name} onChange={setName} />
       <div className="grid grid-cols-2 gap-3">
+        <EditField label="Amount borrowed (£)" type="number" value={principal} onChange={setPrincipal} />
         <EditField label="Monthly payment (£)" type="number" value={monthlyPayment} onChange={setMonthlyPayment} />
-        <EditField label="Term (months)" type="number" value={termMonths} onChange={setTermMonths} />
       </div>
-      <EditField label="Start date" type="date" value={startDate} onChange={setStartDate} />
+      <div className="grid grid-cols-2 gap-3">
+        <EditField label="Term (months)" type="number" value={termMonths} onChange={setTermMonths} />
+        <EditField label="First payment date" type="date" value={startDate} onChange={setStartDate} />
+      </div>
+      {/* Optional — falls back to First payment date if never set (ledgerLoans.ts's resolveLoanRateAndConvention). Routinely 3-8 weeks earlier than the first payment; only matters once a day-weighted interest convention is calibrated against this loan, but worth capturing up front since it's rarely known later. */}
+      <EditField label="Advance date (optional)" type="date" value={advanceDate} onChange={setAdvanceDate} />
+      <EditField label="Lender (optional)" value={lender} onChange={setLender} />
+      {matchedProfile && (
+        <p className="text-xs" style={{ color: 'var(--color-coral)' }}>
+          Using the interest calibration already saved for {lender.trim()}.
+        </p>
+      )}
       <CategoryPicker categories={categories} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
       {(hasJointBills || location === 'joint') && (
         <LocationEditor
@@ -965,14 +1493,19 @@ function LoanForm({
           onClick={() =>
             onSave({
               name: name.trim(),
+              principal: Number(principal),
               monthlyPayment: Number(monthlyPayment),
               termMonths: Number(termMonths),
               startDate,
+              advanceDate: advanceDate || undefined,
+              lender: lender.trim() || undefined,
               categoryId,
               location,
               ownerId: location === 'personal' ? ownerId : '',
               payee: location === 'joint' ? payee : '',
               payeeSharePercent: location === 'joint' ? payeeSharePercent : 100,
+              active: true,
+              ...(matchedProfile ?? {}),
             })
           }
           className="px-3 py-1.5 rounded-lg text-sm font-medium text-white disabled:opacity-40"
