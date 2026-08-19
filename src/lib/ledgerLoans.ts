@@ -356,8 +356,60 @@ export interface LoanLedgerRow {
  * overpayment) — this is read-only display maths, not a second
  * calculation of the schedule itself.
  */
+/**
+ * The recurring overpayment's OWN real dated occurrences — confirmed as a
+ * genuine, serious gap, not a re-surfacing of the earlier stub-period
+ * bug: recurringOverpaymentForDate only ever used `startDate` as a
+ * FILTER ("has this started yet") against the LOAN's own payment dates,
+ * never as its own independent monthly cadence. A person setting a
+ * recurring overpayment to start "21 Aug" — genuinely wanting it to
+ * recur on the 21st of every month, e.g. matching their payday, not the
+ * 2nd their loan happens to be due on — saw every single occurrence
+ * dated on the 2nd throughout the app instead, in both the ledger modal
+ * and the Home page summary. Confirmed directly against a real loan.
+ *
+ * The loan's own contractual payment dates remain the backbone for
+ * interest/amortisation math in buildLoanSchedule — that's tied to the
+ * agreed monthly cycle and doesn't change. What changes here is DISPLAY:
+ * each loan period's aggregate recurringOverpaymentApplied is mapped
+ * back to the real calendar date the recurring overpayment's own
+ * monthly cadence actually fell on, for whoever is reading the ledger
+ * row or transaction rather than the internal amortisation entry.
+ * Reliable because both cadences are monthly: there's exactly one real
+ * recurring-overpayment date inside the (previous period, this period]
+ * window for any period where the aggregate is non-zero.
+ */
+function recurringOverpaymentRealDates(loan: Loan, schedule: LoanScheduleEntry[]): Map<string, string> {
+  const map = new Map<string, string>() // schedule entry date -> real recurring-overpayment date
+  const r = loan.recurringOverpayment
+  if (!r) return map
+
+  let cursor = new Date(r.startDate)
+  let previousPeriodDate = new Date(loan.advanceDate ?? loan.startDate)
+  let iterations = 0
+
+  for (const entry of schedule) {
+    if (entry.recurringOverpaymentApplied <= 0) {
+      previousPeriodDate = new Date(entry.date)
+      continue
+    }
+    // Advance the recurring overpayment's own cadence until it lands
+    // inside this period's window — normally the very first step,
+    // since both cadences are monthly.
+    while (toIso(cursor) <= toIso(previousPeriodDate) && iterations < MAX_SCHEDULE_ENTRIES) {
+      cursor = addMonths(cursor, 1)
+      iterations++
+    }
+    map.set(entry.date, toIso(cursor))
+    previousPeriodDate = new Date(entry.date)
+  }
+
+  return map
+}
+
 export function buildLoanLedgerRows(loan: Loan): LoanLedgerRow[] {
   const schedule = buildLoanSchedule(loan)
+  const recurringDates = recurringOverpaymentRealDates(loan, schedule)
   const rows: LoanLedgerRow[] = []
 
   for (const entry of schedule) {
@@ -383,7 +435,7 @@ export function buildLoanLedgerRows(loan: Loan): LoanLedgerRow[] {
     }
     if (entry.recurringOverpaymentApplied > 0) {
       rows.push({
-        date: entry.date,
+        date: recurringDates.get(entry.date) ?? entry.date,
         type: 'Recurring Overpayment',
         amount: entry.recurringOverpaymentApplied,
         capital: entry.recurringOverpaymentApplied,
@@ -393,7 +445,7 @@ export function buildLoanLedgerRows(loan: Loan): LoanLedgerRow[] {
     }
   }
 
-  return rows
+  return rows.sort((a, b) => a.date.localeCompare(b.date))
 }
 
 function monthDiff(fromIso: string, toIso: string): number {
@@ -725,7 +777,15 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
   const endIso = toIso(rangeEnd)
   const results: Omit<Transaction, 'id'>[] = []
 
-  for (const e of buildLoanSchedule(loan).filter((entry) => entry.date >= startIso && entry.date <= endIso)) {
+  // Computed over the FULL schedule, not the filtered window below — the
+  // recurring overpayment's own monthly cadence has to chain correctly
+  // from its real startDate regardless of which slice of the loan's life
+  // this particular call is asking about, same reasoning as
+  // buildLoanLedgerRows's identical use of this map.
+  const fullSchedule = buildLoanSchedule(loan)
+  const recurringDates = recurringOverpaymentRealDates(loan, fullSchedule)
+
+  for (const e of fullSchedule.filter((entry) => entry.date >= startIso && entry.date <= endIso)) {
     if (e.scheduledPayment > 0) {
       results.push({
         date: e.date,
@@ -749,7 +809,13 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
     }
     if (e.recurringOverpaymentApplied > 0) {
       results.push({
-        date: e.date,
+        // The recurring overpayment's own real date (see
+        // recurringOverpaymentRealDates's comment) — confirmed as a real
+        // bug otherwise: this always showed on the loan's own payment
+        // date throughout the Home page summary, even when the person
+        // had deliberately set the recurring overpayment to a
+        // completely different day of the month.
+        date: recurringDates.get(e.date) ?? e.date,
         amount: round2(e.recurringOverpaymentApplied),
         direction: 'out',
         categoryId: loan.categoryId,
