@@ -1021,7 +1021,7 @@ function CalibrationModal({
             <div className="flex flex-col gap-3">
               {rows.map((row, i) => (
                 <div key={i} className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-3 gap-2 items-start">
                     <EditField label="Date" type="date" value={row.date} onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, date: v } : r)))} />
                     <EditField label="Capital (£)" type="number" value={row.capital} onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, capital: v } : r)))} />
                     <EditField label="Interest (£)" type="number" value={row.interest} onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, interest: v } : r)))} />

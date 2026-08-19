@@ -517,6 +517,13 @@ export const MAX_CALIBRATION_LINES = 5
 // this constant as more real loans get calibrated, per the scope doc's
 // own resolution of this exact open question — don't treat it as load-bearing.
 const CONFIDENT_FIT_MAX_AVERAGE_ERROR_PER_LINE = 0.5
+// A single line is mathematically guaranteed to fit ANY convention
+// trivially (one line, one free parameter) — see calibrateLoanFromStatementLines's
+// own comment for the confirmed real-world consequence of not having this
+// guard. Shared here so isLoanConfidentlyCalibrated (which independently
+// re-derives confidence from stored lines, not a stored flag) can't drift
+// out of sync with the actual calibration flow's own rule.
+const MIN_LINES_FOR_CONFIDENCE = 2
 
 export type CalibrationConfidence = 'confident' | 'low_first' | 'low_repeated'
 
@@ -555,7 +562,17 @@ export function calibrateLoanFromStatementLines(loan: Loan, newLines: StatementC
   const ranked = calibrateRateAndConvention(advanceDateIso, loan.principal, merged)
   const best = ranked[0]
   const averageErrorPerLine = merged.length > 0 ? best.error / merged.length : Infinity
-  const confident = averageErrorPerLine <= CONFIDENT_FIT_MAX_AVERAGE_ERROR_PER_LINE
+  // Confirmed as a real, mathematically-guaranteed problem, not a
+  // theoretical one: with exactly 1 line, every candidate convention has
+  // exactly one free parameter (its rate) and exactly one data point to
+  // fit it against — the fit is trivially exact (~£0 error) BY
+  // CONSTRUCTION, for every convention, regardless of whether the line
+  // is even real or correct. Reproduced directly: a single line with
+  // capital and interest deliberately SWAPPED still reported "confident."
+  // A single line carries no genuine signal about which convention is
+  // right — it can't, structurally — so no amount of low error from just
+  // one line is allowed to count as confident, however small.
+  const confident = merged.length >= MIN_LINES_FOR_CONFIDENCE && averageErrorPerLine <= CONFIDENT_FIT_MAX_AVERAGE_ERROR_PER_LINE
 
   // Confirmed directly against a real loan: a day-weighted convention
   // (e.g. daily_simple, Monzo's) needs the loan's real advance date to
@@ -583,11 +600,26 @@ export function calibrateLoanFromStatementLines(loan: Loan, newLines: StatementC
           : "This still doesn't match a pattern we recognise — the estimate above is our closest fit, and adding more statements is unlikely to improve it further."
         : null
 
+  // Confirmed as a serious, real bug: this used to write interestConventionId
+  // /calibratedMonthlyRate unconditionally, even on a LOW-CONFIDENCE fit —
+  // meaning a bad attempt (too few lines, mis-entered figures, a genuinely
+  // unrecognised convention) immediately became the rate driving the
+  // loan's REAL schedule/balance maths, silently, while the UI kept
+  // showing the red "not confidently calibrated" warning as if nothing
+  // had changed. In one real case this produced a wildly wrong rate that
+  // sent the balance into six figures on a ~£9,400 loan — the calibration
+  // status badge said "still needs calibrating" while the actual numbers
+  // had already been corrupted underneath it. A low-confidence fit must
+  // never be trusted to drive real numbers — that's the entire point of
+  // having a confidence concept — so only a CONFIDENT fit is allowed to
+  // update the working rate/convention below; anything else leaves both
+  // exactly as they were (the safe fallback, or a still-good earlier
+  // confident calibration), while still saving the raw lines so the
+  // person's data isn't lost and more can be added to try again.
   const updatedLoan: Loan = {
     ...loan,
     statementCalibrationLines: merged,
-    interestConventionId: best.convention.id,
-    calibratedMonthlyRate: best.monthlyRate,
+    ...(confident ? { interestConventionId: best.convention.id, calibratedMonthlyRate: best.monthlyRate } : {}),
   }
 
   return { updatedLoan, confidence, message }
@@ -607,7 +639,7 @@ export function calibrateLoanFromStatementLines(loan: Loan, newLines: StatementC
  */
 export function isLoanConfidentlyCalibrated(loan: Loan): boolean {
   const lines = loan.statementCalibrationLines
-  if (!lines || lines.length === 0) return false
+  if (!lines || lines.length < MIN_LINES_FOR_CONFIDENCE) return false
   const advanceDateIso = loan.advanceDate ?? loan.startDate
   const best = calibrateRateAndConvention(advanceDateIso, loan.principal, lines)[0]
   return best.error / lines.length <= CONFIDENT_FIT_MAX_AVERAGE_ERROR_PER_LINE
