@@ -19,10 +19,10 @@
 import { addMonths } from 'date-fns'
 import { nanoid } from 'nanoid'
 import type { Loan, LoanOverpayment, LoanRecurringOverpayment, StatementCalibrationLine, Transaction } from '../types/ledger'
-import { backSolveMonthlyRate, calibrateRateAndConvention, flatMonthlyConvention, interestConventions, remainingPeriodsFor, standardPayment, type InterestConvention } from './interestConventions'
+import { backSolveMonthlyRate, calibrateRateAndConvention, flatMonthlyConvention, interestConventions, standardPayment, type InterestConvention } from './interestConventions'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, todayIso } from './date'
 const sameMonth = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()
 
 /**
@@ -129,16 +129,18 @@ function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterSc
  * at all here — the payment just stays `loan.monthlyPayment` and the
  * loop naturally reaches zero sooner. 'reduce_payment' is what needs the
  * `currentPayment` variable below to be genuinely mutable across the
- * walk, not a single fixed figure read once: whenever a reduce_payment
- * overpayment lands, this finds how many periods the loan WOULD have
- * taken from here at the payment in effect right before this
- * overpayment (remainingPeriodsFor), then recomputes a new payment
- * (standardPayment) that clears the now-smaller balance over that SAME
- * period count — which is exactly "keep the term, reduce the payment."
- * For a RECURRING reduce_payment overpayment this fires again every
- * single period it applies, so the effective payment can genuinely
- * change every month, not just once (scope §9's own description of
- * this combination).
+ * walk: whenever a reduce_payment overpayment lands, this recomputes a
+ * new payment (standardPayment) that clears the now-smaller balance over
+ * however many periods remain until the loan's own real, fixed term ends
+ * (termMonths - i) — anchored to the loan's actual agreed end date, not
+ * re-derived from whatever payment happened to be in effect a moment
+ * ago (that WAS the original approach, and it was a real bug — see the
+ * inline comment at the call site for the runaway-feedback-loop failure
+ * mode it caused). For a RECURRING reduce_payment overpayment this fires
+ * again every single period it applies, so the effective payment can
+ * genuinely change every month, not just once (scope §9's own
+ * description of this combination) — but always still converges cleanly
+ * on the loan's real final period, however many times it's recast.
  */
 export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
   if (!(loan.monthlyPayment > 0) || !(loan.termMonths > 0) || !(loan.principal > 0)) return []
@@ -209,10 +211,6 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
       if (overpayments[overpaymentIndex].recastMode === 'reduce_payment') recastToReducePayment = true
       overpaymentIndex++
     }
-    // The reference point for "how many periods would this have taken
-    // WITHOUT the overpayment(s) about to land" — i.e. balance right
-    // after this period's own regular payment, before any overpayment.
-    const balanceBeforeOverpayments = balance
     balance = round2(Math.max(0, balance - overpaymentApplied))
 
     const recurringOverpaymentApplied = recurringOverpaymentForDate(loan, paymentDateIso, balance)
@@ -221,12 +219,29 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
 
     // If either kind of overpayment landing this period asked to recast
     // to "reduce payment" (rather than the reduce_term default), find
-    // the new payment now — using whichever of the two reference
-    // balances is relevant per overpayment kind isn't necessary here:
-    // both share the same "periods remaining at the payment in effect
-    // right before this period's overpayments" baseline, computed once.
+    // the new payment now.
+    //
+    // periodsRemaining is anchored to the loan's own real, fixed term
+    // (termMonths - i) — NOT remainingPeriodsFor(balance, rate, currentPayment)
+    // as this used to be. Confirmed as a serious, real bug: for a
+    // RECURRING reduce_payment overpayment, this recast fires fresh every
+    // single period, each time feeding the ALREADY-shrunk currentPayment
+    // from last time back into remainingPeriodsFor. A smaller payment
+    // implies a LONGER payoff horizon, which gets recast into an even
+    // smaller payment next time, which implies an even longer horizon
+    // than that — a runaway feedback loop completely decoupled from the
+    // loan's actual agreed term. The outer loop still hard-stops at the
+    // real term regardless (isFinalContractualPeriod above), so by the
+    // final period the balance hadn't been paying down fast enough to
+    // reach zero on schedule, and the "final period clears whatever's
+    // left" rule dumped the entire shortfall into one payment — confirmed
+    // directly: a real loan's supposedly-£350-ish payments decayed for 23
+    // months down to £180, then the 24th period jumped to £2,116.95.
+    // Anchoring to the loan's real remaining term instead means the
+    // recast payment is always sized to clear the balance by the loan's
+    // TRUE end date, however many times it's already recast before.
     if (recastToReducePayment && balance > 0.005) {
-      const periodsRemaining = Math.max(1, remainingPeriodsFor(balanceBeforeOverpayments, monthlyRate, currentPayment))
+      const periodsRemaining = Math.max(1, loan.termMonths - i)
       currentPayment = round2(standardPayment(balance, monthlyRate, periodsRemaining))
     }
 
@@ -259,11 +274,30 @@ export interface RecastPreview {
 
 function summarizeRecastPreview(schedule: LoanScheduleEntry[], afterDateIso: string): RecastOptionPreview {
   if (schedule.length === 0) return { payoffDate: null, finalPayment: null, newMonthlyPayment: null }
-  const nextEntry = schedule.find((e) => e.date > afterDateIso)
+  // Recast deliberately takes effect from the period AFTER the one an
+  // overpayment lands on (matches the one-off case's own documented
+  // behaviour) — so the landing period itself still shows the OLD,
+  // unchanged payment; the recast is only visible from the entry after
+  // THAT. Confirmed as a real, misleading bug otherwise: a real
+  // recurring reduce_payment case previewed "New monthly payment:
+  // £427.57" — identical to the current, un-recast payment — even
+  // though the payment genuinely does drop, just one period later.
+  //
+  // The landing period is found by checking which entry ACTUALLY has a
+  // non-zero overpayment applied — not by comparing dates against
+  // `afterDateIso` directly. Those two are usually the same period, but
+  // not always: when `afterDateIso` happens to fall exactly ON a real
+  // payment date (as a one-off overpayment's own date routinely does),
+  // "the first entry strictly after afterDateIso" skips past the
+  // landing period entirely, landing an extra period too far ahead.
+  // Checking for the real applied amount sidesteps that date-comparison
+  // off-by-one regardless of how afterDateIso happens to align.
+  const landingIndex = schedule.findIndex((e) => e.date >= afterDateIso && (e.overpaymentApplied > 0 || e.recurringOverpaymentApplied > 0))
+  const changedEntry = landingIndex >= 0 ? (schedule[landingIndex + 1] ?? schedule[landingIndex]) : null
   return {
     payoffDate: schedule.at(-1)!.date,
     finalPayment: schedule.at(-1)!.scheduledPayment,
-    newMonthlyPayment: nextEntry ? nextEntry.scheduledPayment : schedule.at(-1)!.scheduledPayment,
+    newMonthlyPayment: changedEntry ? changedEntry.scheduledPayment : schedule.at(-1)!.scheduledPayment,
   }
 }
 
@@ -757,7 +791,14 @@ export function applyLoanOverpayment(
     direction: 'out',
     categoryId: loan.categoryId,
     paymentMethod: 'bank_transfer',
-    status: 'cleared',
+    // Confirmed real bug: this was hardcoded to 'cleared' regardless of
+    // the date — a future-dated overpayment (or a recurring one landing
+    // on an upcoming date) would immediately show as already-happened
+    // cash out of the account, rather than pending until its date
+    // actually arrives. Same rule LedgerContext's addAdHocTransaction
+    // already uses for everything else: cleared only once today is on
+    // or past the transaction's own date.
+    status: date <= todayIso() ? 'cleared' : 'pending',
     type: 'loan_payment',
     location: loan.location,
     ownerId: loan.ownerId,

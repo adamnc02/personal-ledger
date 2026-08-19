@@ -652,6 +652,13 @@ function CreditCardEditPanel({
   onPrefillConsumed: () => void
 }) {
   const [draft, setDraft] = useState<CreditCardDraft>(() => draftFromCard(card))
+  // Matches LoanEditPanel's pattern (loggingOverpayment) — collapsed
+  // behind a link by default, same as the loan's own "+ Log an
+  // overpayment," confirmed as a real inconsistency otherwise: this form
+  // was permanently expanded here while the loan equivalent was
+  // collapsed, for no functional reason. Still pre-opens when a
+  // prefill exists (e.g. from a What-if payoff scenario), same as loans.
+  const [loggingPayment, setLoggingPayment] = useState(!!overpaymentPrefill)
 
   useEffect(() => {
     if (overpaymentPrefill) onPrefillConsumed()
@@ -704,12 +711,21 @@ function CreditCardEditPanel({
       )}
 
       <LumpPaymentList payments={card.lumpPayments} onUpdate={onUpdateLumpPayment} onRemove={onRemoveLumpPayment} />
-      <OverpaymentForm
-        label="Log a payment"
-        initialAmount={overpaymentPrefill?.amount}
-        initialDate={overpaymentPrefill?.date}
-        onLog={onLogLumpPayment}
-      />
+      {!loggingPayment ? (
+        <button onClick={() => setLoggingPayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+          + Log a payment
+        </button>
+      ) : (
+        <OverpaymentForm
+          label="Log a payment"
+          initialAmount={overpaymentPrefill?.amount}
+          initialDate={overpaymentPrefill?.date}
+          onLog={(amount, date, note) => {
+            onLogLumpPayment(amount, date, note)
+            setLoggingPayment(false)
+          }}
+        />
+      )}
 
       <button
         onClick={() => onSave(draft)}

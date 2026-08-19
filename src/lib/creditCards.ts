@@ -317,10 +317,19 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   const stored = transactions.filter((t) => t.creditCardId === card.id && t.type === 'credit_card_payment' && !t.sourceType)
   const storedDates = new Set(stored.map((t) => t.date))
 
-  // A year back covers any materialized row this card has ever had a
-  // reason to generate; two years ahead is comfortably past what anyone
-  // needs to plan around or correct in advance.
-  const rangeStart = new Date(asOfDate.getFullYear() - 1, asOfDate.getMonth(), 1)
+  // Confirmed as a real bug: a blind "1 year back" was generating a full
+  // year of entirely fictional past minimum charges for a BRAND NEW
+  // card with no real payment history at all — nothing to show, since
+  // the card didn't exist that far back, but the modal generated rows
+  // for it anyway, burying "today onward" a year of scrolling deep.
+  // CreditCard has no real "created"/start date to anchor to, so the
+  // honest fix is: only look as far back as there's real DATA to
+  // justify it. A card with genuine stored history shows back to its
+  // own earliest real transaction (so anything actually there stays
+  // editable) — a fresh card with none shows nothing before today at
+  // all, rather than a year of rows that never happened.
+  const earliestStoredMs = stored.length > 0 ? Math.min(...stored.map((t) => new Date(t.date).getTime())) : asOfDate.getTime()
+  const rangeStart = new Date(Math.min(earliestStoredMs, asOfDate.getTime()))
   const rangeEnd = new Date(asOfDate.getFullYear() + 2, asOfDate.getMonth(), 1)
   const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd).filter((t) => !storedDates.has(t.date))
 
