@@ -1590,6 +1590,20 @@ function LoanForm({
   const [name, setName] = useState(initial?.name ?? '')
   const [principal, setPrincipal] = useState(initial?.principal ? String(initial.principal) : '')
   const [monthlyPayment, setMonthlyPayment] = useState(initial?.monthlyPayment ? String(initial.monthlyPayment) : '')
+  // Tracks whether monthlyPayment holds a value the PERSON typed, as
+  // distinct from one the auto-suggest effect below wrote on their
+  // behalf — confirmed as a real, serious bug without this distinction:
+  // `monthlyPayment.trim() !== ''` alone can't tell "the person typed
+  // this" apart from "the effect itself already wrote something here a
+  // moment ago," so the very first keystroke of a multi-digit APR (e.g.
+  // typing "8" of "8.7") would trigger one correct suggestion, then every
+  // subsequent keystroke ("8.", "8.7") would see monthlyPayment already
+  // non-empty and silently stop updating — leaving a stale, WRONG figure
+  // sitting in the field looking exactly as filled-in as a correct one,
+  // with nothing suggesting it hadn't kept up with the rest of what was
+  // typed. Confirmed live: typing "8.7" character-by-character left the
+  // suggestion frozen at the value for "8" alone, £3+ short of correct.
+  const [monthlyPaymentTouched, setMonthlyPaymentTouched] = useState(!!initial?.monthlyPayment)
   const [termMonths, setTermMonths] = useState(initial?.termMonths ? String(initial.termMonths) : '')
   const [apr, setApr] = useState('')
   const [startDate, setStartDate] = useState(initial?.startDate ?? todayIso())
@@ -1610,14 +1624,14 @@ function LoanForm({
   // value they've already deliberately overridden would be the wrong
   // kind of "helpful."
   useEffect(() => {
-    if (monthlyPayment.trim() !== '') return
+    if (monthlyPaymentTouched) return
     const p = Number(principal)
     const n = Number(termMonths)
     const a = Number(apr)
     if (!(p > 0) || !(n > 0) || !(a > 0)) return
     setMonthlyPayment(standardPayment(p, aprToMonthlyRate(a / 100), n).toFixed(2))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [principal, termMonths, apr])
+  }, [principal, termMonths, apr, monthlyPaymentTouched])
 
   // Scope §5.3 step 5: a new loan from a lender that's already been
   // calibrated (or confidently back-solved) on a previous loan offers to
@@ -1637,7 +1651,15 @@ function LoanForm({
       </div>
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Term (months)" type="number" value={termMonths} onChange={setTermMonths} />
-        <EditField label="Monthly payment (£)" type="number" value={monthlyPayment} onChange={setMonthlyPayment} />
+        <EditField
+          label="Monthly payment (£)"
+          type="number"
+          value={monthlyPayment}
+          onChange={(v) => {
+            setMonthlyPayment(v)
+            setMonthlyPaymentTouched(true)
+          }}
+        />
       </div>
       <p className="text-xs text-[var(--color-ink-faint)] -mt-1">
         {apr && Number(apr) > 0
