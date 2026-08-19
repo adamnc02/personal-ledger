@@ -75,7 +75,28 @@ export function computeProjection(
   // the point the balance was actually reconciled from. Applied here, at
   // the one place `stored` gets assembled, so both the balance maths and
   // the displayed list stay consistent with each other automatically.
-  const stored = data.transactions.filter((t) => t.location === 'personal' && t.ownerId === personId && t.date >= payCycle.openingBalanceDate)
+  //
+  // EXCEPT a logged overpayment (loan or credit card lump payment) —
+  // confirmed as a real bug, not just an edge case: a person retroactively
+  // logging a real overpayment that happened to predate their opening
+  // balance reconciliation point (routine when backfilling a loan's
+  // history, or logging something from before they started using the
+  // app) had it silently vanish from both the displayed ledger AND the
+  // balance maths entirely — reproduced directly, confirmed by moving the
+  // same transaction's date to either side of openingBalanceDate. Unlike
+  // an old routine bill payment (genuinely fine to hide — it's already
+  // baked into whatever opening balance was reconciled), an overpayment
+  // is the person explicitly telling the app about a real, deliberate
+  // cash event; silently dropping it means the app's own numbers stop
+  // matching reality in exactly the way this whole engine exists to
+  // prevent. So it's exempted from the floor specifically, not the floor
+  // loosened generally — routine historical clutter should still hide.
+  const stored = data.transactions.filter(
+    (t) =>
+      t.location === 'personal' &&
+      t.ownerId === personId &&
+      (t.date >= payCycle.openingBalanceDate || t.sourceType === 'loan_overpayment' || t.sourceType === 'loan_recurring_overpayment' || t.sourceType === 'credit_card_lump_payment'),
+  )
   const existingKeys = new Set(stored.map(dedupeKey).filter((k): k is string => k !== null))
 
   // Generation starts from the CURRENT cycle's start, not from asOfDate —

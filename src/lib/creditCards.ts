@@ -124,7 +124,14 @@ export function generateMinimumPaymentTransactions(card: CreditCard, rangeStart:
     }
 
     if (paymentDate >= rangeStart && paymentDate <= rangeEnd) {
-      const amount = minimumPaymentForBalance(card.minimumPayment, workingBalance)
+      // A per-date override (credit card ledger modal — "tap a row to
+      // adjust") takes precedence over the computed figure, but still
+      // feeds into workingBalance below exactly like a computed one
+      // would, so later periods' compounding reflects the edit rather
+      // than silently reverting to the un-overridden trajectory next
+      // month.
+      const override = card.minimumPaymentOverrides?.find((o) => o.date === paymentDateIso)
+      const amount = override ? override.amount : minimumPaymentForBalance(card.minimumPayment, workingBalance)
       if (amount > 0) {
         results.push({
           date: paymentDateIso,
@@ -279,4 +286,47 @@ export function totalPaidForCard(cardId: string, transactions: Transaction[]): n
       .filter((t) => t.type === 'credit_card_payment' && t.creditCardId === cardId && t.status === 'cleared')
       .reduce((sum, t) => sum + t.amount, 0),
   )
+}
+
+export interface CreditCardMinimumChargeRow {
+  date: string
+  amount: number
+  status: 'cleared' | 'pending'
+  // Whether this row already exists as a real, stored Transaction — an
+  // edit to a materialized row updates that transaction directly; an
+  // edit to a non-materialized (still just generated/projected) row
+  // writes to card.minimumPaymentOverrides instead. Both cases are
+  // handled transparently by LedgerContext's updateCreditCardMinimumCharge
+  // — this flag exists purely so the UI can show a subtle "already
+  // happened" vs "projected" distinction if it wants to, not because the
+  // edit flow itself needs the caller to know which path it'll take.
+  materialized: boolean
+}
+
+/**
+ * Every minimum-charge row for this card's ledger modal (Loans.tsx) —
+ * deliberately ONLY minimum charges, never spend or lump payments, which
+ * already have a full ledger on the card's own Home page detail view.
+ * Combines real stored transactions (materialized: true) with generated
+ * projections for anything not yet materialized, de-duplicated by date —
+ * a stored transaction always wins over a generated one for the same
+ * date, since it's the authoritative real record.
+ */
+export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): CreditCardMinimumChargeRow[] {
+  const todayIso = toIso(asOfDate)
+  const stored = transactions.filter((t) => t.creditCardId === card.id && t.type === 'credit_card_payment' && !t.sourceType)
+  const storedDates = new Set(stored.map((t) => t.date))
+
+  // A year back covers any materialized row this card has ever had a
+  // reason to generate; two years ahead is comfortably past what anyone
+  // needs to plan around or correct in advance.
+  const rangeStart = new Date(asOfDate.getFullYear() - 1, asOfDate.getMonth(), 1)
+  const rangeEnd = new Date(asOfDate.getFullYear() + 2, asOfDate.getMonth(), 1)
+  const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd).filter((t) => !storedDates.has(t.date))
+
+  const rows: CreditCardMinimumChargeRow[] = [
+    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true })),
+    ...generated.map((t) => ({ date: t.date, amount: t.amount, status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const), materialized: false })),
+  ]
+  return rows.sort((a, b) => a.date.localeCompare(b.date))
 }

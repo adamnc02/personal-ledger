@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { formatCurrency } from '../lib/format'
+import { createPortal } from 'react-dom'
+import { formatCurrency, formatMonthYear } from '../lib/format'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Plus, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
@@ -15,6 +16,7 @@ import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { peopleWithSalaryCount } from '../lib/household'
+import { recentAndUpcomingOccurrences, applyTemplateAmountChange } from '../lib/schedule'
 
 const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   cash: 'Cash',
@@ -222,7 +224,7 @@ function BillRow({
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={template.name}>
       <div className="relative rounded-xl px-4 py-3" style={{ background: 'var(--color-surface)', opacity: template.active ? 1 : 0.55 }}>
-        <div className="flex items-center justify-between cursor-pointer" onClick={() => setOpen(!open)}>
+        <button className="w-full flex items-center justify-between text-left" onClick={() => setOpen(!open)}>
           <div className="flex items-center gap-2">
             <CategoryIcon category={category} />
             <div>
@@ -239,7 +241,7 @@ function BillRow({
             <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(template.amount)}</span>
             {open ? <ChevronUp size={14} className="text-[var(--color-ink-faint)]" /> : <ChevronDown size={14} className="text-[var(--color-ink-faint)]" />}
           </div>
-        </div>
+        </button>
 
         {open && (
           <BillEditPanel
@@ -294,9 +296,38 @@ function BillEditPanel({
   onDelete: () => void
 }) {
   const [draft, setDraft] = useState<BillDraft>(() => draftFromTemplate(template))
+  const [choosingEffectiveDate, setChoosingEffectiveDate] = useState(false)
 
   function update(patch: Partial<BillDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
+  }
+
+  function handleSaveClick() {
+    // A genuine amount change gets routed through "which payment should
+    // this apply from" — confirmed as a real gap, not just theoretical:
+    // every generated (not-yet-cleared) occurrence, including one due
+    // very soon, silently picked up a new amount immediately with no way
+    // to say "not until the payment after next." Non-amount edits (name,
+    // category, frequency, etc.) still save immediately, same as before —
+    // this only applies when the number itself has actually changed.
+    if (draft.amount !== template.amount && recentAndUpcomingOccurrences(template, new Date()).length > 0) {
+      setChoosingEffectiveDate(true)
+      return
+    }
+    onSave(draft)
+  }
+
+  if (choosingEffectiveDate) {
+    return (
+      <BillEffectiveDateModal
+        template={template}
+        newAmount={draft.amount}
+        onCancel={() => setChoosingEffectiveDate(false)}
+        onChoose={(effectiveFrom) => {
+          onSave({ ...draft, ...applyTemplateAmountChange(template, draft.amount, effectiveFrom) })
+        }}
+      />
+    )
   }
 
   return (
@@ -326,14 +357,65 @@ function BillEditPanel({
         <Trash2 size={13} /> Delete bill
       </button>
 
-      <button
-        onClick={() => onSave(draft)}
-        className="col-span-2 w-full py-2.5 rounded-full text-sm font-semibold text-white mt-1"
-        style={{ background: 'var(--color-coral)' }}
-      >
+      <button onClick={handleSaveClick} className="col-span-2 w-full py-2.5 rounded-full text-sm font-semibold text-white mt-1" style={{ background: 'var(--color-coral)' }}>
         Save
       </button>
     </div>
+  )
+}
+
+/**
+ * "Which payment should this apply from?" — shown only when the amount
+ * has genuinely changed and there's at least one real occurrence (past or
+ * upcoming) to anchor the choice to. Same portal/nav-padding pattern as
+ * Salary.tsx's ConfirmSalaryChangeModal, for the same reason (see that
+ * component's own comment) — this modal sits inside a swipeable row's
+ * tree too.
+ */
+function BillEffectiveDateModal({
+  template,
+  newAmount,
+  onCancel,
+  onChoose,
+}: {
+  template: RecurringTemplate
+  newAmount: number
+  onCancel: () => void
+  onChoose: (effectiveFrom: string) => void
+}) {
+  const occurrences = recentAndUpcomingOccurrences(template, new Date())
+
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onCancel}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-1">Apply this change from…</h3>
+        <p className="text-sm text-[var(--color-ink-muted)] mb-4">
+          {template.name} is changing from £{formatCurrency(template.amount)} to £{formatCurrency(newAmount)}. Which payment should the new amount start from? Everything before it keeps
+          the old amount.
+        </p>
+        <div className="flex flex-col gap-2">
+          {occurrences.map((o) => (
+            <button
+              key={o.date}
+              onClick={() => onChoose(o.date)}
+              className="w-full py-2.5 rounded-full text-sm font-semibold flex items-center justify-center gap-2"
+              style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)' }}
+            >
+              {formatMonthYear(o.date)}
+              {o.isPast && <span className="text-xs font-normal text-[var(--color-ink-muted)]">(most recent)</span>}
+            </button>
+          ))}
+        </div>
+        <button onClick={onCancel} className="w-full py-2 mt-2 text-xs text-[var(--color-ink-muted)]">
+          Cancel
+        </button>
+      </div>
+    </div>,
+    document.body,
   )
 }
 

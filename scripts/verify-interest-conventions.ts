@@ -9,6 +9,7 @@ import {
   backSolveMonthlyRate,
   flatMonthlyConvention,
   dailySimpleConvention,
+  interestConventions,
   totalAbsoluteError,
   fitConventions,
   bestFitConvention,
@@ -86,7 +87,7 @@ const monzoFit = bestFitConvention(monzoMonthlyRateFromDaily, MONZO_FIXTURE.adva
 check('bestFitConvention picks daily_simple for the real Monzo lines', monzoFit.convention.id, 'daily_simple')
 
 const santanderRanked = fitConventions(SANTANDER_FIXTURE.empiricalMonthlyRate, SANTANDER_FIXTURE.advanceDate, SANTANDER_FIXTURE.principal, SANTANDER_FIXTURE.statementLines)
-check('fitConventions returns all candidates, best-first', santanderRanked.length, 2)
+check('fitConventions returns all candidates, best-first', santanderRanked.length, interestConventions.length)
 check('fitConventions: first result is the lowest error', santanderRanked[0].error <= santanderRanked[1].error, true)
 
 // ---- 10. Sanity: back-solved baseline is genuinely close, not a fluke of one fixture ----

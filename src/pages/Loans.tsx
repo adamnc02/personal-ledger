@@ -5,13 +5,14 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { Plus, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, X, Info, AlertTriangle } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { summarizeLoan, summarizeLoanProgress, estimateSettlementFigure, findLenderCalibrationProfile, previewOverpaymentRecast, previewRecurringOverpaymentRecast, buildLoanLedgerRows, loanFinishInfo, isLoanConfidentlyCalibrated, MAX_CALIBRATION_LINES, type CalibrationResult, type LoanLedgerRowType } from '../lib/ledgerLoans'
-import { computeMinimumPaymentAmount, pickCreditCardColor } from '../lib/creditCards'
-import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type StatementCalibrationLine } from '../types/ledger'
+import { computeMinimumPaymentAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows } from '../lib/creditCards'
+import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
 import { CategoryIcon } from '../components/CategoryIcon'
 import { CategoryPicker } from '../components/CategoryPicker'
 import { visibleCategoriesFor, seededCategoryIdForIcon } from '../lib/categories'
+import { aprToMonthlyRate, standardPayment } from '../lib/interestConventions'
 import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { CollapsibleSection } from '../components/CollapsibleSection'
@@ -62,6 +63,7 @@ export function Loans() {
     calibrateLoanAction,
     addCreditCard,
     updateCreditCard,
+    updateCreditCardMinimumCharge,
     removeCreditCard,
     logCreditCardLumpPayment,
     removeCreditCardLumpPayment,
@@ -205,11 +207,13 @@ export function Loans() {
                 onRemove={() => removeCreditCard(card.id)}
                 people={data.people}
                 categories={visibleCategoriesFor(data, card.categoryId)}
+                transactions={data.transactions}
                 onAddCategory={addCategory}
                 onSave={(u) => updateCreditCard(card.id, u)}
                 onUpdateLumpPayment={(lumpPaymentId, amount, date, note) => updateCreditCardLumpPayment(card.id, lumpPaymentId, amount, date, note)}
                 onRemoveLumpPayment={(lumpPaymentId) => removeCreditCardLumpPayment(card.id, lumpPaymentId)}
                 onLogLumpPayment={(amount, date, note) => logCreditCardLumpPayment(card.id, amount, date, note)}
+                onUpdateMinimumCharge={(date, amount) => updateCreditCardMinimumCharge(card.id, date, amount)}
                 overpaymentPrefill={overpaymentPrefill?.targetKind === 'credit_card' && overpaymentPrefill.targetId === card.id ? overpaymentPrefill : null}
                 onPrefillConsumed={() => setOverpaymentPrefill(null)}
               />
@@ -359,11 +363,13 @@ function CreditCardRow({
   onRemove,
   people,
   categories,
+  transactions,
   onAddCategory,
   onSave,
   onUpdateLumpPayment,
   onRemoveLumpPayment,
   onLogLumpPayment,
+  onUpdateMinimumCharge,
   overpaymentPrefill,
   onPrefillConsumed,
 }: {
@@ -374,20 +380,24 @@ function CreditCardRow({
   onRemove: () => void
   people: { id: string; name: string }[]
   categories: { id: string; name: string; icon: string; iconColor: string }[]
+  transactions: Transaction[]
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>>) => void
   onUpdateLumpPayment: (lumpPaymentId: string, amount: number, date: string, note?: string) => void
   onRemoveLumpPayment: (lumpPaymentId: string) => void
   onLogLumpPayment: (amount: number, date: string, note?: string) => void
+  onUpdateMinimumCharge: (date: string, amount: number) => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
 }) {
   const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  const [ledgerOpen, setLedgerOpen] = useState(false)
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={card.name}>
       <div className="relative rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
-        <button onClick={onToggle} className="w-full flex items-center justify-between text-left">
+        <div className="flex items-center gap-2">
+          <button onClick={onToggle} className="flex-1 min-w-0 flex items-center justify-between text-left">
           <div className="flex items-center gap-2">
             <span className="inline-flex items-center justify-center shrink-0 rounded-full" style={{ width: 32, height: 32, background: `${card.color}22` }}>
               <CreditCardIcon size={16} strokeWidth={1.75} style={{ color: card.color }} />
@@ -401,7 +411,13 @@ function CreditCardRow({
             </div>
           </div>
           <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
-        </button>
+          </button>
+          <button onClick={() => setLedgerOpen(true)} className="shrink-0 text-[var(--color-ink-faint)]" aria-label={`View ${card.name}'s minimum charges`}>
+            <Info size={16} />
+          </button>
+        </div>
+
+        {ledgerOpen && <CreditCardLedgerModal card={card} transactions={transactions} onUpdateMinimumCharge={onUpdateMinimumCharge} onClose={() => setLedgerOpen(false)} />}
 
         {isOpen && (
           <CreditCardEditPanel
@@ -507,6 +523,7 @@ function LoanEditPanel({
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Lender (optional)" value={draft.lender ?? ''} onChange={(v) => update({ lender: v || undefined })} />
         <EditField label="Amount borrowed (£)" type="number" value={draft.principal} onChange={(v) => update({ principal: Number(v) })} />
+        <EditField label="Interest rate (% APR, optional)" type="number" value={draft.apr ?? ''} onChange={(v) => update({ apr: v ? Number(v) : undefined })} />
         <EditField label="Monthly payment (£)" type="number" value={draft.monthlyPayment} onChange={(v) => update({ monthlyPayment: Number(v) })} />
         <EditField label="Term (months)" type="number" value={draft.termMonths} onChange={(v) => update({ termMonths: Number(v) })} />
         <EditField label="First payment date" type="date" value={draft.startDate} onChange={(v) => update({ startDate: v })} />
@@ -786,6 +803,96 @@ function LoanLedgerModal({ loan, onClose }: { loan: Loan; onClose: () => void })
               )}
             </tbody>
           </table>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+/**
+ * Credit card equivalent of LoanLedgerModal (bug report: "replicate the
+ * same modal used for loan ledgers for credit cards") — but deliberately
+ * narrower in scope and different in one key way, per the explicit
+ * request: ONLY minimum-charge rows (spend and lump payments already
+ * have a full ledger on the card's own Home page detail view, so
+ * duplicating them here would just be clutter), and rows are tappable —
+ * tapping one turns it into an inline amount editor rather than being
+ * purely read-only like the loan version. Works for both past
+ * (materialized) and future (still-projected) rows transparently — see
+ * updateCreditCardMinimumCharge's own comment for how the two cases
+ * resolve differently under the hood.
+ */
+function CreditCardLedgerModal({
+  card,
+  transactions,
+  onUpdateMinimumCharge,
+  onClose,
+}: {
+  card: CreditCard
+  transactions: Transaction[]
+  onUpdateMinimumCharge: (date: string, amount: number) => void
+  onClose: () => void
+}) {
+  const rows = buildCreditCardMinimumChargeRows(card, transactions)
+  const [editingDate, setEditingDate] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState('')
+
+  function startEditing(row: { date: string; amount: number }) {
+    setEditingDate(row.date)
+    setEditValue(String(row.amount))
+  }
+
+  function commitEdit() {
+    if (editingDate && Number(editValue) >= 0) onUpdateMinimumCharge(editingDate, Number(editValue))
+    setEditingDate(null)
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] flex flex-col"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">{card.name} — minimum charges</h3>
+          <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+            <X size={20} />
+          </button>
+        </div>
+        <p className="text-xs text-[var(--color-ink-muted)] mb-3">Tap a payment to adjust it — past or future. Spend and other card activity are on the card's own page.</p>
+
+        <div className="overflow-y-auto flex-1 -mx-5 px-5 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+          {rows.map((row) =>
+            editingDate === row.date ? (
+              <div key={row.date} className="py-2 flex items-center gap-2">
+                <span className="text-xs text-[var(--color-ink-muted)] flex-1">{row.date}</span>
+                <input
+                  type="number"
+                  autoFocus
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  className="w-24 bg-transparent border-b border-[var(--color-track)] py-1 text-right text-[var(--color-ink)] outline-none font-mono"
+                />
+                <button onClick={commitEdit} className="text-xs font-semibold px-2 py-1 rounded-lg text-white" style={{ background: 'var(--color-coral)' }}>
+                  Save
+                </button>
+                <button onClick={() => setEditingDate(null)} className="text-xs text-[var(--color-ink-muted)]">
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button key={row.date} onClick={() => startEditing(row)} className="py-2 flex items-center justify-between text-left">
+                <span className="text-xs text-[var(--color-ink)]">
+                  {row.date}
+                  {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
+                </span>
+                <span className="text-xs font-mono text-[var(--color-ink)]">£{formatCurrency(row.amount)}</span>
+              </button>
+            ),
+          )}
+          {rows.length === 0 && <p className="py-4 text-center text-xs text-[var(--color-ink-faint)]">No minimum charges yet.</p>}
         </div>
       </div>
     </div>,
@@ -1229,21 +1336,76 @@ function RecurringOverpaymentEditor({
 }) {
   const [showEndDate, setShowEndDate] = useState(!!value?.endDate)
   const [choosingRecast, setChoosingRecast] = useState(false)
+  // Held separately from `value` itself: the amount has to be chosen
+  // BEFORE a LoanRecurringOverpayment is created at all — confirmed as a
+  // real bug that the old flow skipped straight to the recast-choice
+  // screen with a silently-defaulted £50 fixed amount the person never
+  // actually saw or chose, because clicking "+ Add a recurring
+  // overpayment" created `value` (with that £50 default baked in) AND
+  // opened the recast screen in the very same click.
+  const [draftAmount, setDraftAmount] = useState<LoanRecurringOverpayment['amount'] | null>(null)
 
-  if (!value) {
+  if (!value && !draftAmount) {
     return (
-      <button
-        onClick={() => {
-          onChange({ startDate: todayIso(), amount: { type: 'fixed', amount: 50 } })
-          setChoosingRecast(true)
-        }}
-        className="text-xs font-medium self-start"
-        style={{ color: 'var(--color-coral)' }}
-      >
+      <button onClick={() => setDraftAmount({ type: 'fixed', amount: 50 })} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
         + Add a recurring overpayment
       </button>
     )
   }
+
+  // The amount step now genuinely comes first — nothing is created or
+  // saved yet at this point, it's purely local draft state until
+  // "Continue" commits it and moves on to the recast choice.
+  if (!value && draftAmount) {
+    return (
+      <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+        <span className="text-xs font-medium text-[var(--color-ink)]">Recurring overpayment amount</span>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setDraftAmount(draftAmount.type === 'fixed' ? draftAmount : { type: 'fixed', amount: 50 })}
+            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+            style={{ background: draftAmount.type === 'fixed' ? 'var(--color-coral)' : 'var(--color-surface)', color: draftAmount.type === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
+          >
+            Fixed amount
+          </button>
+          <button
+            onClick={() => setDraftAmount(draftAmount.type === 'percent_of_balance' ? draftAmount : { type: 'percent_of_balance', percent: 5 })}
+            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+            style={{
+              background: draftAmount.type === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-surface)',
+              color: draftAmount.type === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
+            }}
+          >
+            % of balance
+          </button>
+        </div>
+        {draftAmount.type === 'fixed' ? (
+          <EditField label="Amount (£)" type="number" value={draftAmount.amount} onChange={(v) => setDraftAmount({ type: 'fixed', amount: Number(v) || 0 })} />
+        ) : (
+          <EditField label="Percent" type="number" value={draftAmount.percent} onChange={(v) => setDraftAmount({ type: 'percent_of_balance', percent: Number(v) || 0 })} />
+        )}
+        <div className="flex justify-end gap-3 mt-1">
+          <button onClick={() => setDraftAmount(null)} className="text-xs text-[var(--color-ink-muted)]">
+            Cancel
+          </button>
+          <button
+            disabled={draftAmount.type === 'fixed' ? !(draftAmount.amount > 0) : !(draftAmount.percent > 0)}
+            onClick={() => {
+              onChange({ startDate: todayIso(), amount: draftAmount })
+              setDraftAmount(null)
+              setChoosingRecast(true)
+            }}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
+            style={{ background: 'var(--color-coral)' }}
+          >
+            Continue
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (!value) return null // unreachable — satisfies TS narrowing below
 
   // D7's follow-up step (scope §9/§11.3 — recurring is in scope for the
   // recast choice too, not one-off only): shown once, right after a
@@ -1303,8 +1465,7 @@ function RecurringOverpaymentEditor({
         </button>
       </div>
       <p className="text-[11px] text-[var(--color-ink-faint)] -mt-1">
-        Added on top of the regular monthly payment, every month it's active — not its own separate line, just a
-        bigger payment.
+        Added on top of the regular monthly payment, every month it's active — shown as its own separate line in your ledger, alongside that month's regular payment.
       </p>
       <div className="flex items-center justify-between -mt-1">
         <p className="text-[11px] text-[var(--color-ink-faint)]">{value.recastMode === 'reduce_payment' ? 'Keeping the same length' : 'Keeping the monthly payment the same'}</p>
@@ -1430,6 +1591,7 @@ function LoanForm({
   const [principal, setPrincipal] = useState(initial?.principal ? String(initial.principal) : '')
   const [monthlyPayment, setMonthlyPayment] = useState(initial?.monthlyPayment ? String(initial.monthlyPayment) : '')
   const [termMonths, setTermMonths] = useState(initial?.termMonths ? String(initial.termMonths) : '')
+  const [apr, setApr] = useState('')
   const [startDate, setStartDate] = useState(initial?.startDate ?? todayIso())
   const [advanceDate, setAdvanceDate] = useState(initial?.advanceDate ?? '')
   const [lender, setLender] = useState('')
@@ -1438,6 +1600,24 @@ function LoanForm({
   const [ownerId, setOwnerId] = useState(initial?.ownerId || defaultOwnerId)
   const [payee, setPayee] = useState(initial?.payee || (people[0]?.id ?? ''))
   const [payeeSharePercent, setPayeeSharePercent] = useState(initial?.payeeSharePercent ?? 50)
+
+  // APR is purely a suggestion source here (Loan.apr's own doc comment
+  // explains why the engine itself never reads it back) — as soon as
+  // principal/term/APR are all present, suggest a starting monthly
+  // payment via the standard formula, but ONLY while the person hasn't
+  // typed their own real figure in yet. Once they have, their number
+  // wins outright and this stops touching the field at all — nudging a
+  // value they've already deliberately overridden would be the wrong
+  // kind of "helpful."
+  useEffect(() => {
+    if (monthlyPayment.trim() !== '') return
+    const p = Number(principal)
+    const n = Number(termMonths)
+    const a = Number(apr)
+    if (!(p > 0) || !(n > 0) || !(a > 0)) return
+    setMonthlyPayment(standardPayment(p, aprToMonthlyRate(a / 100), n).toFixed(2))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [principal, termMonths, apr])
 
   // Scope §5.3 step 5: a new loan from a lender that's already been
   // calibrated (or confidently back-solved) on a previous loan offers to
@@ -1453,14 +1633,22 @@ function LoanForm({
       <EditField label="Name" value={name} onChange={setName} />
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Amount borrowed (£)" type="number" value={principal} onChange={setPrincipal} />
-        <EditField label="Monthly payment (£)" type="number" value={monthlyPayment} onChange={setMonthlyPayment} />
+        <EditField label="Interest rate (% APR, optional)" type="number" value={apr} onChange={setApr} />
       </div>
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Term (months)" type="number" value={termMonths} onChange={setTermMonths} />
-        <EditField label="First payment date" type="date" value={startDate} onChange={setStartDate} />
+        <EditField label="Monthly payment (£)" type="number" value={monthlyPayment} onChange={setMonthlyPayment} />
       </div>
-      {/* Optional — falls back to First payment date if never set (ledgerLoans.ts's resolveLoanRateAndConvention). Routinely 3-8 weeks earlier than the first payment; only matters once a day-weighted interest convention is calibrated against this loan, but worth capturing up front since it's rarely known later. */}
-      <EditField label="Advance date (optional)" type="date" value={advanceDate} onChange={setAdvanceDate} />
+      <p className="text-xs text-[var(--color-ink-faint)] -mt-1">
+        {apr && Number(apr) > 0
+          ? "Monthly payment is suggested from the APR above — type your real contractual figure over it if it's different."
+          : 'Monthly payment is the one figure everything else is built from — your real contractual amount, from the loan agreement.'}
+      </p>
+      <div className="grid grid-cols-2 gap-3">
+        <EditField label="First payment date" type="date" value={startDate} onChange={setStartDate} />
+        {/* Optional — falls back to First payment date if never set (ledgerLoans.ts's resolveLoanRateAndConvention). Routinely 3-8 weeks earlier than the first payment; only matters once a day-weighted interest convention is calibrated against this loan, but worth capturing up front since it's rarely known later. */}
+        <EditField label="Advance date (optional)" type="date" value={advanceDate} onChange={setAdvanceDate} />
+      </div>
       <EditField label="Lender (optional)" value={lender} onChange={setLender} />
       {matchedProfile && (
         <p className="text-xs" style={{ color: 'var(--color-coral)' }}>
@@ -1496,6 +1684,7 @@ function LoanForm({
               principal: Number(principal),
               monthlyPayment: Number(monthlyPayment),
               termMonths: Number(termMonths),
+              apr: apr.trim() ? Number(apr) : undefined,
               startDate,
               advanceDate: advanceDate || undefined,
               lender: lender.trim() || undefined,

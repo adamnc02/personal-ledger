@@ -164,7 +164,7 @@ export interface Transaction {
   // 'credit_card_lump_payment' links a credit_card_payment transaction
   // back to the specific CreditCardLumpPayment record (sourceId), when
   // it wasn't the generated monthly/minimum payment.
-  sourceType?: 'recurring_template' | 'loan' | 'loan_overpayment' | 'loan_settlement' | 'credit_card_lump_payment' | 'savings_entry'
+  sourceType?: 'recurring_template' | 'loan' | 'loan_overpayment' | 'loan_recurring_overpayment' | 'loan_settlement' | 'credit_card_lump_payment' | 'savings_entry'
   sourceId?: string
   // Required when type is 'credit_card_spend' or 'credit_card_payment' —
   // which card this is against. See TransactionType above for how each
@@ -180,7 +180,7 @@ export interface Transaction {
 export interface RecurringTemplate {
   id: string
   name: string
-  amount: number
+  amount: number // the CURRENT amount — always what's shown/edited in the form. See amountEffectiveFrom/amountHistory below for how a scheduled change is recorded without disturbing this.
   categoryId: string
   paymentMethod: PaymentMethod
   frequency: RecurrenceFrequency
@@ -196,6 +196,21 @@ export interface RecurringTemplate {
   payee: string
   payeeSharePercent: number
   active: boolean // paused templates stop generating new transactions
+  // ISO date `amount` has applied from. Absent means `amount` has always
+  // applied (no recorded change) — the common case for a bill that's
+  // never had its value edited with a specific "starting from" payment.
+  // Set together with amountHistory whenever a change is confirmed
+  // through the "which payment should this apply from" picker (Bills.tsx)
+  // — see resolveTemplateAmount in schedule.ts for how these three fields
+  // combine to answer "what did/will this bill cost on date X."
+  amountEffectiveFrom?: string
+  // Superseded amounts, each with the date IT started applying from —
+  // mirrors Person.salaryHistory's snapshot pattern (see
+  // salaryLedger.ts's findApplicableSnapshot) rather than inventing a new
+  // shape: every past value is its own self-contained entry, and
+  // resolving "what applied on date X" is the same kind of
+  // latest-entry-not-after-X lookup either way.
+  amountHistory?: { effectiveFrom: string; amount: number }[]
 }
 
 // ── Loan — updated inputs, native overpayments ─────────────────────────
@@ -251,6 +266,7 @@ export interface Loan {
   // back-solved baseline) — calibration only refines what's already a
   // strong estimate, it isn't required to make a loan usable.
   lender?: string // free text (scope §4) — labels a saved calibration profile so a future loan from the same lender can offer to reuse it. Not used for hard-coded formulas.
+  apr?: number // percentage, e.g. 16.93 — matches CreditCard.interestRatePercent's convention. Purely a reference/pre-fill value: at creation, it suggests a starting monthlyPayment via the standard PMT formula, but the person's REAL contractual payment (freely overridable) is what everything downstream actually uses — back-solving the effective rate from Payment+Principal+Term (resolveLoanRateAndConvention) has consistently proven more accurate than trusting the displayed APR directly, since a displayed APR is routinely rounded and a lender's real internal rate can sit a hair either side of it (see the loan-amortisation-engine scope's Santander/Monzo reconciliation). Never read by the core engine for anything else — this is deliberate, not an oversight.
   advanceDate?: string // ISO — distinct from startDate/firstPaymentDate (scope §4): routinely 3-8 weeks earlier, and one known convention (Monzo) charges interest from this date, not the first payment date. Falls back to startDate when absent (baseline behaviour: no stub period).
   interestConventionId?: string // matches InterestConvention.id in lib/interestConventions.ts — which candidate fitted best, once calibrated. Falls back to the flat-monthly baseline convention when absent — see resolveLoanRateAndConvention in ledgerLoans.ts.
   calibratedMonthlyRate?: number // the fitted (or back-solved-from-payment, pre-calibration) monthly rate. Always a MONTHLY figure regardless of which convention uses it — see interestConventions.ts's file header for why.
@@ -368,6 +384,16 @@ export interface CreditCard {
   ownerId: string // personal only, no location/payee split
   lumpPayments: CreditCardLumpPayment[]
   active: boolean
+  // Per-date overrides for the generated minimum charge — set via the
+  // credit card ledger modal's "tap a row to adjust" (mirrors the loan
+  // ledger modal, but this one's rows are editable). Only used for a date
+  // that hasn't been materialized into a real stored Transaction yet; a
+  // date that already has one gets edited directly on that transaction
+  // instead (see LedgerContext's updateCreditCardMinimumCharge) — an
+  // override existing here for an already-materialized date would be
+  // silently ignored by generateMinimumPaymentTransactions, since a
+  // materialized date is never re-generated in the first place.
+  minimumPaymentOverrides?: { date: string; amount: number }[]
 }
 
 export type CreditCardMinimumPayment =

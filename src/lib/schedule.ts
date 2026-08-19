@@ -44,6 +44,29 @@ import { toLocalIsoDate as toIso } from './date'
 // an empty/short result.
 const MAX_OCCURRENCES = 2000
 
+/**
+ * What `template.amount` resolves to on a specific date, accounting for a
+ * scheduled change recorded via amountEffectiveFrom/amountHistory (Bills.tsx's
+ * "which payment should this apply from" picker). Mirrors
+ * salaryLedger.ts's findApplicableSnapshot: every past value is checked
+ * as a candidate, and whichever one's effectiveFrom is the latest that's
+ * still on-or-before `dateIso` wins — including the CURRENT amount
+ * itself, via its own amountEffectiveFrom, competing on equal footing
+ * with the historical entries rather than being asserted as always-latest.
+ */
+export function resolveTemplateAmount(template: RecurringTemplate, dateIso: string): number {
+  const candidates: { effectiveFrom: string; amount: number }[] = [...(template.amountHistory ?? [])]
+  if (template.amountEffectiveFrom) candidates.push({ effectiveFrom: template.amountEffectiveFrom, amount: template.amount })
+
+  if (candidates.length === 0) return template.amount
+
+  const applicable = candidates.filter((c) => c.effectiveFrom <= dateIso).sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom))
+  // dateIso predates every recorded change (e.g. asking about a date
+  // before the bill's own history begins) — the current amount is the
+  // only reasonable answer left, same as an untouched template.
+  return applicable[0]?.amount ?? template.amount
+}
+
 export function generateTransactionsForTemplate(
   template: RecurringTemplate,
   rangeStart: Date,
@@ -66,9 +89,10 @@ export function generateTransactionsForTemplate(
 
   const results: Omit<Transaction, 'id'>[] = []
   while (cursor <= rangeEnd && iterations < MAX_OCCURRENCES) {
+    const dateIso = toIso(cursor)
     results.push({
-      date: toIso(cursor),
-      amount: template.amount,
+      date: dateIso,
+      amount: resolveTemplateAmount(template, dateIso),
       direction: 'out',
       categoryId: template.categoryId,
       paymentMethod: template.paymentMethod,
@@ -92,6 +116,43 @@ export function generateTransactionsForTemplate(
   }
 
   return results
+}
+
+/**
+ * Builds the patch to apply when a bill's amount changes and the person
+ * has picked which payment it should take effect from (Bills.tsx's
+ * follow-up picker) — preserves the OLD amount as a history entry so
+ * anything before `effectiveFrom` keeps resolving to it, exactly as
+ * salaryLedger.ts's snapshot list does for a pay rise.
+ */
+export function applyTemplateAmountChange(
+  template: RecurringTemplate,
+  newAmount: number,
+  effectiveFrom: string,
+): Pick<RecurringTemplate, 'amount' | 'amountEffectiveFrom' | 'amountHistory'> {
+  const priorEntry = { effectiveFrom: template.amountEffectiveFrom ?? template.anchorDate, amount: template.amount }
+  return {
+    amount: newAmount,
+    amountEffectiveFrom: effectiveFrom,
+    amountHistory: [...(template.amountHistory ?? []), priorEntry],
+  }
+}
+
+/**
+ * The most recent past occurrence (if any) and the next 3 upcoming ones,
+ * for Bills.tsx's "apply this change from which payment?" picker —
+ * always computed from the template's CURRENT schedule shape (frequency/
+ * anchor), independent of any amount history, since which DATES a bill
+ * falls on doesn't change just because its amount did.
+ */
+export function recentAndUpcomingOccurrences(template: RecurringTemplate, asOfDate: Date): { date: string; isPast: boolean }[] {
+  const past = generateTransactionsForTemplate(template, addYears(asOfDate, -1), asOfDate)
+  const upcoming = generateTransactionsForTemplate(template, asOfDate, addYears(asOfDate, 1)).filter((t) => t.date !== past.at(-1)?.date)
+
+  const result: { date: string; isPast: boolean }[] = []
+  if (past.length > 0) result.push({ date: past[past.length - 1].date, isPast: true })
+  for (const t of upcoming.slice(0, 3)) result.push({ date: t.date, isPast: false })
+  return result
 }
 
 /** Convenience constructor for a new template with sensible defaults for fields the create form doesn't ask about directly. */

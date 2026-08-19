@@ -150,11 +150,18 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
   let currentPayment = loan.monthlyPayment
   const start = new Date(loan.startDate)
   let previousPeriodDate = new Date(loan.advanceDate ?? loan.startDate)
-  // Overpayments dated before the loan's first scheduled payment month, or
-  // after the loan would otherwise be fully paid off, are silently never
-  // applied — both are nonsensical inputs (backdated before the loan
-  // existed, or logged against an already-cleared loan) rather than cases
-  // worth complicating this loop to handle.
+  // Overpayments logged before the loan's first scheduled payment aren't
+  // nonsensical at all — confirmed as a real, common case: a person
+  // often makes a voluntary extra payment in the gap between the loan
+  // being advanced and the first contractual instalment being due (this
+  // file's own earlier comment here wrongly assumed otherwise, and a real
+  // overpayment logged in that exact gap was silently discarded as a
+  // result — sameMonth() only ever matches a payment's calendar month
+  // against ITS OWN scheduled payment dates, which starts at the first
+  // payment's month and never looks backward, so anything dated in an
+  // earlier month never gets a chance to match at all, for the lifetime
+  // of the loop). Handled below: period 0 additionally catches anything
+  // dated on or before its own payment date, not just same-month matches.
   const overpayments = loan.overpayments.slice().sort((a, b) => a.date.localeCompare(b.date))
   let overpaymentIndex = 0
 
@@ -162,7 +169,7 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
     const paymentDate = addMonths(start, i)
     const paymentDateIso = toIso(paymentDate)
 
-    const interestApplied = round2(convention.interestForPeriod(balance, previousPeriodDate, paymentDate, monthlyRate))
+    const interestApplied = round2(convention.interestForPeriod(balance, previousPeriodDate, paymentDate, monthlyRate, loan.principal))
     const balanceWithInterest = round2(balance + interestApplied)
     // The loan's TERM is a fixed contractual fact (agreed with the lender
     // alongside the monthly payment) — it must never silently drift just
@@ -194,7 +201,10 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
     // payment above, not off a separately-interest-bearing sub-amount.
     let overpaymentApplied = 0
     let recastToReducePayment = false
-    while (overpaymentIndex < overpayments.length && sameMonth(new Date(overpayments[overpaymentIndex].date), paymentDate)) {
+    while (
+      overpaymentIndex < overpayments.length &&
+      (sameMonth(new Date(overpayments[overpaymentIndex].date), paymentDate) || (i === 0 && new Date(overpayments[overpaymentIndex].date) <= paymentDate))
+    ) {
       overpaymentApplied += overpayments[overpaymentIndex].amount
       if (overpayments[overpaymentIndex].recastMode === 'reduce_payment') recastToReducePayment = true
       overpaymentIndex++
@@ -547,12 +557,30 @@ export function calibrateLoanFromStatementLines(loan: Loan, newLines: StatementC
   const averageErrorPerLine = merged.length > 0 ? best.error / merged.length : Infinity
   const confident = averageErrorPerLine <= CONFIDENT_FIT_MAX_AVERAGE_ERROR_PER_LINE
 
+  // Confirmed directly against a real loan: a day-weighted convention
+  // (e.g. daily_simple, Monzo's) needs the loan's real advance date to
+  // fit AT ALL — without it, the fallback anchor (startDate/first payment
+  // date) makes the very first calibration line's period length wrong,
+  // and the fit falls apart completely (in one real test, average error
+  // per line went from 7p to over £7 just from this one missing field).
+  // "Advance date" is labelled optional on the form because a flat-rate
+  // lender genuinely doesn't need it — but there's no way to know that in
+  // advance, and nothing else hints that a bad fit might be fixed by
+  // filling in a field labelled "optional." Worth surfacing directly
+  // rather than leaving the person to guess.
+  const missingAdvanceDate = !loan.advanceDate
+  const advanceDateHint = missingAdvanceDate
+    ? " This loan doesn't have an Advance date set — some lenders' interest calculations depend on it even though it's optional on the form, and adding it here could improve the fit."
+    : ''
+
   const confidence: CalibrationConfidence = confident ? 'confident' : merged.length < 4 ? 'low_first' : 'low_repeated'
   const message =
     confidence === 'low_first'
-      ? "We couldn't determine a close enough estimate on how interest rates are being calculated on this loan — these figures are the closest we could produce."
+      ? `We couldn't determine a close enough estimate on how interest rates are being calculated on this loan — these figures are the closest we could produce.${advanceDateHint}`
       : confidence === 'low_repeated'
-        ? "This still doesn't match a pattern we recognise — the estimate above is our closest fit, and adding more statements is unlikely to improve it further."
+        ? missingAdvanceDate
+          ? `This still doesn't match a pattern we recognise.${advanceDateHint}`
+          : "This still doesn't match a pattern we recognise — the estimate above is our closest fit, and adding more statements is unlikely to improve it further."
         : null
 
   const updatedLoan: Loan = {
@@ -601,33 +629,79 @@ export function findLenderCalibrationProfile(loans: Loan[], lender: string): Pic
   return { interestConventionId: match.interestConventionId, calibratedMonthlyRate: match.calibratedMonthlyRate, settlementMultiplier: match.settlementMultiplier }
 }
 
-/** Generates pending loan_payment transactions for scheduled entries within a date range — same "compute what should exist, caller dedupes" contract as schedule.ts's generateTransactionsForTemplate. The amount folds in that period's recurring overpayment (if any) — a one-off logged overpayment stays its own separate transaction (see applyLoanOverpayment), but a standing recurring one is just a bigger regular payment each month, not a second ledger line. A closed loan (active: false) generates nothing further — same pattern as creditCards.ts's generateMinimumPaymentTransactions. */
+/**
+ * Generates pending loan_payment transactions for scheduled entries within
+ * a date range — same "compute what should exist, caller dedupes"
+ * contract as schedule.ts's generateTransactionsForTemplate.
+ *
+ * A recurring overpayment gets its OWN transaction, separate from that
+ * period's regular payment — confirmed as a real bug, not the intended
+ * design, despite this file's own older comment (now corrected) claiming
+ * otherwise: a person testing this directly found their recurring
+ * overpayment quietly inflating the regular payment's amount rather than
+ * showing as its own line, which is inconsistent with a ONE-OFF logged
+ * overpayment (applyLoanOverpayment) already always getting its own
+ * transaction, and with the loan ledger modal already treating all three
+ * kinds (regular/ad-hoc/recurring) as distinct row types. Two generated
+ * transactions on the same date dedupe independently, via distinct
+ * sourceType values on the same loan id — see dedupeKey in projection.ts.
+ *
+ * A one-off logged overpayment stays exactly as it was — its own separate
+ * transaction, created once at the point it's logged (applyLoanOverpayment),
+ * not generated here at all.
+ *
+ * A closed loan (active: false) generates nothing further — same pattern
+ * as creditCards.ts's generateMinimumPaymentTransactions.
+ */
 export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, rangeEnd: Date): Omit<Transaction, 'id'>[] {
   if (!loan.active) return []
   const startIso = toIso(rangeStart)
   const endIso = toIso(rangeEnd)
-  return buildLoanSchedule(loan)
-    .filter((e) => e.date >= startIso && e.date <= endIso)
-    .map((e) => ({
-      date: e.date,
-      amount: round2(e.scheduledPayment + e.recurringOverpaymentApplied),
-      direction: 'out',
-      categoryId: loan.categoryId,
-      paymentMethod: 'direct_debit',
-      status: 'pending',
-      type: 'loan_payment',
-      location: loan.location,
-      ownerId: loan.ownerId,
-      payee: loan.payee,
-      payeeSharePercent: loan.payeeSharePercent,
-      sourceType: 'loan',
-      sourceId: loan.id,
-      // The loan's own name comes first — without it, a row falls back
-      // to its category's name, duplicating the category group header
-      // when viewed grouped by category. The recurring-overpayment note
-      // (if any) appends onto that, not replaces it.
-      note: e.recurringOverpaymentApplied > 0 ? `${loan.name} (includes £${e.recurringOverpaymentApplied.toFixed(2)} recurring overpayment)` : loan.name,
-    }))
+  const results: Omit<Transaction, 'id'>[] = []
+
+  for (const e of buildLoanSchedule(loan).filter((entry) => entry.date >= startIso && entry.date <= endIso)) {
+    if (e.scheduledPayment > 0) {
+      results.push({
+        date: e.date,
+        amount: round2(e.scheduledPayment),
+        direction: 'out',
+        categoryId: loan.categoryId,
+        paymentMethod: 'direct_debit',
+        status: 'pending',
+        type: 'loan_payment',
+        location: loan.location,
+        ownerId: loan.ownerId,
+        payee: loan.payee,
+        payeeSharePercent: loan.payeeSharePercent,
+        sourceType: 'loan',
+        sourceId: loan.id,
+        // The loan's own name — without it, a row falls back to its
+        // category's name, duplicating the category group header when
+        // viewed grouped by category.
+        note: loan.name,
+      })
+    }
+    if (e.recurringOverpaymentApplied > 0) {
+      results.push({
+        date: e.date,
+        amount: round2(e.recurringOverpaymentApplied),
+        direction: 'out',
+        categoryId: loan.categoryId,
+        paymentMethod: 'direct_debit',
+        status: 'pending',
+        type: 'loan_payment',
+        location: loan.location,
+        ownerId: loan.ownerId,
+        payee: loan.payee,
+        payeeSharePercent: loan.payeeSharePercent,
+        sourceType: 'loan_recurring_overpayment',
+        sourceId: loan.id,
+        note: `${loan.name} — recurring overpayment`,
+      })
+    }
+  }
+
+  return results
 }
 
 /**

@@ -46,6 +46,27 @@
 //   4. Push the new convention into the `interestConventions` array below.
 //      Nothing else needs to change — `bestFitConvention` already tests
 //      every entry in that array against whatever lines it's given.
+//
+// A REAL RISK FOUND WHILE INVESTIGATING A THIRD LOAN, NOW ADDRESSED: a car
+// loan quoting both an APR and a separate, lower "flat rate" — the classic
+// signature of a hire-purchase/add-on-rate agreement, where interest is a
+// fixed percentage of the ORIGINAL principal every period, not the
+// shrinking balance. Simulating what that loan's early statement lines
+// WOULD look like if it genuinely is flat-rate, then running them through
+// `calibrateRateAndConvention` as it stood at the time, produced a
+// CONFIDENT (wrongly) match to flatMonthlyConvention — because a
+// reducing-balance schedule and a flat-rate schedule look nearly
+// identical for the first few periods of a loan's life; they only
+// meaningfully diverge later, once reducing-balance's capital portion
+// has visibly grown relative to flat-rate's constant one.
+// `flatAddOnConvention` below closes this — added proactively (no real
+// statement data existed for that loan yet), on the strength of
+// reverse-engineering its own reported contractual figures (see that
+// convention's own comment for the exact reasoning). Still worth heeding
+// for anything genuinely new in the future: when a loan doesn't cleanly
+// match a known convention, ask for at least one statement line from well
+// into the loan's life (6+ months in), not just early consecutive ones —
+// early lines alone can under-determine which convention actually fits.
 // ─────────────────────────────────────────────────────────────────────────
 
 import { differenceInCalendarDays } from 'date-fns'
@@ -148,7 +169,7 @@ export function remainingPeriodsFor(balance: number, monthlyRate: number, paymen
 export interface InterestConvention {
   id: string
   label: string // for debugging/display — not shown to the person normally (handoff §2)
-  interestForPeriod(balance: number, periodStart: Date, periodEnd: Date, monthlyRate: number): number
+  interestForPeriod(balance: number, periodStart: Date, periodEnd: Date, monthlyRate: number, originalPrincipal: number): number
   /**
    * Solves for this convention's best-fit monthly rate against real
    * statement lines (loan-amortisation-engine scope §5.3, calibration
@@ -173,7 +194,7 @@ export interface InterestConvention {
 export const flatMonthlyConvention: InterestConvention = {
   id: 'flat_monthly',
   label: 'Flat monthly-equivalent (e.g. Santander)',
-  interestForPeriod(balance, _periodStart, _periodEnd, monthlyRate) {
+  interestForPeriod(balance, _periodStart, _periodEnd, monthlyRate, _originalPrincipal) {
     return round2(balance * monthlyRate)
   },
   fitRate(_advanceDateIso, startingBalance, lines) {
@@ -201,7 +222,7 @@ export const flatMonthlyConvention: InterestConvention = {
 export const dailySimpleConvention: InterestConvention = {
   id: 'daily_simple',
   label: 'Daily simple interest (e.g. Monzo)',
-  interestForPeriod(balance, periodStart, periodEnd, monthlyRate) {
+  interestForPeriod(balance, periodStart, periodEnd, monthlyRate, _originalPrincipal) {
     const apr = monthlyRateToApr(monthlyRate)
     const dailyRate = apr / 365
     const days = differenceInCalendarDays(periodEnd, periodStart)
@@ -230,8 +251,54 @@ export const dailySimpleConvention: InterestConvention = {
   },
 }
 
+/**
+ * Flat / add-on rate — hire-purchase style (a car loan quoting both an
+ * APR AND a separate, lower "flat rate" is the classic signature this
+ * exists for). Interest is a FIXED share of the ORIGINAL principal every
+ * single period, never the shrinking balance — so unlike the two
+ * conventions above, `balance` is irrelevant here; `originalPrincipal` is
+ * what actually drives the number, and stays constant for the loan's
+ * whole life. `monthlyRate` is (per this file's shared convention) always
+ * a monthly figure — here that's the flat ANNUAL rate ÷ 12, applied
+ * straight to the original principal, not compounded or day-weighted at
+ * all.
+ *
+ * Added proactively, without real statement data (none existed for the
+ * loan that prompted this — see the file header's "a real risk" note):
+ * reverse-engineering that loan's own reported figures gave real
+ * evidence worth acting on, not just a hunch. Back-solving each
+ * hypothesis's own natural rate FROM the real contractual payment and
+ * comparing it to what the loan actually quotes: a reducing-balance read
+ * of the payment implies an APR of ~8.75%, a 15-basis-point miss against
+ * the quoted 8.9%. A flat/add-on read implies a flat rate of ~4.57%, a
+ * tighter 8-basis-point miss against the quoted 4.65% — very close to
+ * twice as precise a reconstruction of its own quoted figure. Neither
+ * gap is huge, and this isn't proof — but it's real signal, worth having
+ * the engine ready to confirm or rule out the moment real statement
+ * lines exist, rather than only two candidates that were already known
+ * (from the same investigation) to be capable of confidently mis-fitting
+ * early flat-rate data to the wrong one of themselves.
+ */
+export const flatAddOnConvention: InterestConvention = {
+  id: 'flat_add_on',
+  label: 'Flat / add-on rate (e.g. hire purchase)',
+  interestForPeriod(_balance, _periodStart, _periodEnd, monthlyRate, originalPrincipal) {
+    return round2(originalPrincipal * monthlyRate)
+  },
+  fitRate(_advanceDateIso, startingBalance, lines) {
+    // interest_i = originalPrincipal × rate is CONSTANT across every
+    // period (no balance/day dependence at all) — the least-squares
+    // best-fit constant is simply the mean of the real interest figures,
+    // divided by the principal. No regression needed; this already IS
+    // the closed form.
+    if (lines.length === 0 || startingBalance === 0) return 0
+    const meanInterest = lines.reduce((sum, l) => sum + l.interest, 0) / lines.length
+    return Math.max(0, meanInterest / startingBalance)
+  },
+}
+
 /** The full growable candidate library — see file header for how to extend this. */
-export const interestConventions: InterestConvention[] = [flatMonthlyConvention, dailySimpleConvention]
+export const interestConventions: InterestConvention[] = [flatMonthlyConvention, dailySimpleConvention, flatAddOnConvention]
 
 // ── Fit-testing against real statement lines ────────────────────────────
 
@@ -257,7 +324,7 @@ export function totalAbsoluteError(convention: InterestConvention, monthlyRate: 
 
   for (const line of lines) {
     const periodEnd = new Date(line.date)
-    const predicted = convention.interestForPeriod(balance, prevDate, periodEnd, monthlyRate)
+    const predicted = convention.interestForPeriod(balance, prevDate, periodEnd, monthlyRate, startingBalance)
     totalError += Math.abs(round2(predicted - line.interest))
     balance = round2(balance - line.capital)
     prevDate = periodEnd

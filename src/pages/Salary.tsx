@@ -1165,12 +1165,12 @@ function SavingsEntryCard({
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={entry.name || 'this entry'}>
       <div className="relative rounded-xl p-4" style={{ background: 'var(--color-bg-elevated)' }}>
-        <div className="flex items-center justify-between mb-2 cursor-pointer" onClick={() => setEditing(!editing)}>
+        <button className="w-full flex items-center justify-between mb-2 text-left" onClick={() => setEditing(!editing)}>
           <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-ink-faint)' }}>
             {entry.type === 'goal' ? 'Goal' : 'Monthly plan'}
           </span>
           {editing ? <ChevronUp size={14} className="text-[var(--color-ink-faint)]" /> : <ChevronDown size={14} className="text-[var(--color-ink-faint)]" />}
-        </div>
+        </button>
 
         {editing ? (
           <SavingsEntryEditForm

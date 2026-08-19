@@ -77,6 +77,7 @@ interface LedgerContextValue {
 
   addCreditCard: (card: Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>) => string
   updateCreditCard: (id: string, updates: Partial<Omit<CreditCard, 'id'>>) => void
+  updateCreditCardMinimumCharge: (cardId: string, date: string, amount: number) => void
   removeCreditCard: (id: string) => void
 
   addRecurringTemplate: (template: Omit<RecurringTemplate, 'id' | 'active'>) => string
@@ -357,6 +358,25 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
   const updateCreditCard: LedgerContextValue['updateCreditCard'] = (id, updates) => {
     setDataState((prev) => ({ ...prev, creditCards: prev.creditCards.map((c) => (c.id === id ? { ...c, ...updates } : c)) }))
   }
+  // Credit card ledger modal's "tap a row to adjust" (Loans.tsx) — a date
+  // that already exists as a real, stored transaction gets edited
+  // directly (past or an already-materialized future one); a date that's
+  // still only a generated projection gets an override recorded on the
+  // card instead, which generateMinimumPaymentTransactions then picks up
+  // on every future call. Both branches end up doing the right thing for
+  // "past and future" without the caller needing to know which one applies.
+  const updateCreditCardMinimumCharge: LedgerContextValue['updateCreditCardMinimumCharge'] = (cardId, date, amount) => {
+    setDataState((prev) => {
+      const card = prev.creditCards.find((c) => c.id === cardId)
+      if (!card) return prev
+      const existing = prev.transactions.find((t) => t.creditCardId === cardId && t.type === 'credit_card_payment' && t.date === date && !t.sourceType)
+      if (existing) {
+        return { ...prev, transactions: prev.transactions.map((t) => (t.id === existing.id ? { ...t, amount } : t)) }
+      }
+      const nextOverrides = [...(card.minimumPaymentOverrides ?? []).filter((o) => o.date !== date), { date, amount }]
+      return { ...prev, creditCards: prev.creditCards.map((c) => (c.id === cardId ? { ...c, minimumPaymentOverrides: nextOverrides } : c)) }
+    })
+  }
   const removeCreditCard: LedgerContextValue['removeCreditCard'] = (id) => {
     setDataState((prev) => ({ ...prev, creditCards: prev.creditCards.filter((c) => c.id !== id) }))
   }
@@ -521,6 +541,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     calibrateLoanAction,
     addCreditCard,
     updateCreditCard,
+    updateCreditCardMinimumCharge,
     removeCreditCard,
     addRecurringTemplate,
     updateRecurringTemplate,

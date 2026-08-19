@@ -1,5 +1,6 @@
 import { generateTransactionsForTemplate, newRecurringTemplate } from '../src/lib/schedule'
 import { buildLoanSchedule, summarizeLoan, applyLoanOverpayment, nominalTotalPayable, generateLoanPaymentTransactions } from '../src/lib/ledgerLoans'
+import { dedupeKey } from '../src/lib/projection'
 import { computeMinimumPaymentAmount, generateMinimumPaymentTransactions, recordCreditCardSpend, recordCreditCardLumpPayment, totalPaidForCard } from '../src/lib/creditCards'
 import { applyClearSideEffects } from '../src/lib/clearTransaction'
 import { summarizeByPaymentMethod } from '../src/lib/paymentMethodSummary'
@@ -215,9 +216,23 @@ check('Recurring overpayment applies within its window (month 2)', endDateSchedu
 check('Recurring overpayment stops applying once past its endDate (month 3)', endDateSchedule[2]?.recurringOverpaymentApplied ?? 0, 0)
 
 const recurringTxns = generateLoanPaymentTransactions(loanWithFixedRecurring, new Date(2026, 1, 1), new Date(2026, 1, 28))
-check("The recurring overpayment is folded into the SAME monthly transaction, not a separate line", recurringTxns.length, 1)
-check('That transaction\'s amount includes both the scheduled payment and the recurring overpayment', recurringTxns[0].amount, 350) // 250 scheduled + 100 recurring
-check('The transaction carries a note explaining the recurring overpayment is included', recurringTxns[0].note?.includes('recurring overpayment'), true)
+// Was folded into a single transaction (amount 350 = 250 scheduled + 100
+// recurring, with a note explaining the inclusion) — confirmed as a real
+// bug, not the intended design: a person testing this directly found
+// their recurring overpayment silently inflating the regular payment's
+// amount rather than showing as its own line in their ledger, which was
+// inconsistent with a one-off logged overpayment already always getting
+// its own transaction, and with the loan ledger modal already treating
+// all three kinds (regular/ad-hoc/recurring) as distinct row types. Now
+// generates two separate transactions, same as the ledger modal already
+// modelled internally — see generateLoanPaymentTransactions's own comment.
+check('The recurring overpayment now generates its OWN separate transaction, not folded into the regular payment', recurringTxns.length, 2)
+const regularTxn = recurringTxns.find((t) => t.sourceType === 'loan')
+const recurringTxn = recurringTxns.find((t) => t.sourceType === 'loan_recurring_overpayment')
+check('The regular payment transaction is exactly the scheduled amount, not inflated', regularTxn?.amount, 250)
+check('The recurring overpayment transaction is exactly the recurring amount, on its own', recurringTxn?.amount, 100)
+check('The recurring overpayment transaction carries a note explaining what it is', recurringTxn?.note?.includes('recurring overpayment'), true)
+check('The two transactions dedupe independently (distinct sourceType, same date) rather than colliding', dedupeKey(regularTxn!) !== dedupeKey(recurringTxn!), true)
 
 const oneOffOverpaymentTxn = applyLoanOverpayment(loan, 500, '2026-03-20').transaction
 check('A one-off logged overpayment is STILL its own separate transaction, unaffected by the recurring-overpayment folding change', oneOffOverpaymentTxn.amount, 500)
