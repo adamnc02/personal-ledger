@@ -118,7 +118,15 @@ check('A bill due the day after asOf is NOT auto-cleared yet', tomorrowCheck.tra
 import { recordCreditCardLumpPayment } from '../src/lib/creditCards'
 
 const cardForLumpTest: CreditCard = { ...card, id: 'card-2', currentBalance: 500, minimumPayment: { type: 'fixed', amount: 0 } }
-const lumpResult = recordCreditCardLumpPayment(cardForLumpTest, 200, '2026-08-20')
+// Hardcoded well into the future rather than relative to "today" -
+// recordCreditCardLumpPayment's status assignment reads the REAL system
+// clock (todayIso()), not a passed-in asOf, so a date that was
+// comfortably "the future" when this test was written silently becomes
+// "the past" as real time simply passes — confirmed as exactly what
+// happened here once real-world time caught up to the date this
+// originally used. A date decades out won't need touching again for a
+// very long time.
+const lumpResult = recordCreditCardLumpPayment(cardForLumpTest, 200, '2099-08-20')
 check("Logging a FUTURE-dated lump payment creates it as 'pending', not 'cleared'", lumpResult.transaction.status, 'pending')
 check("Logging a future-dated lump payment does NOT touch the card's balance immediately", lumpResult.updatedCard.currentBalance, 500)
 
@@ -127,11 +135,11 @@ const lumpData: AppDataV2 = {
   creditCards: [lumpResult.updatedCard],
   transactions: [{ ...lumpResult.transaction, id: 'lump-tx' }],
 }
-const beforeDueDate = autoClearDuePayments(lumpData, new Date(2026, 7, 19)) // 19 Aug — one day before due
+const beforeDueDate = autoClearDuePayments(lumpData, new Date(2099, 7, 19)) // 19 Aug — one day before due
 check('The day before its date, the lump payment is STILL pending', beforeDueDate.transactions.find((t) => t.id === 'lump-tx')?.status, 'pending')
 check('The day before its date, the balance is STILL untouched', beforeDueDate.creditCards[0].currentBalance, 500)
 
-const onDueDate = autoClearDuePayments(lumpData, new Date(2026, 7, 20)) // 20 Aug — exactly its date
+const onDueDate = autoClearDuePayments(lumpData, new Date(2099, 7, 20)) // 20 Aug — exactly its date
 check('On its exact date, the lump payment settles to cleared', onDueDate.transactions.find((t) => t.id === 'lump-tx')?.status, 'cleared')
 check("On its exact date, the balance reduces (500 - 200 = 300)", onDueDate.creditCards[0].currentBalance, 300)
 

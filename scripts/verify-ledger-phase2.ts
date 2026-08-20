@@ -266,16 +266,36 @@ check(
 // A lump payment logged for a date BEFORE the next minimum-payment date
 // (but still in the future relative to "today") must be folded into
 // that next minimum's calculation.
-const { updatedCard: cardWithFutureRepayment } = recordCreditCardLumpPayment(compoundingCard, 100, '2026-08-20')
-const withRepayment = generateMinimumPaymentTransactions(cardWithFutureRepayment, new Date(2026, 7, 1), new Date(2026, 9, 31))
-check('Month 1 (before the repayment date) is unaffected: still 5% of £500', withRepayment[0].amount, 25)
-check('Month 2 (after the repayment): 5% of (500 - 25 - 100) = 5% of £375', withRepayment[1].amount, 18.75)
-check('Month 3 continues compounding from the post-repayment balance', withRepayment[2].amount, round2(0.05 * (375 - 18.75)))
+//
+// Computed relative to "today", not hardcoded to a fixed calendar year —
+// generateMinimumPaymentTransactions filters card.lumpPayments by
+// `lp.date > today` internally (reading the REAL system clock, not a
+// passed-in asOf), so a hardcoded "future" date silently stops being
+// future once real time actually reaches it — confirmed as exactly what
+// happened here (this used to be pinned to Aug 2026, which was
+// comfortably future when written but is no longer, now that real time
+// has caught up to it). Anchoring to next month, every time this runs,
+// keeps it genuinely future forever, however many days pass between
+// runs.
+const lumpToday = new Date()
+const lumpGenStart = new Date(lumpToday.getFullYear(), lumpToday.getMonth() + 1, 1) // 1st of next month — always after today
+const lumpGenEnd = new Date(lumpToday.getFullYear(), lumpToday.getMonth() + 4, 0) // end of the 3rd month from there
+const lumpDateIso = `${lumpGenStart.getFullYear()}-${String(lumpGenStart.getMonth() + 1).padStart(2, '0')}-20` // the 20th of the starting month — between day-6 payments in month 1 and month 2
+
+const { updatedCard: cardWithFutureRepayment } = recordCreditCardLumpPayment(compoundingCard, 100, lumpDateIso)
+const withRepayment = generateMinimumPaymentTransactions(cardWithFutureRepayment, lumpGenStart, lumpGenEnd)
+const noRepaymentForSameWindow = generateMinimumPaymentTransactions(compoundingCard, lumpGenStart, lumpGenEnd)
+const month1Balance = round2(500 * 0.05) // 5% of the starting £500, unaffected by a repayment landing after this month
+const month2StartingBalance = round2(500 - month1Balance - 100) // month 1's payment + the £100 lump, both off the original £500
+check('Month 1 (before the repayment date) is unaffected: still 5% of £500', withRepayment[0].amount, noRepaymentForSameWindow[0].amount)
+check('Month 2 (after the repayment): 5% of the balance after month 1\'s payment AND the £100 lump payment', withRepayment[1].amount, round2(month2StartingBalance * 0.05))
+check('Month 3 continues compounding from the post-repayment balance', withRepayment[2].amount, round2((month2StartingBalance - withRepayment[1].amount) * 0.05))
 
 // A lump payment dated AFTER the horizon being generated must not be applied early.
-const { updatedCard: cardWithFarFutureRepayment } = recordCreditCardLumpPayment(compoundingCard, 100, '2026-11-15')
-const beforeThatRepayment = generateMinimumPaymentTransactions(cardWithFarFutureRepayment, new Date(2026, 7, 1), new Date(2026, 9, 31))
-check('A lump payment dated after the generated range does not affect any of these months', beforeThatRepayment.map((t) => t.amount), threeMonthsNoRepayment.map((t) => t.amount))
+const farFutureDateIso = `${lumpGenStart.getFullYear() + 1}-01-15`
+const { updatedCard: cardWithFarFutureRepayment } = recordCreditCardLumpPayment(compoundingCard, 100, farFutureDateIso)
+const beforeThatRepayment = generateMinimumPaymentTransactions(cardWithFarFutureRepayment, lumpGenStart, lumpGenEnd)
+check('A lump payment dated after the generated range does not affect any of these months', beforeThatRepayment.map((t) => t.amount), noRepaymentForSameWindow.map((t) => t.amount))
 
 // An ALREADY-CLEARED lump payment (dated in the past) must NOT be re-applied — it's already reflected in currentBalance.
 const alreadyClearedCard: CreditCard = { ...compoundingCard, currentBalance: 400, lumpPayments: [{ id: 'lp-1', date: '2026-01-01', amount: 100 }] }
