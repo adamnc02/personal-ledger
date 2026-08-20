@@ -46,7 +46,7 @@ check('Consecutive occurrences are exactly one calendar month apart', recurringR
 const allRows = buildLoanLedgerRows(loan)
 check(
   'The ledger is sorted in true chronological order, not schedule-entry order',
-  [...allRows.map((r) => r.date)].every((d, i, arr) => i === 0 || arr[i - 1] <= d),
+  allRows.map((r) => r.date).every((d, i, arr) => i === 0 || arr[i - 1] <= d),
   true,
 )
 const augIndex = allRows.findIndex((r) => r.date === '2026-08-21')
@@ -60,6 +60,20 @@ check('The August 21st row sits between the August 2nd and September 2nd monthly
 // ── Home page summary (generated transactions) ──
 const txns = generateLoanPaymentTransactions(loan, new Date('2026-08-01'), new Date('2026-11-30')).filter((t) => t.sourceType === 'loan_recurring_overpayment')
 check('Generated transactions for the Home page summary also use the real 21st, not the 2nd', txns.every((t) => t.date.endsWith('-21')), true)
-check('Exactly 3 occurrences fall within the Aug-Nov window (21 Aug, 21 Sep, 21 Oct)', txns.map((t) => t.date), ['2026-08-21', '2026-09-21', '2026-10-21'])
+// 4, not 3 — confirmed as the correct count once the range filter checks
+// each occurrence's own REAL date rather than the loan period it's
+// aggregated into for interest purposes: 21 Nov falls on/before the
+// window's own end (30 Nov), even though the loan period it aggregates
+// into (2 Dec) falls after it. This is precisely the bug that used to
+// make "This cycle" show nothing for a recurring overpayment that
+// "Next 3 cycles" displayed correctly — the schedule entry's OWN date
+// (the 2nd of the following month) fell outside a requested window
+// even when the overpayment's real date was comfortably inside it.
+check('4 occurrences fall within the Aug-Nov window (21 Aug, Sep, Oct, AND Nov — the 21st is always <= the last day of its own month)', txns.map((t) => t.date), [
+  '2026-08-21',
+  '2026-09-21',
+  '2026-10-21',
+  '2026-11-21',
+])
 
 console.log(process.exitCode ? '\nSome checks FAILED.' : '\nAll recurring-overpayment-real-date checks passed.')

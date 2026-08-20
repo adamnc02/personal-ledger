@@ -777,16 +777,34 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
   const endIso = toIso(rangeEnd)
   const results: Omit<Transaction, 'id'>[] = []
 
-  // Computed over the FULL schedule, not the filtered window below — the
-  // recurring overpayment's own monthly cadence has to chain correctly
-  // from its real startDate regardless of which slice of the loan's life
-  // this particular call is asking about, same reasoning as
+  // Computed over the FULL schedule, not date-filtered — the recurring
+  // overpayment's own monthly cadence has to chain correctly from its
+  // real startDate regardless of which slice of the loan's life this
+  // particular call is asking about, same reasoning as
   // buildLoanLedgerRows's identical use of this map.
   const fullSchedule = buildLoanSchedule(loan)
   const recurringDates = recurringOverpaymentRealDates(loan, fullSchedule)
 
-  for (const e of fullSchedule.filter((entry) => entry.date >= startIso && entry.date <= endIso)) {
-    if (e.scheduledPayment > 0) {
+  // Deliberately NOT pre-filtering fullSchedule by [startIso, endIso]
+  // before this loop — confirmed as a real, serious bug when it was
+  // structured that way: a recurring overpayment's REAL date can fall
+  // WELL BEFORE the loan's own contractual period it's aggregated into
+  // for interest purposes (e.g. an overpayment on the 21st gets folded
+  // into the loan's own NEXT payment on the 2nd of the following month —
+  // see recurringOverpaymentRealDates's own comment). Pre-filtering on
+  // the schedule entry's date meant that whenever the loan's own period
+  // date fell just outside a requested window (e.g. the 2nd of next
+  // month, just past "this cycle" ending on the 30th) but the
+  // overpayment's REAL date was comfortably inside it (the 21st), the
+  // whole entry was discarded before its real date was ever checked —
+  // reproduced directly: "This cycle" showed nothing at all for a
+  // recurring overpayment that "Next 3 cycles" displayed correctly.
+  // Each row below now checks its OWN real display date against the
+  // range independently, since a scheduled payment and its
+  // period-mate's recurring overpayment can legitimately fall on
+  // opposite sides of a window boundary.
+  for (const e of fullSchedule) {
+    if (e.scheduledPayment > 0 && e.date >= startIso && e.date <= endIso) {
       results.push({
         date: e.date,
         amount: round2(e.scheduledPayment),
@@ -808,28 +826,31 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
       })
     }
     if (e.recurringOverpaymentApplied > 0) {
-      results.push({
-        // The recurring overpayment's own real date (see
-        // recurringOverpaymentRealDates's comment) — confirmed as a real
-        // bug otherwise: this always showed on the loan's own payment
-        // date throughout the Home page summary, even when the person
-        // had deliberately set the recurring overpayment to a
-        // completely different day of the month.
-        date: recurringDates.get(e.date) ?? e.date,
-        amount: round2(e.recurringOverpaymentApplied),
-        direction: 'out',
-        categoryId: loan.categoryId,
-        paymentMethod: 'direct_debit',
-        status: 'pending',
-        type: 'loan_payment',
-        location: loan.location,
-        ownerId: loan.ownerId,
-        payee: loan.payee,
-        payeeSharePercent: loan.payeeSharePercent,
-        sourceType: 'loan_recurring_overpayment',
-        sourceId: loan.id,
-        note: `${loan.name} — recurring overpayment`,
-      })
+      // The recurring overpayment's own real date (see
+      // recurringOverpaymentRealDates's comment) — confirmed as a real
+      // bug otherwise: this always showed on the loan's own payment
+      // date throughout the Home page summary, even when the person
+      // had deliberately set the recurring overpayment to a
+      // completely different day of the month.
+      const realDate = recurringDates.get(e.date) ?? e.date
+      if (realDate >= startIso && realDate <= endIso) {
+        results.push({
+          date: realDate,
+          amount: round2(e.recurringOverpaymentApplied),
+          direction: 'out',
+          categoryId: loan.categoryId,
+          paymentMethod: 'direct_debit',
+          status: 'pending',
+          type: 'loan_payment',
+          location: loan.location,
+          ownerId: loan.ownerId,
+          payee: loan.payee,
+          payeeSharePercent: loan.payeeSharePercent,
+          sourceType: 'loan_recurring_overpayment',
+          sourceId: loan.id,
+          note: `${loan.name} — recurring overpayment`,
+        })
+      }
     }
   }
 

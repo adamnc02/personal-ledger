@@ -19,6 +19,19 @@ export function EditField({ label, value, onChange, type = 'text', inputRef }: E
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+        // Confirmed directly via real on-device measurements (not a
+        // guess): iOS Safari renders a native `type="date"` input with
+        // `box-sizing: content-box`, silently ignoring the page's CSS —
+        // every OTHER input type on the same page correctly reports
+        // `border-box`. Under content-box, the same declared vertical
+        // padding gets ADDED on top of the height instead of eaten out of
+        // it, which is exactly what measured as a 5px height mismatch
+        // against sibling number inputs in the same row (38px vs 33px) —
+        // the visible misalignment. This is a known WebKit quirk specific
+        // to native date/time inputs' internal shadow-root rendering, not
+        // something reachable by a plain CSS class — an inline style is
+        // required to reliably win against it.
+        style={type === 'date' ? { boxSizing: 'border-box', WebkitAppearance: 'none' } : undefined}
       />
     </label>
   )

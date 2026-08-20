@@ -16,7 +16,6 @@ import type { Scenario, ScenarioActionType, ScenarioTargetKind, BillLocation } f
 import type { RecurringTemplate, Loan } from '../types/ledger'
 import { BILLS_CATEGORY_ID } from '../types/ledger'
 import { SplitEditor } from '../components/SplitEditor'
-import { DebugMeasurements } from '../components/DebugMeasurements'
 import { nanoid } from 'nanoid'
 
 const ACTION_LABELS: Record<ScenarioActionType, string> = {
@@ -623,12 +622,11 @@ function ScenarioForm({
 
         return (
           <div key={action.id} className="grid grid-cols-2 gap-2 rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
-            <div className="col-span-2 flex items-center justify-between gap-2" data-debug-id={i === 0 ? 'scenario-type-row' : undefined}>
+            <div className="col-span-2 flex items-center justify-between gap-2">
               <select
                 value={action.type}
                 onChange={(e) => updateAction({ type: e.target.value as ScenarioActionType })}
                 className="flex-1 min-w-0 bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
-                data-debug-id={i === 0 ? 'scenario-type-select' : undefined}
               >
                 {Object.entries(ACTION_LABELS)
                   .filter(([value]) => value !== 'savings_lump_sum' || hasAnySavingsGoal)
@@ -638,16 +636,10 @@ function ScenarioForm({
                     </option>
                   ))}
               </select>
-              <button
-                onClick={() => setActions((prev) => prev.filter((_, idx) => idx !== i))}
-                className="text-[var(--color-ink-faint)]"
-                title="Remove action"
-                data-debug-id={i === 0 ? 'scenario-type-trash' : undefined}
-              >
+              <button onClick={() => setActions((prev) => prev.filter((_, idx) => idx !== i))} className="text-[var(--color-ink-faint)]" title="Remove action">
                 <Trash2 size={14} />
               </button>
             </div>
-            {i === 0 && <DebugMeasurements label="Scenario type row layout" selectorMap={{ Row: '[data-debug-id="scenario-type-row"]', Select: '[data-debug-id="scenario-type-select"]', 'Trash button': '[data-debug-id="scenario-type-trash"]' }} />}
 
             {showSplit && (
               <input
