@@ -15,7 +15,7 @@ import { ProgressRing } from '../components/ProgressRing'
 import { CategoryIcon } from '../components/CategoryIcon'
 import { SAVINGS_CATEGORY_ID, CREDIT_CARD_CATEGORY_ID } from '../types/ledger'
 import { seededCategoryIdForIcon } from '../lib/categories'
-import type { AppDataV2, CreditCard, Transaction, PayCycleConfig } from '../types/ledger'
+import type { AppDataV2, CreditCard, Transaction } from '../types/ledger'
 
 // ── Deck construction — doc addendum on Summary card visibility ────────
 // 'personal' is always present (it's the primary viewer's own account).
@@ -542,70 +542,6 @@ function PersonalDetail({
       )}
 
       <ProgressRingsSection data={data} horizon={horizon} projection={projection} />
-      <OverpaymentVisibilityDebug data={data} payCycle={payCycle} horizon={horizon} projection={projection} />
-    </div>
-  )
-}
-
-/**
- * TEMPORARY diagnostic — not a permanent feature. Reported bug: a
- * newly-logged overpayment (both a future-dated one and a today-dated
- * one) wasn't showing up in "This cycle," only in "Next 3 cycles," and a
- * today-dated one wasn't appearing under "Cleared" the way other
- * same-day transactions do. Reproducing with fresh test data showed
- * CORRECT behaviour — the "Cleared" section was just collapsed by
- * default (existing behaviour, not a bug), and expanding it revealed the
- * transaction was genuinely there. That means whatever's actually wrong
- * depends on this person's own real, accumulated data (their real pay
- * cycle configuration, in a way a fresh scenario can't reproduce) — so
- * rather than keep guessing, this prints the real numbers directly so
- * they can be reported back. Remove this component and its call site
- * entirely once the real cause is found and fixed.
- */
-function OverpaymentVisibilityDebug({ data, payCycle, horizon, projection }: { data: AppDataV2; payCycle: PayCycleConfig; horizon: ProjectionHorizon; projection: ProjectionResult }) {
-  const today = new Date()
-  const todayIso = today.toISOString().slice(0, 10)
-  const otherHorizon: ProjectionHorizon = horizon === 'current_cycle' ? 'three_cycles' : 'current_cycle'
-  const otherProjection = computeProjection(data, data.primaryPersonId, payCycle, otherHorizon)
-
-  const overpaymentTxns = data.transactions.filter((t) => t.sourceType === 'loan_overpayment' || t.sourceType === 'loan_recurring_overpayment')
-
-  const lines: string[] = [
-    `Debug — measured at ${new Date().toISOString()}`,
-    `Today (real device date): ${todayIso}`,
-    `Currently viewing: ${horizon}`,
-    '',
-    `payCycle: openingBalance=${payCycle.openingBalance} openingBalanceDate=${payCycle.openingBalanceDate} paydayDayOfMonth=${payCycle.paydayDayOfMonth} cycleStartDayOfMonth=${payCycle.cycleStartDayOfMonth}`,
-    `This view's horizonEnd: ${projection.horizonEnd}`,
-    `The OTHER view (${otherHorizon})'s horizonEnd: ${otherProjection.horizonEnd}`,
-    '',
-    `All loan_overpayment / loan_recurring_overpayment transactions in storage (${overpaymentTxns.length} found):`,
-  ]
-  for (const t of overpaymentTxns) {
-    const withinFloor = t.date >= payCycle.openingBalanceDate || t.sourceType === 'loan_overpayment' || t.sourceType === 'loan_recurring_overpayment'
-    const withinThisHorizon = t.date <= projection.horizonEnd
-    const withinOtherHorizon = t.date <= otherProjection.horizonEnd
-    const inThisViewsList = projection.transactions.some((pt) => pt.id === t.id || (pt.date === t.date && pt.amount === t.amount && pt.sourceType === t.sourceType))
-    const matchesLocation = t.location === 'personal'
-    const matchesOwner = t.ownerId === data.primaryPersonId
-    const passesLedgerFilter = isLedgerTransaction(t)
-    const relatedLoan = data.loans.find((l) => l.id === t.sourceId || l.overpayments.some((op) => op.id === t.sourceId))
-    lines.push(
-      `  id=${t.id} date=${t.date} amount=${t.amount} status=${t.status} sourceType=${t.sourceType} sourceId=${t.sourceId}`,
-      `    location=${t.location} (matches personal=${matchesLocation})  ownerId=${t.ownerId} (matches primaryPerson=${matchesOwner})  isLedgerTransaction=${passesLedgerFilter}`,
-      `    related loan: ${relatedLoan ? `"${relatedLoan.name}" active=${relatedLoan.active} location=${relatedLoan.location} ownerId=${relatedLoan.ownerId}` : 'NOT FOUND — sourceId does not match any loan'}`,
-      `    passes-opening-floor=${withinFloor}  within-THIS-horizon=${withinThisHorizon}  within-OTHER-horizon=${withinOtherHorizon}  actually-in-this-view's-list=${inThisViewsList}`,
-    )
-  }
-
-  return (
-    <div className="rounded-lg p-2 mt-4" style={{ background: '#000', border: '1px solid #f00' }}>
-      <p className="text-[10px] font-semibold mb-1" style={{ color: '#f66' }}>
-        DEBUG — screenshot this box and send it back
-      </p>
-      <pre className="text-[9px] whitespace-pre-wrap" style={{ color: '#9f9', fontFamily: 'monospace' }}>
-        {lines.join('\n')}
-      </pre>
     </div>
   )
 }

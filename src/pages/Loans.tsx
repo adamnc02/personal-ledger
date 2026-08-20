@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency, formatMonthYear } from '../lib/format'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -9,7 +9,6 @@ import { computeMinimumPaymentAmount, pickCreditCardColor, buildCreditCardMinimu
 import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
-import { DebugMeasurements } from '../components/DebugMeasurements'
 import { CategoryIcon } from '../components/CategoryIcon'
 import { CategoryPicker } from '../components/CategoryPicker'
 import { visibleCategoriesFor, seededCategoryIdForIcon } from '../lib/categories'
@@ -1002,9 +1001,6 @@ function CalibrationModal({
 }) {
   const [rows, setRows] = useState<{ date: string; capital: string; interest: string }[]>([{ date: todayIso(), capital: '', interest: '' }])
   const [result, setResult] = useState<CalibrationResult | null>(null)
-  const dateInputRef = useRef<HTMLInputElement>(null)
-  const capitalInputRef = useRef<HTMLInputElement>(null)
-  const interestInputRef = useRef<HTMLInputElement>(null)
 
   const canAddRow = existingLinesCount + rows.length < MAX_CALIBRATION_LINES
   const validRows = rows.filter((r) => r.date && Number(r.capital) > 0 && Number(r.interest) >= 0)
@@ -1042,34 +1038,15 @@ function CalibrationModal({
               {rows.map((row, i) => (
                 <div key={i} className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
                   <div className="grid grid-cols-3 gap-2 items-start">
-                    <EditField
-                      label="Date"
-                      type="date"
-                      value={row.date}
-                      onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, date: v } : r)))}
-                      inputRef={i === 0 ? dateInputRef : undefined}
-                    />
-                    <EditField
-                      label="Capital (£)"
-                      type="number"
-                      value={row.capital}
-                      onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, capital: v } : r)))}
-                      inputRef={i === 0 ? capitalInputRef : undefined}
-                    />
-                    <EditField
-                      label="Interest (£)"
-                      type="number"
-                      value={row.interest}
-                      onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, interest: v } : r)))}
-                      inputRef={i === 0 ? interestInputRef : undefined}
-                    />
+                    <EditField label="Date" type="date" value={row.date} onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, date: v } : r)))} />
+                    <EditField label="Capital (£)" type="number" value={row.capital} onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, capital: v } : r)))} />
+                    <EditField label="Interest (£)" type="number" value={row.interest} onChange={(v) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, interest: v } : r)))} />
                   </div>
                   {rows.length > 1 && (
                     <button onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))} className="text-xs self-start" style={{ color: 'var(--color-negative)' }}>
                       Remove line
                     </button>
                   )}
-                  {i === 0 && <DebugMeasurements label="Calibration row alignment" refs={{ 'Date input': dateInputRef, 'Capital input': capitalInputRef, 'Interest input': interestInputRef }} />}
                 </div>
               ))}
             </div>
@@ -1503,9 +1480,6 @@ function RecurringOverpaymentEditor({
           Remove
         </button>
       </div>
-      <p className="text-[11px] text-[var(--color-ink-faint)] -mt-1">
-        Added on top of the regular monthly payment, every month it's active — shown as its own separate line in your ledger, alongside that month's regular payment.
-      </p>
       <div className="flex items-center justify-between -mt-1">
         <p className="text-[11px] text-[var(--color-ink-faint)]">{value.recastMode === 'reduce_payment' ? 'Keeping the same length' : 'Keeping the monthly payment the same'}</p>
         <button onClick={() => setChoosingRecast(true)} className="text-[11px] font-medium" style={{ color: 'var(--color-coral)' }}>
