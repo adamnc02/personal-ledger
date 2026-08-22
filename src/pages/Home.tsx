@@ -6,9 +6,10 @@ import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, type ProjectionHorizon, type ProjectionResult } from '../lib/projection'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary } from '../lib/jointLedger'
-import { computeMinimumPaymentAmount, totalPaidForCard } from '../lib/creditCards'
+import { computeMinimumPaymentAmount, totalPaidForCard, withLiveBalance, withLiveBalances } from '../lib/creditCards'
 import { cycleBoundsForDate } from '../lib/payCycle'
 import { isLedgerTransaction, signedAmount } from '../lib/runningBalance'
+import { computeCycleSummary, compareByDateSalaryFirst, compareByDateDescSalaryFirst } from '../lib/cycleSummary'
 import { SwipeCards } from '../components/SwipeCards'
 import { BankCard } from '../components/BankCard'
 import { ProgressRing } from '../components/ProgressRing'
@@ -38,6 +39,8 @@ function buildDeck(data: AppDataV2): DeckEntry[] {
 
   return deck
 }
+
+const round2 = (n: number) => Math.round(n * 100) / 100
 
 const HORIZON_LABELS: Record<ProjectionHorizon, string> = { current_cycle: 'This cycle', three_cycles: 'Next 3 cycles' }
 type Grouping = 'list' | 'category'
@@ -76,16 +79,27 @@ function groupingCategoryId(t: Transaction): string {
 }
 
 /**
- * Sum of pending OUTGOING items only — loans, bills, future ad-hoc
- * expenses — shown as a negative figure. Deliberately excludes pending
- * incoming items (salary above all): salary landing inside the horizon
- * is already fully reflected in the Projected figure, so netting it into
- * Pending too double-counts it there and makes "Pending" read as "net
- * cash flow" rather than what it's meant to show, "money due to go out
- * that hasn't yet."
+ * NET sum of everything still pending inside the horizon — outgoings as
+ * negatives, incoming (salary, bonuses, a transfer from a family member,
+ * any ad-hoc income) as positives.
+ *
+ * This deliberately REPLACES an earlier outgoings-only version. That one
+ * excluded pending income on the reasoning that salary is already
+ * reflected in Projected, so counting it here too would read as "net cash
+ * flow" rather than "money due to go out." Confirmed as the wrong call in
+ * practice: logging a +£100 transfer moved Projected and appeared in the
+ * ledger list, but Pending didn't budge, which reads as the app having
+ * simply missed the entry. It also left the hero's three figures unable
+ * to be reconciled against each other by eye.
+ *
+ * Netting them makes the hero self-consistent — Current balance + Pending
+ * is now exactly Projected, for every horizon — which is a stronger
+ * property than the old label precision was worth. There is no
+ * double-counting either way: Projected is computed independently in
+ * projection.ts and never reads this function.
  */
-function pendingOutgoingTotal(transactions: Transaction[]): number {
-  return -transactions.filter((t) => t.status === 'pending' && isLedgerTransaction(t) && t.direction === 'out').reduce((sum, t) => sum + t.amount, 0)
+function pendingNetTotal(transactions: Transaction[]): number {
+  return round2(transactions.filter((t) => t.status === 'pending' && isLedgerTransaction(t)).reduce((sum, t) => sum + signedAmount(t), 0))
 }
 
 export function Home() {
@@ -106,7 +120,13 @@ export function Home() {
         <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Home</h1>
       </header>
 
-      <SwipeCards activeIndex={safeIndex} onChange={setActiveIndex}>
+      <SwipeCards
+        activeIndex={safeIndex}
+        onChange={setActiveIndex}
+        // Salary card only — the joint/household/credit-card faces have no
+        // salary-vs-outgoings picture of their own to break down.
+        belowCards={activeEntry?.kind === 'personal' ? <SalaryBreakdownCard data={data} horizon={horizon} /> : undefined}
+      >
         {deck.map((entry, i) => (
           <DeckHero key={i} entry={entry} data={data} horizon={horizon} />
         ))}
@@ -139,8 +159,100 @@ function CardRow({ label, value, emphasized }: { label: string; value: number; e
         {label}
       </span>
       <span className={`font-display tabular-nums ${emphasized ? 'text-xl font-bold' : 'text-base font-semibold'}`} style={{ color: '#fff' }}>
-        {negative ? '-' : ''}£{Math.abs(value).toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+        {negative ? '-' : ''}£{formatCurrency(Math.abs(value))}
       </span>
+    </div>
+  )
+}
+
+// ── Pop-down breakdown — the salary hero's second layer ───────────────
+// Sits BEHIND the hero card (SwipeCards' `belowCards` slot renders at a
+// lower z-index than the card track) with a negative top margin, so
+// collapsed it shows nothing but a chevron strip peeking out from under
+// the card's bottom edge, and expanding it looks like the card was
+// hiding it all along rather than a new panel appearing.
+
+/** Horizontal inset each side, so the card is 14px narrower than the hero.
+ *  SwipeCards pads each slide by 2px (px-0.5), so the hero's own edge is
+ *  already 2px in from this container — hence 7 + 2, not a bare 7. */
+const BREAKDOWN_INSET = 9
+/** How far the card tucks up behind the hero. Matched by an equal paddingTop
+ *  so the content itself never lands underneath the card. */
+const BREAKDOWN_TUCK = 26
+
+function BreakdownRow({ label, value, emphasized, muted }: { label: string; value: number; emphasized?: boolean; muted?: boolean }) {
+  return (
+    <div className="flex items-baseline justify-between">
+      <span className={`${emphasized ? 'text-xs font-semibold' : 'text-[11px]'}`} style={{ color: muted ? 'var(--color-ink-faint)' : emphasized ? 'var(--color-ink)' : 'var(--color-ink-muted)' }}>
+        {label}
+      </span>
+      <span className={`font-mono tabular-nums ${emphasized ? 'text-sm font-semibold' : 'text-xs'}`} style={{ color: muted ? 'var(--color-ink-faint)' : 'var(--color-ink)' }}>
+        {value < 0 ? '-' : ''}£{formatCurrency(Math.abs(value))}
+      </span>
+    </div>
+  )
+}
+
+function SalaryBreakdownCard({ data, horizon }: { data: AppDataV2; horizon: ProjectionHorizon }) {
+  const [open, setOpen] = useState(false)
+  const payCycle = data.payCycles.find((pc) => pc.personId === data.primaryPersonId)
+
+  const summary = useMemo(() => {
+    if (!payCycle) return null
+    const projection = computeProjection(data, data.primaryPersonId, payCycle, horizon)
+    return computeCycleSummary(projection.transactions, projection.clearedBalance)
+  }, [data, payCycle, horizon])
+
+  if (!summary) return null
+
+  return (
+    <div style={{ marginLeft: BREAKDOWN_INSET, marginRight: BREAKDOWN_INSET, marginTop: -BREAKDOWN_TUCK }}>
+      <div className="rounded-b-3xl overflow-hidden shadow-lg" style={{ background: 'var(--color-surface-raised)', paddingTop: BREAKDOWN_TUCK }}>
+        <div
+          style={{
+            maxHeight: open ? 480 : 0,
+            opacity: open ? 1 : 0,
+            overflow: 'hidden',
+            transition: 'max-height 0.32s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.22s ease',
+          }}
+        >
+          <div className="px-4 pt-3 pb-1 flex flex-col gap-3.5">
+            <p className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">{HORIZON_LABELS[horizon]}</p>
+
+            <div className="flex flex-col gap-1">
+              <BreakdownRow label="Income" value={summary.income.total} emphasized />
+              <BreakdownRow label="Salary & bonuses" value={summary.income.salary} />
+              <BreakdownRow label="Other income" value={summary.income.other} />
+            </div>
+
+            <div className="flex flex-col gap-1 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
+              <BreakdownRow label="Outgoings" value={summary.outgoings.total} emphasized />
+              <BreakdownRow label="Standing orders" value={summary.outgoings.standingOrder} />
+              <BreakdownRow label="Direct debits (incl. loans)" value={summary.outgoings.directDebit} />
+              <BreakdownRow label="Other" value={summary.outgoings.other} />
+            </div>
+
+            <div className="flex flex-col gap-1 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
+              <BreakdownRow label="Current balance" value={summary.currentBalance} />
+              <BreakdownRow label="Available" value={summary.available} emphasized />
+              {/* Spelled out because the three figures above deliberately
+                  DON'T add up to this one — see CycleSummary.available. */}
+              <p className="text-[10px] text-[var(--color-ink-faint)] leading-snug mt-0.5">
+                Balance plus everything still to come in, less everything still to go out. Anything that's already cleared is counted once, in the balance.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <button
+          onClick={() => setOpen((o) => !o)}
+          className="w-full flex items-center justify-center py-1.5"
+          aria-expanded={open}
+          aria-label={open ? 'Hide income and outgoings breakdown' : 'Show income and outgoings breakdown'}
+        >
+          {open ? <ChevronUp size={16} className="text-[var(--color-ink-muted)]" /> : <ChevronDown size={16} className="text-[var(--color-ink-muted)]" />}
+        </button>
+      </div>
     </div>
   )
 }
@@ -165,7 +277,7 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
         <BankCard variant="coral" bankLabel={primaryPerson?.name ?? 'Me'} accountLabel="Personal">
           <div className="mt-6 space-y-1.5">
             <CardRow label="Current balance" value={projection.clearedBalance} />
-            <CardRow label="Pending" value={pendingOutgoingTotal(projection.transactions)} />
+            <CardRow label="Pending" value={pendingNetTotal(projection.transactions)} />
             <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={projection.projectedBalance} emphasized />
           </div>
         </BankCard>
@@ -195,7 +307,7 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
         .filter((r): r is ReturnType<typeof computeProjection> => r !== null)
       const totalCleared = results.reduce((sum, r) => sum + r.clearedBalance, 0)
       const totalProjected = results.reduce((sum, r) => sum + r.projectedBalance, 0)
-      const totalPendingOutgoing = results.reduce((sum, r) => sum + pendingOutgoingTotal(r.transactions), 0)
+      const totalPendingOutgoing = results.reduce((sum, r) => sum + pendingNetTotal(r.transactions), 0)
       return (
         <BankCard variant="dark" bankLabel="Household" accountLabel="Combined">
           <div className="mt-6 space-y-1.5">
@@ -207,8 +319,13 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       )
     }
     case 'credit_card': {
-      const card = data.creditCards.find((c) => c.id === entry.cardId)
-      if (!card) return null
+      const stored = data.creditCards.find((c) => c.id === entry.cardId)
+      if (!stored) return null
+      // Derived balance, not the stored anchor — see cardBalanceAsOf.
+      // The minimum due has to be computed against the live figure too,
+      // or a percent-of-balance card would quote a minimum for a debt
+      // that's already been partly paid off.
+      const card = withLiveBalance(stored, data.transactions)
       const minPayment = computeMinimumPaymentAmount(card)
       return (
         <BankCard variant="custom" customColor={card.color} bankLabel={card.name} accountLabel="Credit Card" icon={<CreditCardIcon size={18} strokeWidth={1.5} color="#fff" />}>
@@ -220,8 +337,8 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       )
     }
     case 'credit_cards_combined': {
-      const myCards = data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active)
-      const totalOutstanding = myCards.reduce((s, c) => s + c.currentBalance, 0)
+      const myCards = withLiveBalances(data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active), data.transactions)
+      const totalOutstanding = round2(myCards.reduce((s, c) => s + c.currentBalance, 0))
       return (
         <BankCard variant="dark" bankLabel="All Cards" accountLabel={`${myCards.length} cards`} icon={<Layers size={18} strokeWidth={1.5} style={{ color: 'var(--color-coral)' }} />}>
           <div className="mt-6 space-y-1.5">
@@ -424,8 +541,11 @@ function DateOrderedList({
   showCleared: boolean
   onToggleCleared: () => void
 }) {
-  const pending = transactions.filter((t) => t.status === 'pending').sort((a, b) => a.date.localeCompare(b.date))
-  const cleared = transactions.filter((t) => t.status === 'cleared').sort((a, b) => b.date.localeCompare(a.date))
+  // Salary first within its own date (see compareByDateSalaryFirst) — the
+  // running balance below is a fold in list order, so a bill sorted above
+  // the salary that funds it would show a dip that never really happens.
+  const pending = transactions.filter((t) => t.status === 'pending').sort(compareByDateSalaryFirst)
+  const cleared = transactions.filter((t) => t.status === 'cleared').sort(compareByDateDescSalaryFirst)
 
   let running = openingRunningBalance
   const pendingWithRunning = pending.map((t) => {
@@ -462,6 +582,20 @@ function AmountOrderedList({ transactions, data }: { transactions: Transaction[]
 }
 
 function CategoryGroupedList({ transactions, data }: { transactions: Transaction[]; data: AppDataV2 }) {
+  // Collapse state is tracked as the set of groups explicitly COLLAPSED,
+  // not the set expanded — so expanded stays the default for every group,
+  // including any that appears for the first time part-way through a
+  // session (a new category, or one whose first transaction has just been
+  // generated) without needing to seed state for it.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+  const toggleGroup = (key: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
   const groups = new Map<string, Transaction[]>()
   for (const t of transactions) {
     const key = groupingCategoryId(t)
@@ -486,20 +620,27 @@ function CategoryGroupedList({ transactions, data }: { transactions: Transaction
         // outright — the bucket itself is still meaningful either way.
         const fallbackName = groupKey === LOANS_GROUP_CATEGORY_ID ? 'Loans' : groupKey === CREDIT_CARD_CATEGORY_ID ? 'Credit Card' : 'Uncategorised'
         const total = items.reduce((s, t) => s + (t.direction === 'in' ? t.amount : -t.amount), 0)
+        const isCollapsed = collapsed.has(groupKey)
         return (
           <div key={groupKey}>
-            <div className="flex items-center gap-2 mb-1">
+            <button onClick={() => toggleGroup(groupKey)} className="w-full flex items-center gap-2 mb-1 text-left">
               <CategoryIcon category={category} size={13} />
-              <span className="text-xs font-semibold text-[var(--color-ink)] flex-1">{category?.name ?? fallbackName}</span>
+              <span className="text-xs font-semibold text-[var(--color-ink)] flex-1">
+                {category?.name ?? fallbackName}
+                {isCollapsed && <span className="font-normal text-[var(--color-ink-faint)]"> · {items.length}</span>}
+              </span>
               <span className="text-xs font-mono" style={{ color: total >= 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
                 {total >= 0 ? '+' : '-'}£{formatCurrency(Math.abs(total))}
               </span>
-            </div>
-            <div className="flex flex-col divide-y pl-6" style={{ borderColor: 'var(--color-track)' }}>
-              {items.map((t) => (
-                <TransactionRow key={t.id} t={t} data={data} />
-              ))}
-            </div>
+              {isCollapsed ? <ChevronDown size={13} className="text-[var(--color-ink-faint)]" /> : <ChevronUp size={13} className="text-[var(--color-ink-faint)]" />}
+            </button>
+            {!isCollapsed && (
+              <div className="flex flex-col divide-y pl-6" style={{ borderColor: 'var(--color-track)' }}>
+                {items.map((t) => (
+                  <TransactionRow key={t.id} t={t} data={data} />
+                ))}
+              </div>
+            )}
           </div>
         )
       })}
@@ -817,7 +958,14 @@ function CardActivityRow({ t }: { t: Transaction }) {
   )
 }
 
-function CreditCardDetail({ card, data }: { card: CreditCard; data: AppDataV2 }) {
+function CreditCardDetail({ card: storedCard, data }: { card: CreditCard; data: AppDataV2 }) {
+  // Both halves of this ring are now derived from the same transaction
+  // list under the same on-or-before-today rule: `paid` from the payment
+  // transactions, `currentBalance` by replaying them against the anchor.
+  // They previously came from two different mechanisms (transactions vs
+  // a separately-mutated stored total) and could disagree — which is
+  // what made the chart look half-updated after a payment.
+  const card = withLiveBalance(storedCard, data.transactions)
   const paid = totalPaidForCard(card.id, data.transactions)
   const percentPaid = paid + card.currentBalance > 0 ? (paid / (paid + card.currentBalance)) * 100 : 0
   const activity = data.transactions
@@ -859,8 +1007,8 @@ function CreditCardDetail({ card, data }: { card: CreditCard; data: AppDataV2 })
 }
 
 function CreditCardsCombinedDetail({ data }: { data: AppDataV2 }) {
-  const myCards = data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active)
-  const totalOutstanding = myCards.reduce((s, c) => s + c.currentBalance, 0)
+  const myCards = withLiveBalances(data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active), data.transactions)
+  const totalOutstanding = round2(myCards.reduce((s, c) => s + c.currentBalance, 0))
   const totalPaid = myCards.reduce((s, c) => s + totalPaidForCard(c.id, data.transactions), 0)
   const percentPaid = totalPaid + totalOutstanding > 0 ? (totalPaid / (totalPaid + totalOutstanding)) * 100 : 0
   const activity = data.transactions

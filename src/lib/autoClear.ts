@@ -28,7 +28,7 @@ import { nanoid } from 'nanoid'
 import { generateTransactionsForTemplate } from './schedule'
 import { generateLoanPaymentTransactions } from './ledgerLoans'
 import { generateMinimumPaymentTransactions } from './creditCards'
-import { generateSalaryTransactions } from './salaryLedger'
+import { computeNetPayForPeriod, generateSalaryTransactions } from './salaryLedger'
 import { generateSavingsContributions } from './savingsLedger'
 import { generateJointContributionTransactions } from './jointLedger'
 import { dedupeKey } from './projection'
@@ -36,17 +36,60 @@ import { applyClearSideEffects } from './clearTransaction'
 import { toLocalIsoDate } from './date'
 import type { AppDataV2, Transaction } from '../types/ledger'
 
+/**
+ * Keeps an ALREADY-MATERIALIZED salary transaction's amount in step with
+ * what that pay period's net pay currently computes to.
+ *
+ * Confirmed as a real gap, not a hypothetical one. Once a payday's date
+ * arrives, step 2 below materializes it into a stored, cleared
+ * Transaction. From that moment on its dedupeKey suppresses regeneration
+ * forever — so attaching a bonus to that period, or correcting the
+ * salary it was computed from, changed the figure on the Salary page but
+ * left the Home page's balance and ledger showing the old amount, with
+ * nothing to indicate the two had diverged. Nothing in the app revisited
+ * a stored salary row.
+ *
+ * Safe to do unconditionally because a salary transaction's amount is
+ * fully DERIVED — SalaryOverride is the app's designed and only intended
+ * route for "this period's pay was actually £X" (see its comment in
+ * types/ledger.ts), so there's no hand-entered value here to trample.
+ * Idempotent: once every row agrees with its computed figure, this finds
+ * nothing to change and returns the input untouched.
+ */
+function reconcileSalaryTransactions(data: AppDataV2): AppDataV2 {
+  let changed = false
+  const transactions = data.transactions.map((t) => {
+    if (t.type !== 'salary' || !t.personId) return t
+    const person = data.people.find((p) => p.id === t.personId)
+    if (!person) return t
+    const netPay = computeNetPayForPeriod(person, t.date)
+    if (netPay === null || netPay <= 0 || netPay === t.amount) return t
+    changed = true
+    return { ...t, amount: netPay }
+  })
+  return changed ? { ...data, transactions } : data
+}
+
 export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): AppDataV2 {
   const asOfIso = toLocalIsoDate(asOf)
   let result = data
   let changed = false
+
+  // Runs FIRST, before anything is settled: a stored salary row that's
+  // drifted from its computed value should be corrected whether or not
+  // there's also something new coming due this pass.
+  const reconciled = reconcileSalaryTransactions(data)
+  if (reconciled !== data) {
+    result = reconciled
+    changed = true
+  }
 
   // Step 1 — settle anything already stored that's still pending but due.
   // Applies to every pending transaction regardless of type or owner;
   // applyClearSideEffects itself is the thing that decides whether a
   // given type actually has a side effect to run (most don't, and this
   // is just a status flip for those).
-  for (const t of data.transactions) {
+  for (const t of result.transactions) {
     if (t.status !== 'pending' || t.date > asOfIso) continue
     const cleared: Transaction = { ...t, status: 'cleared' }
     result = applyClearSideEffects({ ...result, transactions: result.transactions.map((tx) => (tx.id === t.id ? cleared : tx)) }, cleared)
@@ -54,8 +97,8 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
   }
 
   // Step 2 — materialize newly-due GENERATED occurrences that have never existed as a real transaction at all.
-  for (const person of data.people) {
-    const payCycle = data.payCycles.find((pc) => pc.personId === person.id)
+  for (const person of result.people) {
+    const payCycle = result.payCycles.find((pc) => pc.personId === person.id)
     if (!payCycle) continue
 
     const rangeStart = new Date(payCycle.openingBalanceDate)
@@ -72,7 +115,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
       candidates.push(...generateLoanPaymentTransactions(loan, rangeStart, asOf))
     }
     for (const card of result.creditCards.filter((c) => c.ownerId === person.id)) {
-      candidates.push(...generateMinimumPaymentTransactions(card, rangeStart, asOf))
+      candidates.push(...generateMinimumPaymentTransactions(card, rangeStart, asOf, result.transactions))
     }
     candidates.push(...generateSalaryTransactions(person, payCycle, rangeStart, asOf))
     candidates.push(...generateSavingsContributions(person, payCycle, rangeStart, asOf))

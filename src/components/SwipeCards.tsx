@@ -4,9 +4,17 @@ interface SwipeCardsProps {
   children: ReactNode[]
   activeIndex: number
   onChange: (index: number) => void
+  /**
+   * Rendered between the card track and the pager dots, and painted
+   * BEHIND the track (see the z-index pair below) so it can tuck itself
+   * under the active card with a negative margin and appear to drop out
+   * from behind it. Lives here rather than after <SwipeCards> in the page
+   * because the dots would otherwise sit between the card and it.
+   */
+  belowCards?: ReactNode
 }
 
-export function SwipeCards({ children, activeIndex, onChange }: SwipeCardsProps) {
+export function SwipeCards({ children, activeIndex, onChange, belowCards }: SwipeCardsProps) {
   const startX = useRef<number | null>(null)
   const currentDelta = useRef(0)
   const [dragOffset, setDragOffset] = useState(0)
@@ -42,7 +50,7 @@ export function SwipeCards({ children, activeIndex, onChange }: SwipeCardsProps)
   return (
     <div className="w-full">
       <div
-        className="overflow-hidden touch-pan-y"
+        className="overflow-hidden touch-pan-y relative z-10"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -62,6 +70,9 @@ export function SwipeCards({ children, activeIndex, onChange }: SwipeCardsProps)
           ))}
         </div>
       </div>
+      {belowCards && (
+        <div className="relative z-0">{belowCards}</div>
+      )}
       <div className="flex justify-center gap-2 mt-4">
         {children.map((_, i) => (
           <button

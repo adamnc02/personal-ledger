@@ -378,7 +378,28 @@ export interface CreditCard {
   categoryId: string // for icon; colour below overrides the category's colour
   color: string // hex — drawn from CREDIT_CARD_COLORS, not the personal/joint/household palette
   interestRatePercent: number // APR — genuinely used now: compounds monthly against the balance each billing cycle. See lib/creditCards.ts's monthlyInterestRate for the conversion, and its file header for what's deliberately NOT modelled (daily accrual, purchase grace periods).
+  // The STATED balance as at balanceAsOfDate — an anchor, not a live
+  // figure. It is never adjusted by the app: spend and payments are not
+  // written back into it, and what the card actually owes right now is
+  // DERIVED by replaying card activity forward from the anchor date
+  // (cardBalanceAsOf in lib/creditCards.ts).
+  //
+  // This pairing deliberately mirrors PayCycleConfig's openingBalance /
+  // openingBalanceDate, and exists for the same reason. currentBalance
+  // used to be mutated in place every time a payment cleared, which made
+  // it impossible to tell which transactions were already baked into it
+  // — so every write path had to hand-reverse its own balance effect,
+  // and any code holding a stale copy of the card could silently undo a
+  // payment by saving it back. That is exactly what happened: logging a
+  // payment from the Borrowing page reduced the balance, then pressing
+  // Save on the (still-open, still-stale) edit panel restored the old
+  // figure, while the payment transaction remained — so the pie chart
+  // showed the amount paid going up but the outstanding amount never
+  // coming down. Deriving removes the whole class of bug rather than
+  // patching that one path.
   currentBalance: number
+  balanceAsOfDate: string // ISO date the currentBalance figure above was true as at. Card activity dated BEFORE this is ignored (already reflected in the figure); activity on or after it is applied on top.
+
   minimumPayment: CreditCardMinimumPayment
   paymentDayOfMonth: number // like Bill.dueDay — when the minimum/fixed payment is generated
   ownerId: string // personal only, no location/payee split

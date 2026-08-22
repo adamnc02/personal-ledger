@@ -1,8 +1,7 @@
 import { generateTransactionsForTemplate, newRecurringTemplate } from '../src/lib/schedule'
 import { buildLoanSchedule, summarizeLoan, applyLoanOverpayment, nominalTotalPayable, generateLoanPaymentTransactions } from '../src/lib/ledgerLoans'
 import { dedupeKey } from '../src/lib/projection'
-import { computeMinimumPaymentAmount, generateMinimumPaymentTransactions, recordCreditCardSpend, recordCreditCardLumpPayment, totalPaidForCard } from '../src/lib/creditCards'
-import { applyClearSideEffects } from '../src/lib/clearTransaction'
+import { computeMinimumPaymentAmount, generateMinimumPaymentTransactions, recordCreditCardSpend, recordCreditCardLumpPayment, totalPaidForCard, cardBalanceAsOf, withLiveBalance } from '../src/lib/creditCards'
 import { summarizeByPaymentMethod } from '../src/lib/paymentMethodSummary'
 import { CREDIT_CARD_CATEGORY_ID } from '../src/types/ledger'
 import type { CreditCard, Loan, Transaction } from '../src/types/ledger'
@@ -120,6 +119,7 @@ const card: CreditCard = {
   color: '#8b5cf6',
   interestRatePercent: 0,
   currentBalance: 1000,
+  balanceAsOfDate: '2026-06-01',
   minimumPayment: { type: 'percent_of_balance', percent: 5 },
   paymentDayOfMonth: 10,
   ownerId: 'me',
@@ -128,20 +128,26 @@ const card: CreditCard = {
 }
 check('5% of £1000 balance', computeMinimumPaymentAmount(card), 50)
 
-const cardAfterSpend = recordCreditCardSpend(card, 200, '2026-06-01').updatedCard
-check('Spend increases currentBalance', cardAfterSpend.currentBalance, 1200)
+// Rewritten for the derived-balance model. NEITHER recordCreditCardSpend
+// NOR recordCreditCardLumpPayment writes to currentBalance any more —
+// the stored figure is an immutable anchor and the transactions they
+// produce are what move the balance. `withLiveBalance` is the read that
+// the whole app now goes through, so that's what these assert against.
+const bigSpend = recordCreditCardSpend(card, 200, '2026-06-01')
+check('recordCreditCardSpend leaves the stored anchor untouched', bigSpend.updatedCard.currentBalance, 1000)
+const spendTxn: Transaction = { ...bigSpend.transaction, id: 'tx-spend' }
+const cardAfterSpend = withLiveBalance(card, [spendTxn], new Date(2026, 5, 1))
+check('Spend increases the derived balance', cardAfterSpend.currentBalance, 1200)
 check('5% minimum payment recalculates against the NEW higher balance, not cached', computeMinimumPaymentAmount(cardAfterSpend), 60)
 
-// recordCreditCardLumpPayment no longer reduces the balance itself — that's
-// applyClearSideEffects's job now, applied by the caller once the payment
-// actually clears (immediately for a same-day one, like this test's).
-const lumpResult = recordCreditCardLumpPayment(cardAfterSpend, 60, '2026-06-10')
-check('recordCreditCardLumpPayment alone does NOT reduce the balance — that only happens once the payment clears', lumpResult.updatedCard.currentBalance, 1200)
-const cardAfterMinPayment = applyClearSideEffects(
-  { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [lumpResult.updatedCard], transactions: [], payCycles: [], scenarios: [], primaryPersonId: '' },
-  { ...lumpResult.transaction, id: 'tx-1' },
-).creditCards[0]
-check('Once cleared (via applyClearSideEffects), paying the minimum reduces the balance', cardAfterMinPayment.currentBalance, 1140)
+const lumpResult = recordCreditCardLumpPayment(card, 60, '2026-06-10')
+check('recordCreditCardLumpPayment alone does NOT reduce the stored anchor', lumpResult.updatedCard.currentBalance, 1000)
+const minPayTxn: Transaction = { ...lumpResult.transaction, id: 'tx-1' }
+// Read as of the 9th: the payment is dated the 10th, so it hasn't
+// happened yet — only the spend counts.
+check('A payment dated in the future is not yet reflected in the derived balance', withLiveBalance(card, [spendTxn, minPayTxn], new Date(2026, 5, 9)).currentBalance, 1200)
+const cardAfterMinPayment = withLiveBalance(card, [spendTxn, minPayTxn], new Date(2026, 5, 10))
+check('On its date, paying the minimum reduces the derived balance', cardAfterMinPayment.currentBalance, 1140)
 check('Next cycle\'s 5% minimum is now LOWER than the previous cycle\'s (compounds down as balance shrinks)', computeMinimumPaymentAmount(cardAfterMinPayment) < 60, true)
 check('Specifically, 5% of the new £1140 balance', computeMinimumPaymentAmount(cardAfterMinPayment), 57)
 
@@ -308,7 +314,13 @@ import { monthlyInterestRate } from '../src/lib/creditCards'
 check('monthlyInterestRate compounds correctly: 22.9% APR -> ~1.7332%/month (NOT the naive 22.9/12 = 1.9083%)', monthlyInterestRate(22.9) * 100, 1.7332, 0.001)
 check('0% APR has a 0% monthly rate', monthlyInterestRate(0), 0)
 
-const interestCard: CreditCard = { ...card, id: 'card-interest', currentBalance: 500, interestRatePercent: 22.9, minimumPayment: { type: 'percent_of_balance', percent: 5 }, paymentDayOfMonth: 15 }
+// balanceAsOfDate pinned to the generation window's start (1 Aug). It
+// matters now in a way it didn't before: generateMinimumPaymentTransactions
+// derives its starting balance as at rangeStart, so an anchor sitting
+// MONTHS earlier would (correctly) accrue those intervening cycles of
+// 22.9% interest before the first generated payment — real behaviour,
+// but not what this particular assertion is measuring.
+const interestCard: CreditCard = { ...card, id: 'card-interest', currentBalance: 500, balanceAsOfDate: '2026-08-01', interestRatePercent: 22.9, minimumPayment: { type: 'percent_of_balance', percent: 5 }, paymentDayOfMonth: 15 }
 check("computeMinimumPaymentAmount includes one cycle's interest, so it's MORE than the naive 5% of 500 (£25)", computeMinimumPaymentAmount(interestCard) > 25, true)
 check('Specifically £25.43 (5% of £500 after one month of 22.9% APR interest)', computeMinimumPaymentAmount(interestCard), 25.43)
 
@@ -327,15 +339,16 @@ check('0% interest: month 2 is exactly 5% of £475 (pure payment-driven compound
 // interest accruing each cycle means the balance genuinely GROWS over
 // time despite payments being made — the real, important mechanic of
 // minimum-payment-only credit card debt.
-const debtTrapCard: CreditCard = { ...card, id: 'card-debt-trap', currentBalance: 500, interestRatePercent: 29.9, minimumPayment: { type: 'fixed', amount: 5 }, paymentDayOfMonth: 15 }
-let debtTrapData: AppDataV2 = { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [debtTrapCard], transactions: [], payCycles: [], scenarios: [], primaryPersonId: '' }
+const debtTrapCard: CreditCard = { ...card, id: 'card-debt-trap', currentBalance: 500, balanceAsOfDate: '2026-08-01', interestRatePercent: 29.9, minimumPayment: { type: 'fixed', amount: 5 }, paymentDayOfMonth: 15 }
+// Rewritten for the derived-balance model: the payments are materialized
+// as real transactions and the balance is READ BACK via cardBalanceAsOf,
+// rather than accumulated by repeatedly applying a side effect. Same
+// property under test, sourced the way the app now actually computes it.
 const debtTrapSchedule = generateMinimumPaymentTransactions(debtTrapCard, new Date(2026, 7, 1), new Date(2027, 1, 28))
-for (const t of debtTrapSchedule) {
-  debtTrapData = applyClearSideEffects(debtTrapData, { ...t, id: 'debt-trap-' + t.date })
-}
+const debtTrapTxns: Transaction[] = debtTrapSchedule.map((t) => ({ ...t, id: 'debt-trap-' + t.date, status: 'cleared' as const }))
 check(
   "A £5/month fixed minimum on a 29.9% APR card doesn't cover the interest — the balance GROWS over 7 months of payments, from £500 to over £540",
-  debtTrapData.creditCards[0].currentBalance > 540,
+  cardBalanceAsOf(debtTrapCard, debtTrapTxns, new Date(2027, 1, 28)) > 540,
   true,
 )
 
@@ -345,14 +358,29 @@ check(
 // full cycle's interest.
 const lumpOnlyCard: CreditCard = { ...card, id: 'card-lump-only', currentBalance: 500, interestRatePercent: 22.9 }
 const lumpOnlyTxn = { date: '2026-08-15', amount: 100, direction: 'out' as const, categoryId: 'category-credit-card', paymentMethod: 'bank_transfer' as const, status: 'cleared' as const, type: 'credit_card_payment' as const, location: 'personal' as const, ownerId: 'me', creditCardId: 'card-lump-only', sourceType: 'credit_card_lump_payment' as const, sourceId: 'lump-1', id: 'tx-lump' }
-const afterLumpOnly = applyClearSideEffects({ people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [lumpOnlyCard], transactions: [], payCycles: [], scenarios: [], primaryPersonId: '' }, lumpOnlyTxn)
-check('A lump payment clearing reduces the balance by exactly its amount, with NO interest applied (500 - 100 = 400, not 500×interest - 100)', afterLumpOnly.creditCards[0].currentBalance, 400)
+// Read as of the payment date itself and anchored the same day: no
+// billing date falls strictly between anchor and asOf, so no cycle
+// interest posts — the lump payment reduces the balance by exactly its
+// face amount. (Under the derived model, interest is a function of which
+// BILLING DATES have been crossed, not of which payment triggered it,
+// which is a cleaner statement of the same rule this always encoded.)
+check(
+  'A lump payment reduces the balance by exactly its amount, with NO interest applied (500 - 100 = 400, not 500×interest - 100)',
+  cardBalanceAsOf({ ...lumpOnlyCard, balanceAsOfDate: '2026-08-15' }, [lumpOnlyTxn], new Date(2026, 7, 15)),
+  400,
+)
 
 // ---- 8. totalPaidForCard correctly excludes pending (not-yet-actually-paid) transactions ----
 const pendingOnlyTxn: Transaction = { id: 'tx-pending', date: '2026-09-06', amount: 100, direction: 'out', categoryId: CREDIT_CARD_CATEGORY_ID, paymentMethod: 'bank_transfer', status: 'pending', type: 'credit_card_payment', location: 'personal', ownerId: 'me', creditCardId: 'card-1' }
-check('A PENDING (not yet due) payment does NOT count toward totalPaidForCard, even though it exists as a transaction', totalPaidForCard('card-1', [pendingOnlyTxn]), 0)
+// totalPaidForCard is scoped BY DATE now rather than by `status` — a
+// payment dated on or before today counts as paid, per the confirmed
+// same-day rule. So these two are pinned with an explicit asOfDate
+// either side of the transaction's own date, which is a sharper test
+// than the old status flag (a stale status could previously make the
+// two halves of the pie chart disagree — the reported bug).
+check('A payment dated AFTER the as-of date does NOT count toward totalPaidForCard', totalPaidForCard('card-1', [pendingOnlyTxn], new Date(2026, 8, 5)), 0)
 const clearedOnlyTxn: Transaction = { ...pendingOnlyTxn, id: 'tx-cleared', status: 'cleared' }
-check('A CLEARED payment does count', totalPaidForCard('card-1', [clearedOnlyTxn]), 100)
+check('A payment dated ON the as-of date DOES count (same-day payments are treated as completed)', totalPaidForCard('card-1', [clearedOnlyTxn], new Date(2026, 8, 6)), 100)
 
 
 process.exit(failures === 0 ? 0 : 1)

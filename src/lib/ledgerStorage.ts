@@ -5,9 +5,10 @@
 // new application, not an in-place schema migration (Section 4).
 
 import { nanoid } from 'nanoid'
-import type { AppDataV2, PayCycleConfig, Person } from '../types/ledger'
+import type { AppDataV2, CreditCard, PayCycleConfig, Person, Transaction } from '../types/ledger'
 import { defaultCategories } from './categories'
 import { reconcilePersonReferences } from './household'
+import { monthlyInterestRate } from './creditCards'
 import { toLocalIsoDate } from './date'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -69,7 +70,24 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
       active: loan.active ?? true,
       principal: loan.principal ?? round2(loan.monthlyPayment * loan.termMonths),
     })),
-    creditCards: data.creditCards ?? [],
+    // `balanceAsOfDate` is a NEW REQUIRED field (see the comment on
+    // CreditCard in types/ledger.ts). It's backfilled to TODAY, and that
+    // choice is load-bearing rather than arbitrary: under the old model
+    // `currentBalance` was a running total that had ALREADY been
+    // decremented by every payment that cleared. Anchoring it to any
+    // earlier date would make the new replay subtract those same
+    // payments a second time. "As of today" is the one date for which
+    // the existing stored figure is, by construction, already correct.
+    //
+    // The one wrinkle is a card transaction dated TODAY: the old code
+    // subtracted it from currentBalance the moment it cleared, and the
+    // replay counts anything dated on or before today, so it would land
+    // twice. Those are reversed back out below so the anchor represents
+    // the balance BEFORE today's activity, which the replay then
+    // re-applies. Guarded on `balanceAsOfDate === undefined`, so this
+    // runs exactly once per card and re-running migration on
+    // already-migrated data is a no-op.
+    creditCards: (data.creditCards ?? []).map((card) => (card.balanceAsOfDate ? card : anchorLegacyCardBalance(card, data.transactions ?? []))),
     transactions: data.transactions ?? [],
     payCycles: data.payCycles ?? [],
     scenarios: data.scenarios ?? [],
@@ -144,4 +162,38 @@ export function defaultLedgerData(): AppDataV2 {
     payCycles: [defaultPayCycleConfig(meId)],
     scenarios: [],
   }
+}
+
+/**
+ * One-time backfill of a pre-`balanceAsOfDate` credit card. See the call
+ * site in migrateLedgerData for why the anchor date is today and why
+ * today's own activity has to be unwound out of the stored figure first.
+ *
+ * Interest is unwound too, for the same reason the payment is: under the
+ * old model a cleared GENERATED minimum payment posted a cycle's interest
+ * to the balance before subtracting itself (applyClearSideEffects), so a
+ * minimum payment that cleared today left both effects baked in. A logged
+ * lump payment never posted interest, so only its amount is reversed.
+ */
+function anchorLegacyCardBalance(card: CreditCard, transactions: Transaction[]): CreditCard {
+  const today = toLocalIsoDate(new Date())
+  const todaysActivity = transactions.filter(
+    (t) => t.creditCardId === card.id && t.date === today && (t.type === 'credit_card_spend' || t.type === 'credit_card_payment'),
+  )
+
+  let balance = card.currentBalance
+  // Walk backwards through the day's events, undoing each in turn.
+  for (const t of [...todaysActivity].reverse()) {
+    if (t.type === 'credit_card_spend') {
+      balance = round2(balance - t.amount)
+    } else {
+      balance = round2(balance + t.amount)
+      const wasGeneratedMinimum = t.sourceType !== 'credit_card_lump_payment'
+      if (wasGeneratedMinimum && card.interestRatePercent > 0) {
+        balance = round2(balance / (1 + monthlyInterestRate(card.interestRatePercent)))
+      }
+    }
+  }
+
+  return { ...card, currentBalance: Math.max(0, balance), balanceAsOfDate: today }
 }

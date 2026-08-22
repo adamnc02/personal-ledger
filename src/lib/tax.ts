@@ -202,6 +202,37 @@ export interface SalaryBreakdown {
   taxBreakdown: IncomeTaxBreakdown
 }
 
+/**
+ * Annual income tax for a given annual TAXABLE gross (i.e. already net of
+ * any salary-sacrifice / net-pay deductions) under a given tax code.
+ *
+ * Extracted out of calculateNetSalary so it can be called twice against
+ * two different taxable figures — which is exactly what working out the
+ * marginal tax on a bonus requires (see calculateBonusOnTop). Previously
+ * this whole flat-rate/banded decision lived inline in calculateNetSalary
+ * and was unreachable from anywhere else, which is why the bonus
+ * calculation had to resort to re-running the ENTIRE salary calculation
+ * with an inflated grossAnnual — the thing that made it wrong.
+ */
+export function annualIncomeTaxFor(annualTaxableGross: number, taxCode: string, constants: TaxYearConstants = TAX_YEAR_2026_27): IncomeTaxBreakdown {
+  const taxCodeResult = parseTaxCode(taxCode)
+  if (taxCodeResult.flatRate === 'NT') return { totalTax: 0, bands: [], allowanceUsed: 0 }
+  if (taxCodeResult.flatRate === 'BR') {
+    const tax = annualTaxableGross * constants.basicRate
+    return { totalTax: tax, bands: [{ label: 'Basic rate (20%, BR code)', amount: annualTaxableGross, rate: constants.basicRate, tax }], allowanceUsed: 0 }
+  }
+  if (taxCodeResult.flatRate === 'D0') {
+    const tax = annualTaxableGross * constants.higherRate
+    return { totalTax: tax, bands: [{ label: 'Higher rate (40%, D0 code)', amount: annualTaxableGross, rate: constants.higherRate, tax }], allowanceUsed: 0 }
+  }
+  if (taxCodeResult.flatRate === 'D1') {
+    const tax = annualTaxableGross * constants.additionalRate
+    return { totalTax: tax, bands: [{ label: 'Additional rate (45%, D1 code)', amount: annualTaxableGross, rate: constants.additionalRate, tax }], allowanceUsed: 0 }
+  }
+  const allowance = Math.max(0, Math.min(taperedPersonalAllowance(annualTaxableGross, constants), taxCodeResult.allowance))
+  return calculateIncomeTaxEWNI(annualTaxableGross, allowance, constants)
+}
+
 function resolveAmount(deduction: SalaryDeduction, grossPerPeriod: number): number {
   return deduction.amountType === 'percent' ? (deduction.amount / 100) * grossPerPeriod : deduction.amount
 }
@@ -229,27 +260,9 @@ export function calculateNetSalary(input: SalaryInput, constants: TaxYearConstan
   }
 
   // --- Phase 2: tax, NI, student loan on the reduced figures ---
-  const taxCodeResult = parseTaxCode(input.taxCode)
   const annualTaxableGross = taxableGrossPerPeriod * periodsPerYear
-  const allowance = taxCodeResult.flatRate
-    ? 0
-    : Math.max(0, Math.min(taperedPersonalAllowance(annualTaxableGross, constants), taxCodeResult.allowance))
-
-  let taxBreakdown: IncomeTaxBreakdown
-  if (taxCodeResult.flatRate === 'NT') {
-    taxBreakdown = { totalTax: 0, bands: [], allowanceUsed: 0 }
-  } else if (taxCodeResult.flatRate === 'BR') {
-    const tax = annualTaxableGross * constants.basicRate
-    taxBreakdown = { totalTax: tax, bands: [{ label: 'Basic rate (20%, BR code)', amount: annualTaxableGross, rate: constants.basicRate, tax }], allowanceUsed: 0 }
-  } else if (taxCodeResult.flatRate === 'D0') {
-    const tax = annualTaxableGross * constants.higherRate
-    taxBreakdown = { totalTax: tax, bands: [{ label: 'Higher rate (40%, D0 code)', amount: annualTaxableGross, rate: constants.higherRate, tax }], allowanceUsed: 0 }
-  } else if (taxCodeResult.flatRate === 'D1') {
-    const tax = annualTaxableGross * constants.additionalRate
-    taxBreakdown = { totalTax: tax, bands: [{ label: 'Additional rate (45%, D1 code)', amount: annualTaxableGross, rate: constants.additionalRate, tax }], allowanceUsed: 0 }
-  } else {
-    taxBreakdown = calculateIncomeTaxEWNI(annualTaxableGross, allowance, constants)
-  }
+  const taxBreakdown = annualIncomeTaxFor(annualTaxableGross, input.taxCode, constants)
+  const allowance = taxBreakdown.allowanceUsed
 
   const incomeTaxPerPeriod = taxBreakdown.totalTax / periodsPerYear
   const ni = calculateNationalInsurance(niableGrossPerPeriod * periodsPerYear, constants)
@@ -292,4 +305,72 @@ export function calculateNetSalary(input: SalaryInput, constants: TaxYearConstan
     personalAllowance: allowance,
     taxBreakdown,
   }
+}
+
+// ── Bonus ───────────────────────────────────────────────────────────────
+
+export interface BonusBreakdown {
+  grossBonus: number
+  incomeTax: number
+  nationalInsurance: number
+  /** Always 0 — a bonus is not charged student loan (see calculateBonusOnTop). Present for shape stability, not because it varies. */
+  studentLoan: number
+  /** grossBonus less income tax and NI. Always equals grossBonus - incomeTax - nationalInsurance, since studentLoan above is fixed at 0. */
+  net: number
+}
+
+/**
+ * The net value of a one-off GROSS bonus paid on top of this salary.
+ *
+ * A bonus is treated as TAXABLE and NIABLE, and nothing else: none of the
+ * person's standing deductions are applied to it, and neither is student
+ * loan. That's a
+ * deliberate correction of how this used to work. The previous approach
+ * recomputed the whole year with `grossAnnual + bonus` and took the
+ * difference in net pay — which quietly ran the bonus through every
+ * percentage-based deduction as well. With a 12.5% salary-sacrifice
+ * pension, a £1,000 bonus lost £125 to the pension before tax was even
+ * considered, and the figure shown as "net bonus" was £455 instead of
+ * £520. Fixed deductions (a £70.39 holiday-buy line, a £10 charity line)
+ * were unaffected either way — it was specifically the percentage ones
+ * that scaled with the inflated gross.
+ *
+ * Marginal, not average: tax and NI are each computed twice — once on the
+ * ordinary annual figure, once with the bonus added — and the DIFFERENCE
+ * is what the bonus costs. That's what correctly charges a bonus that
+ * straddles a band boundary at the right rates on each part, and picks up
+ * the personal-allowance taper if the bonus pushes total income past
+ * £100k.
+ *
+ * The two bases are deliberately different: income tax builds on
+ * `grossTaxablePerPeriod` (net of salary_sacrifice AND net_pay
+ * deductions), NI on `grossNiablePerPeriod` (net of salary_sacrifice
+ * only) — the same split calculateNetSalary already uses, so a bonus is
+ * charged against exactly the same starting figures the salary itself is.
+ *
+ * Student loan is deliberately NOT charged on a bonus — confirmed
+ * explicitly: tax and NI are the only two things that touch it. The
+ * `studentLoan` field below is therefore always 0. It's kept on the
+ * result rather than deleted so the breakdown has a fixed shape and any
+ * future change of mind is a one-line edit here rather than a change to
+ * every caller's type. The person's ordinary salary is still charged
+ * student loan as normal by calculateNetSalary — this only concerns the
+ * bonus sitting on top of it.
+ */
+export function calculateBonusOnTop(input: SalaryInput, grossBonus: number, constants: TaxYearConstants = TAX_YEAR_2026_27): BonusBreakdown {
+  if (!(grossBonus > 0)) return { grossBonus: 0, incomeTax: 0, nationalInsurance: 0, studentLoan: 0, net: 0 }
+
+  const base = calculateNetSalary(input, constants)
+  const annualTaxable = base.grossTaxablePerPeriod * base.periodsPerYear
+  const annualNiable = base.grossNiablePerPeriod * base.periodsPerYear
+
+  const incomeTax =
+    annualIncomeTaxFor(annualTaxable + grossBonus, input.taxCode, constants).totalTax - annualIncomeTaxFor(annualTaxable, input.taxCode, constants).totalTax
+
+  const nationalInsurance = calculateNationalInsurance(annualNiable + grossBonus, constants).total - calculateNationalInsurance(annualNiable, constants).total
+
+  const studentLoan = 0
+
+  const net = grossBonus - incomeTax - nationalInsurance
+  return { grossBonus, incomeTax, nationalInsurance, studentLoan, net }
 }

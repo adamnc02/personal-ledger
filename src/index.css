@@ -5,6 +5,11 @@
   --color-bg: #0e1320;
   --color-bg-elevated: #161d30;
   --color-surface: #1b2338;
+  /* One step lighter again than --color-surface — used by the Summary
+     page's pop-down breakdown card, which needs to read as a distinct
+     layer from BOTH the page background it drops onto and the ordinary
+     surface cards sitting below it. */
+  --color-surface-raised: #252f4a;
 
   /* Monzo-inspired card colors, pulled from the reference screenshots */
   --color-coral: #ff5b4c;

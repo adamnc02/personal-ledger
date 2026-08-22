@@ -26,7 +26,7 @@ import type { AppData, Bill as LegacyBill, Loan as LegacyLoan, Person as LegacyP
 import type { AppDataV2, RecurringTemplate } from '../types/ledger'
 import { findApplicableSnapshot } from './salaryLedger'
 import { summarizeLoan as summarizeLedgerLoan, resolveLoanRateAndConvention } from './ledgerLoans'
-import { computeMinimumPaymentAmount } from './creditCards'
+import { computeMinimumPaymentAmount, withLiveBalances } from './creditCards'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 import { toLocalIsoDate as toIso } from './date'
@@ -91,7 +91,10 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
 
   // Credit card minimums — counted toward totals, not individually
   // targetable. See the file header for why.
-  for (const card of ledgerData.creditCards.filter((c) => c.active)) {
+  // Live balances, not the stored anchors — the What-if engine's whole
+  // job is to reason about what's owed right now, so it must see the
+  // derived figure (see cardBalanceAsOf in creditCards.ts).
+  for (const card of withLiveBalances(ledgerData.creditCards.filter((c) => c.active), ledgerData.transactions)) {
     const minPayment = computeMinimumPaymentAmount(card)
     if (minPayment <= 0) continue
     bills.push({
@@ -148,7 +151,7 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
     // separate from the minimum-payment-folded-into-bills loop above
     // (which only feeds baseline monthly totals). Only active cards are
     // exposed as scenario targets, same filter as that loop.
-    creditCards: ledgerData.creditCards.filter((c) => c.active),
+    creditCards: withLiveBalances(ledgerData.creditCards.filter((c) => c.active), ledgerData.transactions),
     scenarios: ledgerData.scenarios,
     primaryPersonId: ledgerData.primaryPersonId,
   }

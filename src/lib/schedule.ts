@@ -53,6 +53,26 @@ const MAX_OCCURRENCES = 2000
  * still on-or-before `dateIso` wins — including the CURRENT amount
  * itself, via its own amountEffectiveFrom, competing on equal footing
  * with the historical entries rather than being asserted as always-latest.
+ *
+ * Ties (two candidates sharing the exact same effectiveFrom) are broken
+ * by RECENCY OF RECORDING, not by date alone — confirmed as a real,
+ * not-just-theoretical bug: applyTemplateAmountChange's own "prior value"
+ * entry falls back to `template.anchorDate` the first time a bill is ever
+ * edited (see that function's comment), and a bill's anchor date is
+ * routinely the exact same date the person picks in the "apply from"
+ * picker — it's usually the very first, most natural option shown,
+ * especially for a bill that hasn't had a real occurrence yet. That
+ * collision is not an edge case: it's the single most common edit (drop
+ * the amount, apply "from the very next payment"), and without this,
+ * whichever candidate happened to land first in the array — always the
+ * STALE one, since the true current value is appended last — silently
+ * and permanently won every date it was asked about, making the edit the
+ * person just made never show up anywhere. `candidates` is built in
+ * strict chronological-recording order (amountHistory entries in the
+ * order they were appended, then the live amount/amountEffectiveFrom
+ * pair last, since that's always the most recent decision) — so on a
+ * tie, the LATER array index is the more-recently-recorded, and
+ * therefore more authoritative, statement about that date.
  */
 export function resolveTemplateAmount(template: RecurringTemplate, dateIso: string): number {
   const candidates: { effectiveFrom: string; amount: number }[] = [...(template.amountHistory ?? [])]
@@ -60,7 +80,10 @@ export function resolveTemplateAmount(template: RecurringTemplate, dateIso: stri
 
   if (candidates.length === 0) return template.amount
 
-  const applicable = candidates.filter((c) => c.effectiveFrom <= dateIso).sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom))
+  const applicable = candidates
+    .map((c, index) => ({ ...c, index }))
+    .filter((c) => c.effectiveFrom <= dateIso)
+    .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom) || b.index - a.index)
   // dateIso predates every recorded change (e.g. asking about a date
   // before the bill's own history begins) — the current amount is the
   // only reasonable answer left, same as an untouched template.

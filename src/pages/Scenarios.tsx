@@ -573,6 +573,10 @@ function ScenarioForm({
       return loan ? summarizeLoan(loan).remaining : 0
     }
     const card = data.creditCards.find((c) => c.id === target.id)
+    // `data` here is the legacyBridge-mapped view, whose credit cards
+    // already carry DERIVED balances (see withLiveBalances in
+    // legacyBridge.ts) — so this is already "what's owed now", not the
+    // stored anchor.
     return card ? card.currentBalance : 0
   }
 

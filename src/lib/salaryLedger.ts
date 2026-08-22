@@ -22,7 +22,7 @@
 // £X"; a logged Bonus is "extra, properly-taxed money came in, on top of
 // salary, without changing what salary itself shows as."
 
-import { calculateNetSalary, type SalaryInput } from './tax'
+import { calculateBonusOnTop, calculateNetSalary, type BonusBreakdown, type SalaryInput } from './tax'
 import { resolvePayday } from './payCycle'
 import { INCOME_CATEGORY_ID } from '../types/ledger'
 import type { Person, PayCycleConfig, SalarySnapshot, Transaction } from '../types/ledger'
@@ -68,30 +68,25 @@ function snapshotToSalaryInput(snapshot: SalarySnapshot): SalaryInput {
 
 /**
  * Net value of a one-off GROSS bonus for this person, on this pay
- * period's snapshot — properly taxed, not face-value. UK income tax,
- * National Insurance, and student loan repayment are all fundamentally
- * annual calculations (this engine already computes on an annual ÷
- * periods basis — see tax.ts's header comment), so the correct way to
- * find a bonus's marginal net value is: recompute the WHOLE year's net
- * pay with the bonus folded into that year's gross, and take the
- * difference from the year's net pay without it. That difference
- * correctly reflects the bonus being taxed at the person's marginal
- * rate — including tipping some of it into a higher band, or past the
- * personal-allowance taper — rather than naively taxing the bonus alone
- * at their average rate.
+ * period's snapshot — properly taxed, not face-value. The actual maths
+ * lives in tax.ts's calculateBonusOnTop; see its comment for why the
+ * bonus is charged tax and NI ONLY, with none of the person's standing
+ * deductions applied to it, and why that's a correction rather than a
+ * tweak.
  *
  * Returns null if there's no applicable snapshot for the period (same
  * "unanswerable, not zero" contract as computeNetPayForPeriod).
  */
-export function computeNetBonusAmount(person: Person, payPeriodDate: string, grossBonusAmount: number): number | null {
-  if (grossBonusAmount <= 0) return 0
+export function computeBonusBreakdownForPeriod(person: Person, payPeriodDate: string, grossBonusAmount: number): BonusBreakdown | null {
   const snapshot = findApplicableSnapshot(person, payPeriodDate)
   if (!snapshot) return null
+  return calculateBonusOnTop(snapshotToSalaryInput(snapshot), grossBonusAmount)
+}
 
-  const withoutBonus = calculateNetSalary(snapshotToSalaryInput(snapshot))
-  const withBonus = calculateNetSalary({ ...snapshotToSalaryInput(snapshot), grossAnnual: snapshot.grossAnnual + grossBonusAmount })
-
-  return round2(withBonus.netAnnual - withoutBonus.netAnnual)
+export function computeNetBonusAmount(person: Person, payPeriodDate: string, grossBonusAmount: number): number | null {
+  if (grossBonusAmount <= 0) return 0
+  const breakdown = computeBonusBreakdownForPeriod(person, payPeriodDate, grossBonusAmount)
+  return breakdown === null ? null : round2(breakdown.net)
 }
 
 /**
@@ -114,6 +109,25 @@ export function computeSnapshotNetPayForPeriod(person: Person, payPeriodDate: st
  */
 export function computeNetPayForPeriod(person: Person, payPeriodDate: string): number | null {
   const override = person.salaryOverrides.find((o) => o.payPeriodDate === payPeriodDate)
+
+  // A BONUS override is RECOMPUTED here rather than read back from its
+  // stored netPayOverride. The stored figure is a snapshot of "base net
+  // pay + net bonus" taken at the moment the bonus was attached, and it
+  // goes stale the instant anything it was derived from changes — edit
+  // the gross salary, a pension percentage, or the tax code afterwards
+  // and the period keeps reporting a net pay computed against the OLD
+  // salary, silently, with nothing in the UI hinting that the two no
+  // longer agree. Deriving it makes that whole class of staleness
+  // impossible; bonusGrossAmount (what the person actually typed) is the
+  // only thing that genuinely needs storing. netPayOverride is still
+  // written for backwards compatibility and for the plain manual
+  // override case below, which has no formula to re-derive from.
+  if (override?.bonusGrossAmount) {
+    const base = computeSnapshotNetPayForPeriod(person, payPeriodDate)
+    const netBonus = computeNetBonusAmount(person, payPeriodDate, override.bonusGrossAmount)
+    if (base !== null && netBonus !== null) return round2(base + netBonus)
+  }
+
   if (override) return round2(override.netPayOverride)
 
   return computeSnapshotNetPayForPeriod(person, payPeriodDate)

@@ -21,7 +21,6 @@ import { createCategory, removeCategorySafely } from '../lib/categories'
 import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/creditCards'
 import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, type CalibrationResult } from '../lib/ledgerLoans'
 import { autoClearDuePayments } from '../lib/autoClear'
-import { applyClearSideEffects } from '../lib/clearTransaction'
 import { reconcilePersonReferences } from '../lib/household'
 
 import { toLocalIsoDate as toIso } from '../lib/date'
@@ -198,20 +197,16 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
       const card = prev.creditCards.find((c) => c.id === cardId)
       if (!card) return prev
       const { updatedCard, transaction } = recordCreditCardLumpPayment(card, amount, date, note)
-      const withTransaction = {
+      // No balance adjustment step. The card's balance is derived from
+      // its transactions (cardBalanceAsOf), so inserting the transaction
+      // IS the balance change — and because it's derived, a same-day
+      // payment shows immediately without needing to be nudged, while a
+      // future-dated one correctly doesn't count until its date arrives.
+      return {
         ...prev,
         creditCards: prev.creditCards.map((c) => (c.id === cardId ? updatedCard : c)),
         transactions: [...prev.transactions, { ...transaction, id: nanoid(8) }],
       }
-      // A same-day/past-dated payment clears immediately — apply its
-      // balance effect right away rather than waiting for the next
-      // auto-clear pass, so there's no momentary flash of an
-      // un-reduced balance. A future-dated one stays untouched here;
-      // autoClearDuePayments picks it up once its date actually arrives.
-      if (transaction.status === 'cleared') {
-        return applyClearSideEffects(withTransaction, { ...transaction, id: withTransaction.transactions.at(-1)!.id })
-      }
-      return withTransaction
     })
   }
 
@@ -221,13 +216,10 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
       if (!card) return prev
       const transaction = prev.transactions.find((t) => t.sourceType === 'credit_card_lump_payment' && t.sourceId === lumpPaymentId)
 
-      let updatedCard = { ...card, lumpPayments: card.lumpPayments.filter((lp) => lp.id !== lumpPaymentId) }
-      // If it had already cleared, its amount is already baked into
-      // currentBalance — reverse that before removing it, or the
-      // balance would be permanently understated.
-      if (transaction && transaction.status === 'cleared') {
-        updatedCard = { ...updatedCard, currentBalance: Math.round((updatedCard.currentBalance + transaction.amount) * 100) / 100 }
-      }
+      // No balance reversal needed: removing the transaction below is
+      // itself the reversal, since the balance is derived from the
+      // transaction list rather than stored as a running total.
+      const updatedCard = { ...card, lumpPayments: card.lumpPayments.filter((lp) => lp.id !== lumpPaymentId) }
 
       return {
         ...prev,
@@ -243,32 +235,20 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
       if (!card) return prev
       const oldTransaction = prev.transactions.find((t) => t.sourceType === 'credit_card_lump_payment' && t.sourceId === lumpPaymentId)
 
-      // Reverse-then-relog: undo the old entry's effect entirely (log
-      // record + balance reversal if it had cleared + its transaction),
+      // Reverse-then-relog: drop the old log record and its transaction,
       // then log the new values fresh through the exact same path a
-      // brand-new payment goes through. Deliberately not an in-place
-      // field patch — that would mean re-deriving every possible
-      // before/after balance transition by hand instead of reusing the
-      // one, already-tested code path that already handles all of them.
-      let workingCard: typeof card = { ...card, lumpPayments: card.lumpPayments.filter((lp) => lp.id !== lumpPaymentId) }
-      if (oldTransaction && oldTransaction.status === 'cleared') {
-        workingCard = { ...workingCard, currentBalance: Math.round((workingCard.currentBalance + oldTransaction.amount) * 100) / 100 }
-      }
+      // brand-new payment goes through. The balance-reversal steps this
+      // used to need are gone — swapping the transaction out for a new
+      // one is the entire balance change, since the balance is derived.
+      const workingCard: typeof card = { ...card, lumpPayments: card.lumpPayments.filter((lp) => lp.id !== lumpPaymentId) }
       let transactions = oldTransaction ? prev.transactions.filter((t) => t.id !== oldTransaction.id) : prev.transactions
 
       const { updatedCard, transaction: newTransaction } = recordCreditCardLumpPayment(workingCard, amount, date, note)
-      const newTransactionWithId = { ...newTransaction, id: nanoid(8) }
-      transactions = [...transactions, newTransactionWithId]
-
-      let finalCard = updatedCard
-      if (newTransactionWithId.status === 'cleared') {
-        const applied = applyClearSideEffects({ ...prev, creditCards: prev.creditCards.map((c) => (c.id === cardId ? updatedCard : c)), transactions }, newTransactionWithId)
-        finalCard = applied.creditCards.find((c) => c.id === cardId)!
-      }
+      transactions = [...transactions, { ...newTransaction, id: nanoid(8) }]
 
       return {
         ...prev,
-        creditCards: prev.creditCards.map((c) => (c.id === cardId ? finalCard : c)),
+        creditCards: prev.creditCards.map((c) => (c.id === cardId ? updatedCard : c)),
         transactions,
       }
     })

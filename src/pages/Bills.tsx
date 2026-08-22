@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { formatCurrency, formatMonthYear } from '../lib/format'
+import { formatCurrency, formatFullDate } from '../lib/format'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Plus, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
@@ -223,22 +223,29 @@ function BillRow({
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={template.name}>
-      <div className="relative rounded-xl px-4 py-3" style={{ background: 'var(--color-surface)', opacity: template.active ? 1 : 0.55 }}>
-        <button className="w-full flex items-center justify-between text-left" onClick={() => setOpen(!open)}>
-          <div className="flex items-center gap-2">
+      {/* A paused bill is dimmed with a SOLID darker background and
+          struck-through text, never with `opacity` — a translucent row let
+          the red delete button sitting behind it (SwipeToDelete) bleed
+          through as a permanent pink wash on every paused row, which read
+          as a rendering fault rather than as "paused". */}
+      <div className="relative rounded-xl px-4 py-3" style={{ background: template.active ? 'var(--color-surface)' : 'var(--color-bg-elevated)' }}>
+        <button className="w-full flex items-start justify-between gap-2 text-left" onClick={() => setOpen(!open)}>
+          <div className="flex items-center gap-2 min-w-0 flex-1">
             <CategoryIcon category={category} />
-            <div>
-              <p className="font-body text-sm text-[var(--color-ink)]">
+            <div className="min-w-0">
+              <p className="font-body text-sm" style={{ color: template.active ? 'var(--color-ink)' : 'var(--color-ink-muted)', textDecoration: template.active ? 'none' : 'line-through' }}>
                 {template.name}
-                {!template.active && <span className="text-[var(--color-ink-faint)]"> · Paused</span>}
+                {!template.active && <span className="text-[10px] font-normal no-underline"> · Paused</span>}
               </p>
               <p className="text-xs text-[var(--color-ink-faint)]">
                 {template.location === 'joint' ? 'Joint' : 'Personal'} · {FREQUENCY_LABELS[template.frequency]} · {PAYMENT_METHOD_LABELS[template.paymentMethod]}
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(template.amount)}</span>
+          <div className="flex items-center gap-2 shrink-0 pt-0.5">
+            <span className="font-mono text-sm whitespace-nowrap" style={{ color: template.active ? 'var(--color-ink)' : 'var(--color-ink-muted)', textDecoration: template.active ? 'none' : 'line-through' }}>
+              £{formatCurrency(template.amount)}
+            </span>
             {open ? <ChevronUp size={14} className="text-[var(--color-ink-faint)]" /> : <ChevronDown size={14} className="text-[var(--color-ink-faint)]" />}
           </div>
         </button>
@@ -405,7 +412,7 @@ function BillEffectiveDateModal({
               className="w-full py-2.5 rounded-full text-sm font-semibold flex items-center justify-center gap-2"
               style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)' }}
             >
-              {formatMonthYear(o.date)}
+              {formatFullDate(o.date)}
               {o.isPast && <span className="text-xs font-normal text-[var(--color-ink-muted)]">(most recent)</span>}
             </button>
           ))}

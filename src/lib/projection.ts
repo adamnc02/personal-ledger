@@ -116,7 +116,12 @@ export function computeProjection(
     generated.push(...generateLoanPaymentTransactions(loan, rangeStart, horizonEndDate))
   }
   for (const card of data.creditCards.filter((c) => c.ownerId === personId)) {
-    generated.push(...generateMinimumPaymentTransactions(card, rangeStart, horizonEndDate))
+    // Full transaction list, not the person-scoped `stored` one: the
+    // card's derived balance has to see every payment and spend against
+    // that card, and the visibility floor applied to `stored` above is a
+    // display rule for the personal ledger, not a statement of what the
+    // card actually owes.
+    generated.push(...generateMinimumPaymentTransactions(card, rangeStart, horizonEndDate, data.transactions))
   }
   if (person) {
     generated.push(...generateSalaryTransactions(person, payCycle, rangeStart, horizonEndDate))

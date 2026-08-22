@@ -5,7 +5,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { Plus, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, X, Info, AlertTriangle } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { summarizeLoan, summarizeLoanProgress, estimateSettlementFigure, findLenderCalibrationProfile, previewOverpaymentRecast, previewRecurringOverpaymentRecast, buildLoanLedgerRows, loanFinishInfo, isLoanConfidentlyCalibrated, MAX_CALIBRATION_LINES, type CalibrationResult, type LoanLedgerRowType } from '../lib/ledgerLoans'
-import { computeMinimumPaymentAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows } from '../lib/creditCards'
+import { computeMinimumPaymentAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
 import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
@@ -194,13 +194,21 @@ export function Loans() {
         )}
 
         <div className="flex flex-col gap-3">
-          {data.creditCards.map((card) => {
+          {data.creditCards.map((storedCard) => {
+            // The row shows what's actually owed right now — the stored
+            // anchor with every payment and spend since replayed onto it.
+            // The card handed down to CreditCardRow is the LIVE one, but
+            // the edit panel deliberately reads the anchor back off
+            // `storedCard` for its editable balance field; see
+            // CreditCardEditPanel for why those must not be confused.
+            const card = withLiveBalance(storedCard, data.transactions)
             const minPayment = computeMinimumPaymentAmount(card)
             const isOpen = expandedCard === card.id
             return (
               <CreditCardRow
                 key={card.id}
                 card={card}
+                storedCard={storedCard}
                 minPayment={minPayment}
                 isOpen={isOpen}
                 onToggle={() => setExpandedCard(isOpen ? null : card.id)}
@@ -357,6 +365,7 @@ function LoanRow({
 
 function CreditCardRow({
   card,
+  storedCard,
   minPayment,
   isOpen,
   onToggle,
@@ -373,7 +382,8 @@ function CreditCardRow({
   overpaymentPrefill,
   onPrefillConsumed,
 }: {
-  card: CreditCard
+  card: CreditCard // live: currentBalance is the DERIVED figure, for display
+  storedCard: CreditCard // as persisted: currentBalance is the stated anchor, for editing
   minPayment: number
   isOpen: boolean
   onToggle: () => void
@@ -421,7 +431,9 @@ function CreditCardRow({
 
         {isOpen && (
           <CreditCardEditPanel
+            storedCard={storedCard}
             card={card}
+            transactions={transactions}
             people={people}
             categories={categories}
             onAddCategory={onAddCategory}
@@ -630,6 +642,8 @@ function draftFromCard(card: CreditCard): CreditCardDraft {
 
 function CreditCardEditPanel({
   card,
+  storedCard,
+  transactions,
   people,
   categories,
   onAddCategory,
@@ -640,7 +654,9 @@ function CreditCardEditPanel({
   overpaymentPrefill,
   onPrefillConsumed,
 }: {
-  card: CreditCard
+  card: CreditCard // live — used for the derived-balance caption only
+  storedCard: CreditCard // as persisted — what the draft is seeded from and saved back to
+  transactions: Transaction[]
   people: { id: string; name: string }[]
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
@@ -651,7 +667,12 @@ function CreditCardEditPanel({
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
 }) {
-  const [draft, setDraft] = useState<CreditCardDraft>(() => draftFromCard(card))
+  // Seeded from the STORED card, never the live one. This distinction is
+  // the whole point of the fix: the editable field is the stated anchor,
+  // so re-saving it is idempotent. Seeding from the live balance instead
+  // would re-anchor the card to a figure that already includes logged
+  // payments, and the replay would then subtract them a second time.
+  const [draft, setDraft] = useState<CreditCardDraft>(() => draftFromCard(storedCard))
   // Matches LoanEditPanel's pattern (loggingOverpayment) — collapsed
   // behind a link by default, same as the loan's own "+ Log an
   // overpayment," confirmed as a real inconsistency otherwise: this form
@@ -674,7 +695,8 @@ function CreditCardEditPanel({
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Interest rate (% APR)" type="number" value={draft.interestRatePercent} onChange={(v) => update({ interestRatePercent: Number(v) })} />
-        <EditField label="Current balance (£)" type="number" value={draft.currentBalance} onChange={(v) => update({ currentBalance: Number(v) })} />
+        <EditField label="Balance (£)" type="number" value={draft.currentBalance} onChange={(v) => update({ currentBalance: Number(v) })} />
+        <EditField label="...as of" type="date" value={draft.balanceAsOfDate} onChange={(v) => update({ balanceAsOfDate: v })} />
         <EditField
           label="Payment day of month"
           type="number"
@@ -682,6 +704,17 @@ function CreditCardEditPanel({
           onChange={(v) => update({ paymentDayOfMonth: Math.max(1, Math.min(31, Number(v))) })}
         />
       </div>
+
+      {/* Same statement-date idea as the Salary page's opening balance:
+          the figure above is what the card owed on that date, and
+          anything logged since is applied on top. Spelling out the
+          derived total here is what makes the two numbers legible as
+          "statement" vs "now" rather than looking like a contradiction. */}
+      <p className="text-xs text-[var(--color-ink-faint)] -mt-1">
+        {card.currentBalance === draft.currentBalance && draft.balanceAsOfDate === storedCard.balanceAsOfDate
+          ? 'Nothing logged against this card since that date.'
+          : `£${formatCurrency(cardBalanceAsOf({ ...storedCard, ...draft }, transactions))} owed today, after activity logged since that date.`}
+      </p>
 
       <MinimumPaymentEditor value={draft.minimumPayment} onChange={(minimumPayment) => update({ minimumPayment })} />
 
@@ -1771,6 +1804,7 @@ function CreditCardForm({
   const [name, setName] = useState('')
   const [interestRatePercent, setInterestRatePercent] = useState('')
   const [currentBalance, setCurrentBalance] = useState('')
+  const [balanceAsOfDate, setBalanceAsOfDate] = useState(todayIso())
   const [paymentDayOfMonth, setPaymentDayOfMonth] = useState('1')
   const [minimumPayment, setMinimumPayment] = useState<CreditCardMinimumPayment>({ type: 'percent_of_balance', percent: 5 })
   const [ownerId, setOwnerId] = useState(defaultOwnerId)
@@ -1783,7 +1817,13 @@ function CreditCardForm({
       <EditField label="Name" value={name} onChange={setName} />
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Interest rate (% APR)" type="number" value={interestRatePercent} onChange={setInterestRatePercent} />
-        <EditField label="Current balance (£)" type="number" value={currentBalance} onChange={setCurrentBalance} />
+        <EditField label="Balance (£)" type="number" value={currentBalance} onChange={setCurrentBalance} />
+        {/* Defaults to today, which is right for the overwhelmingly
+            common case of typing in the figure off the app you're
+            looking at. Backdating it to a statement date is supported
+            and correct — anything already logged on or after that date
+            gets applied on top rather than being assumed included. */}
+        <EditField label="...as of" type="date" value={balanceAsOfDate} onChange={setBalanceAsOfDate} />
       </div>
       <EditField label="Payment day of month" type="number" value={paymentDayOfMonth} onChange={setPaymentDayOfMonth} />
       <MinimumPaymentEditor value={minimumPayment} onChange={setMinimumPayment} />
@@ -1817,6 +1857,7 @@ function CreditCardForm({
               color: nextColor,
               interestRatePercent: Number(interestRatePercent) || 0,
               currentBalance: Number(currentBalance) || 0,
+              balanceAsOfDate,
               minimumPayment,
               paymentDayOfMonth: Number(paymentDayOfMonth),
               ownerId,

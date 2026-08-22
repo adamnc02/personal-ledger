@@ -10,15 +10,12 @@
 //     synthetic (generated fresh on every render by projection.ts, id
 //     prefixed "generated:"), so "clearing" one usually means creating
 //     it for real, not updating something that doesn't exist yet.
-//  2. Its type-specific side effect applies: a savings_contribution
-//     quietly increases the linked goal's currentAmount; a
-//     credit_card_payment (generated minimum OR a logged lump payment —
-//     both, uniformly) reduces that card's balance. Neither ever
-//     touches the balance before it actually clears — a future-dated
-//     logged lump payment stays pending, balance untouched, until its
-//     date genuinely arrives, same as everything else in the app.
+//  2. Its type-specific side effect applies. Only savings_contribution
+//     has one now — it quietly increases the linked goal's currentAmount.
+//     Credit card payments used to have one too; they don't any more,
+//     because a card's balance is derived from its transactions rather
+//     than kept as a running total (see below).
 
-import { applyMonthlyInterest } from './creditCards'
 import type { AppDataV2, Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -49,27 +46,13 @@ export function applyClearSideEffects(data: AppDataV2, transaction: Transaction)
     }
   }
 
-  if (transaction.type === 'credit_card_payment' && transaction.creditCardId) {
-    // Both the generated monthly-minimum kind AND a logged lump payment
-    // go through this uniformly for the PAYMENT itself — neither adjusts
-    // the card's balance at logging/generation time, only once the
-    // transaction actually clears. INTEREST, though, is tied specifically
-    // to the billing-cycle event (the generated minimum payment), not to
-    // an arbitrary logged lump payment — a lump payment can land any time
-    // mid-cycle and shouldn't independently trigger a full cycle's
-    // interest each time one clears. So: interest posts first, ONLY for
-    // the generated-minimum-payment case, THEN the payment (of either
-    // kind) is subtracted.
-    return {
-      ...data,
-      creditCards: data.creditCards.map((c) => {
-        if (c.id !== transaction.creditCardId) return c
-        const isGeneratedMinimumPayment = transaction.sourceType !== 'credit_card_lump_payment'
-        const balanceWithInterest = isGeneratedMinimumPayment ? applyMonthlyInterest(c.currentBalance, c.interestRatePercent) : c.currentBalance
-        return { ...c, currentBalance: round2(Math.max(0, balanceWithInterest - transaction.amount)) }
-      }),
-    }
-  }
+  // NOTE: credit_card_payment deliberately has NO side effect here any
+  // more. It used to reduce (and post interest to) the card's
+  // currentBalance, which is what made that field a mutable running
+  // total — see the comment on CreditCard in types/ledger.ts. The
+  // balance is now derived from the transactions themselves by
+  // cardBalanceAsOf, so the transaction existing IS the effect; applying
+  // one here as well would double-count it.
 
   return data
 }

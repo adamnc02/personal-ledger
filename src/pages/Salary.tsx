@@ -4,6 +4,7 @@ import { formatCurrency } from '../lib/format'
 import { useLedgerData } from '../context/LedgerContext'
 import { calculateNetSalary, type StudentLoanPlan, type PayFrequency, type SalaryDeduction, type DeductionType } from '../lib/tax'
 import { findApplicableSnapshot, computeNetPayForPeriod, upcomingPaydays, closedPaydays } from '../lib/salaryLedger'
+import { calculateBonusOnTop } from '../lib/tax'
 import { monthlyAmountForEntry } from '../lib/savings'
 import { AttachBonusButton } from '../components/AttachBonusButton'
 import { downloadLedgerBackup, parseLedgerBackupJson } from '../lib/ledgerStorage'
@@ -13,6 +14,7 @@ import { nanoid } from 'nanoid'
 import { DeductionModal } from '../components/DeductionModal'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
+import { NumberInput } from '../components/NumberInput'
 
 const STUDENT_LOAN_LABELS: Record<StudentLoanPlan, string> = {
   none: 'No student loan',
@@ -42,6 +44,7 @@ export function Salary() {
     setData,
     addPerson,
     removePerson,
+    updatePerson,
     setPrimaryPerson,
     updatePayCycle,
     addSalarySnapshot,
@@ -106,7 +109,7 @@ export function Salary() {
               <div className="rounded-2xl p-5" style={{ background: 'var(--color-surface)' }}>
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-2">
-                    <h2 className="font-display text-lg font-semibold text-[var(--color-ink)]">{person.name}</h2>
+                    <EditablePersonName name={person.name} onRename={(name) => updatePerson(person.id, { name })} />
                     <button
                       onClick={() => setPrimaryPerson(person.id)}
                       disabled={isPrimary}
@@ -201,6 +204,63 @@ export function Salary() {
         reclaimed via Self Assessment.
       </p>
     </div>
+  )
+}
+
+/**
+ * Tap the name to rename the person — the seeded primary person starts out
+ * as the literal string "Me" (lib/ledgerStorage.ts) and, until now, there
+ * was nowhere in the app to change it, so it followed the person onto the
+ * Summary hero card and every household/joint row for good.
+ *
+ * Commits on Enter or blur, reverts on Escape, and refuses to save an
+ * empty name (blanking it would leave an unlabelable row with no way back
+ * in). The wrapping <button> is deliberate — SwipeToDelete only skips its
+ * pointer capture for taps that land on a real interactive element, so a
+ * bare <h2> here would start a swipe gesture instead of a rename.
+ */
+function EditablePersonName({ name, onRename }: { name: string; onRename: (name: string) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(name)
+
+  function commit() {
+    const trimmed = draft.trim()
+    if (trimmed && trimmed !== name) onRename(trimmed)
+    else setDraft(name)
+    setEditing(false)
+  }
+
+  if (!editing) {
+    return (
+      <button
+        onClick={() => {
+          setDraft(name)
+          setEditing(true)
+        }}
+        className="font-display text-lg font-semibold text-[var(--color-ink)] text-left"
+        title="Tap to rename"
+      >
+        {name}
+      </button>
+    )
+  }
+
+  return (
+    <input
+      autoFocus
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit()
+        if (e.key === 'Escape') {
+          setDraft(name)
+          setEditing(false)
+        }
+      }}
+      aria-label="Name"
+      className="font-display text-lg font-semibold text-[var(--color-ink)] bg-transparent border-b border-[var(--color-coral)] outline-none w-32 py-0"
+    />
   )
 }
 
@@ -493,24 +553,22 @@ function PayCycleSettingsModal({
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Payday (day of month)">
-            <input
-              type="number"
+            <NumberInput
               inputMode="numeric"
               min={1}
               max={31}
               value={payday}
-              onChange={(e) => onChange({ paydayDayOfMonth: Math.max(1, Math.min(31, Number(e.target.value) || 1)) })}
+              onChange={(v) => onChange({ paydayDayOfMonth: Math.max(1, Math.min(31, Number(v) || 1)) })}
               className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
             />
           </Field>
           <Field label="Budgeting cycle starts on">
-            <input
-              type="number"
+            <NumberInput
               inputMode="numeric"
               min={1}
               max={31}
               value={cycleStartDay}
-              onChange={(e) => onChange({ cycleStartDayOfMonth: Math.max(1, Math.min(31, Number(e.target.value) || 1)) })}
+              onChange={(v) => onChange({ cycleStartDayOfMonth: Math.max(1, Math.min(31, Number(v) || 1)) })}
               className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
             />
           </Field>
@@ -751,6 +809,21 @@ function PeriodEditor({
   const breakdown = calculateNetSalary(fullDraft)
   const periodLabel = draft.payFrequency === 'four_weekly' ? 'every 4 weeks' : 'monthly'
 
+  // Any bonus attached to THIS period, folded into the breakdown below.
+  // Deliberately computed against the live `fullDraft` rather than the
+  // person's stored snapshot, so editing the gross salary or a deduction
+  // in this panel updates the bonus's tax alongside everything else,
+  // before anything is saved — the same reason every other figure on
+  // this card reads from the draft.
+  //
+  // This card previously ignored the override entirely: it showed the
+  // snapshot's plain net pay and nothing else, so attaching a bonus
+  // changed the collapsed row's figure above but left "Net pay" here
+  // unchanged, which read as the bonus having done nothing at all.
+  const bonusGross = existingOverride?.bonusGrossAmount ?? 0
+  const bonus = bonusGross > 0 ? calculateBonusOnTop(fullDraft, bonusGross) : null
+  const netPayWithBonus = breakdown.netPerPeriod + (bonus?.net ?? 0)
+
   function updateDeductions(deductions: SalaryDeduction[]) {
     setDraft((d) => ({ ...d, deductions }))
   }
@@ -901,8 +974,22 @@ function PeriodEditor({
         {breakdown.postTaxDeductions.map((d) => (
           <BreakdownRow key={d.id} label={d.name || 'Deduction'} value={-d.amountPerPeriod} />
         ))}
+        {bonus && (
+          <>
+            <div className="h-px my-2" style={{ background: 'var(--color-track)' }} />
+            <BreakdownRow label="Bonus (gross)" value={bonus.grossBonus} bold />
+            <BreakdownRow label="Income tax on bonus" value={-bonus.incomeTax} />
+            <BreakdownRow label="National Insurance on bonus" value={-bonus.nationalInsurance} />
+          </>
+        )}
         <div className="h-px my-2" style={{ background: 'var(--color-track)' }} />
-        <BreakdownRow label={`Net pay (${periodLabel})`} value={breakdown.netPerPeriod} emphasized />
+        <BreakdownRow label={`Net pay (${periodLabel})`} value={netPayWithBonus} emphasized />
+        {bonus && (
+          <p className="text-xs text-[var(--color-ink-faint)] mt-2">
+            A bonus is charged income tax and National Insurance at your marginal rate, and nothing else — no student
+            loan, and your standing deductions (pension and the rest) come off your salary only, not out of the bonus.
+          </p>
+        )}
         {(draft.employerPensionPercent ?? 0) > 0 && (
           <p className="text-xs text-[var(--color-ink-faint)] mt-2">
             Your employer separately contributes £{formatCurrency(breakdown.employerPensionContributionPerPeriod)} (
@@ -912,7 +999,7 @@ function PeriodEditor({
         )}
       </div>
 
-      <NetPayOverrideControl personId={person.id} dateIso={dateIso} snapshotNetPay={breakdown.netPerPeriod} existingOverride={existingOverride} />
+      <NetPayOverrideControl personId={person.id} dateIso={dateIso} snapshotNetPay={netPayWithBonus} existingOverride={existingOverride} />
 
       <div className="flex justify-end">
         <AttachBonusButton personId={person.id} fixedDate={dateIso} existingOverride={existingOverride} />

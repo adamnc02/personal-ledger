@@ -2,6 +2,7 @@ import { generateSavingsContributions } from '../src/lib/savingsLedger'
 import { applyClearSideEffects, isSyntheticTransactionId } from '../src/lib/clearTransaction'
 import { computeProjection } from '../src/lib/projection'
 import { defaultCategories } from '../src/lib/categories'
+import { cardBalanceAsOf } from '../src/lib/creditCards'
 import { SAVINGS_CATEGORY_ID } from '../src/types/ledger'
 import type { AppDataV2, PayCycleConfig, Person, Transaction } from '../src/types/ledger'
 
@@ -96,7 +97,7 @@ check('A second cleared contribution accumulates on top of the first, not replac
 const cardData: AppDataV2 = {
   ...savingsData,
   creditCards: [
-    { id: 'card-1', name: 'Amex', categoryId: SAVINGS_CATEGORY_ID, color: '#8b5cf6', interestRatePercent: 0, currentBalance: 500, minimumPayment: { type: 'fixed', amount: 40 }, paymentDayOfMonth: 10, ownerId: 'me', lumpPayments: [], active: true },
+    { id: 'card-1', name: 'Amex', categoryId: SAVINGS_CATEGORY_ID, color: '#8b5cf6', interestRatePercent: 0, currentBalance: 500, balanceAsOfDate: '2026-01-01', minimumPayment: { type: 'fixed', amount: 40 }, paymentDayOfMonth: 10, ownerId: 'me', lumpPayments: [], active: true },
   ],
 }
 const generatedMinPaymentTxn: Transaction = {
@@ -112,12 +113,21 @@ const generatedMinPaymentTxn: Transaction = {
   ownerId: 'me',
   creditCardId: 'card-1',
 }
+// Credit card payments no longer have a clear-time SIDE EFFECT at all —
+// the card's balance is derived from its transactions rather than kept
+// as a running total (see cardBalanceAsOf). So the assertions flip: the
+// stored anchor must stay put, and the DERIVED figure is what moves.
+// applyClearSideEffects being a no-op for this type is now the correct
+// behaviour, and worth pinning explicitly so a future change that
+// reintroduces the mutation shows up as a double-count here.
 const afterCardClear = applyClearSideEffects(cardData, generatedMinPaymentTxn)
-check('Clearing a generated minimum payment reduces the card balance', afterCardClear.creditCards[0].currentBalance, 460)
+check('Clearing a generated minimum payment does NOT mutate the stored anchor (no side effect any more)', afterCardClear.creditCards[0].currentBalance, 500)
+check('...and the DERIVED balance reflects it instead', cardBalanceAsOf(cardData.creditCards[0], [generatedMinPaymentTxn], new Date(2026, 0, 10)), 460)
 
 const lumpPaymentTxn: Transaction = { ...generatedMinPaymentTxn, id: 'tx-3', sourceType: 'credit_card_lump_payment', sourceId: 'lump-1' }
 const afterLumpClear = applyClearSideEffects(cardData, lumpPaymentTxn)
-check('A lump payment reduces the balance uniformly with any other credit_card_payment when it clears (no special-cased "already adjusted" exemption)', afterLumpClear.creditCards[0].currentBalance, 460)
+check('A lump payment likewise leaves the stored anchor alone', afterLumpClear.creditCards[0].currentBalance, 500)
+check('A lump payment reduces the derived balance uniformly with any other credit_card_payment (no special-cased exemption)', cardBalanceAsOf(cardData.creditCards[0], [lumpPaymentTxn], new Date(2026, 0, 10)), 460)
 
 // ---- 5. Opening balance as a visibility floor ----
 const floorPayCycle: PayCycleConfig = { ...payCycle, openingBalanceDate: '2026-06-01' }

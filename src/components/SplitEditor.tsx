@@ -1,3 +1,5 @@
+import { NumberInput } from './NumberInput'
+
 interface SplitEditorProps {
   people: { id: string; name: string }[]
   payee: string
@@ -29,13 +31,11 @@ export function SplitEditor({ people, payee, percent, onChangePayee, onChangePer
       </label>
       <label className="flex flex-col gap-1">
         <span className="text-xs text-[var(--color-ink-muted)]">Their share (%)</span>
-        <input
-          type="number"
-          inputMode="decimal"
+        <NumberInput
           min={0}
           max={100}
           value={percent}
-          onChange={(e) => onChangePercent(Math.max(0, Math.min(100, Number(e.target.value))))}
+          onChange={(v) => onChangePercent(Math.max(0, Math.min(100, Number(v))))}
           className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
         />
       </label>

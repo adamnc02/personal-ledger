@@ -50,6 +50,7 @@ const card: CreditCard = {
   color: '#8b5cf6',
   interestRatePercent: 20,
   currentBalance: 500,
+  balanceAsOfDate: '2026-01-01',
   minimumPayment: { type: 'fixed', amount: 40 },
   paymentDayOfMonth: 12,
   ownerId: 'me',
@@ -92,7 +93,11 @@ check("Clearing it quietly increased the goal's currentAmount (the side effect a
 
 const clearedCardPayment = settled.transactions.find((t) => t.type === 'credit_card_payment' && t.creditCardId === 'card-1')
 check('A credit card minimum payment that came due was materialized', !!clearedCardPayment, true)
-check("Clearing it reduced the card's balance automatically", settled.creditCards[0].currentBalance < 500, true)
+// The balance is DERIVED now, not mutated in place — so the assertion
+// is about cardBalanceAsOf, not about the stored figure changing. The
+// stored anchor deliberately stays put; that immutability is the fix.
+check("The card's stored anchor is deliberately NOT mutated by clearing", settled.creditCards[0].currentBalance, 500)
+check("The card's DERIVED balance drops once the payment is materialized", cardBalanceAsOf(settled.creditCards[0], settled.transactions, asOf) < 500, true)
 
 // ---- 3. Idempotency — the property that makes it safe to run on every data change ----
 const secondPass = autoClearDuePayments(settled, asOf)
@@ -115,7 +120,7 @@ check('A bill due the day after asOf is NOT auto-cleared yet', tomorrowCheck.tra
 // The exact reported bug: a manually-logged credit card lump payment
 // dated in the future was clearing (and reducing the balance)
 // immediately at logging time, ignoring its date entirely.
-import { recordCreditCardLumpPayment } from '../src/lib/creditCards'
+import { cardBalanceAsOf, recordCreditCardLumpPayment } from '../src/lib/creditCards'
 
 const cardForLumpTest: CreditCard = { ...card, id: 'card-2', currentBalance: 500, minimumPayment: { type: 'fixed', amount: 0 } }
 // Hardcoded well into the future rather than relative to "today" -
@@ -128,7 +133,12 @@ const cardForLumpTest: CreditCard = { ...card, id: 'card-2', currentBalance: 500
 // very long time.
 const lumpResult = recordCreditCardLumpPayment(cardForLumpTest, 200, '2099-08-20')
 check("Logging a FUTURE-dated lump payment creates it as 'pending', not 'cleared'", lumpResult.transaction.status, 'pending')
-check("Logging a future-dated lump payment does NOT touch the card's balance immediately", lumpResult.updatedCard.currentBalance, 500)
+// interestRatePercent forced to 0 for these three: the point under test
+// is purely whether a FUTURE-dated payment counts yet, and this fixture's
+// dates are decades apart (see the note above about why), so leaving 20%
+// APR on would compound the anchor into the millions and drown the
+// signal. Interest replay itself is covered in verify-credit-card-balance.
+check("Logging a future-dated lump payment does NOT touch the card's balance immediately", cardBalanceAsOf({ ...lumpResult.updatedCard, interestRatePercent: 0 }, [{ ...lumpResult.transaction, id: 'x' }], new Date(2026, 6, 15)), 500)
 
 const lumpData: AppDataV2 = {
   ...data,
@@ -137,11 +147,11 @@ const lumpData: AppDataV2 = {
 }
 const beforeDueDate = autoClearDuePayments(lumpData, new Date(2099, 7, 19)) // 19 Aug — one day before due
 check('The day before its date, the lump payment is STILL pending', beforeDueDate.transactions.find((t) => t.id === 'lump-tx')?.status, 'pending')
-check('The day before its date, the balance is STILL untouched', beforeDueDate.creditCards[0].currentBalance, 500)
+check('The day before its date, the balance is STILL untouched', cardBalanceAsOf({ ...beforeDueDate.creditCards[0], interestRatePercent: 0 }, beforeDueDate.transactions, new Date(2099, 7, 19)), 500)
 
 const onDueDate = autoClearDuePayments(lumpData, new Date(2099, 7, 20)) // 20 Aug — exactly its date
 check('On its exact date, the lump payment settles to cleared', onDueDate.transactions.find((t) => t.id === 'lump-tx')?.status, 'cleared')
-check("On its exact date, the balance reduces (500 - 200 = 300)", onDueDate.creditCards[0].currentBalance, 300)
+check("On its exact date, the balance reduces (500 - 200 = 300)", cardBalanceAsOf({ ...onDueDate.creditCards[0], interestRatePercent: 0 }, onDueDate.transactions, new Date(2099, 7, 20)), 300)
 
 // A same-day (not future) lump payment should still clear immediately, unaffected by this fix.
 const immediateLump = recordCreditCardLumpPayment({ ...card, id: 'card-3', currentBalance: 500, minimumPayment: { type: 'fixed', amount: 0 } }, 100, '2026-08-15', undefined)
