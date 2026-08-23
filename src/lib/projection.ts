@@ -26,11 +26,11 @@ export type ProjectionHorizon = 'current_cycle' | 'three_cycles'
 
 /** The end of the projection window: the current cycle's end, or the end of the cycle two ahead of it (i.e. 3 cycles total, current + 2 more). */
 export function horizonRangeEnd(payCycle: PayCycleConfig, horizon: ProjectionHorizon, asOfDate: Date): Date {
-  const current = cycleBoundsForDate(asOfDate, payCycle.cycleStartDayOfMonth)
+  const current = cycleBoundsForDate(asOfDate, payCycle)
   if (horizon === 'current_cycle') return current.end
 
-  const next1 = cycleBoundsForDate(addDays(current.end, 1), payCycle.cycleStartDayOfMonth)
-  const next2 = cycleBoundsForDate(addDays(next1.end, 1), payCycle.cycleStartDayOfMonth)
+  const next1 = cycleBoundsForDate(addDays(current.end, 1), payCycle)
+  const next2 = cycleBoundsForDate(addDays(next1.end, 1), payCycle)
   return next2.end
 }
 
@@ -65,7 +65,36 @@ export function computeProjection(
   horizon: ProjectionHorizon,
   asOfDate: Date = new Date(),
 ): ProjectionResult {
-  const horizonEndDate = horizonRangeEnd(payCycle, horizon, asOfDate)
+  return {
+    horizon,
+    ...computeProjectionToDate(data, personId, payCycle, horizonRangeEnd(payCycle, horizon, asOfDate), asOfDate),
+  }
+}
+
+/**
+ * The same projection, but bounded by an EXPLICIT end date rather than
+ * one of the two named horizons.
+ *
+ * Exists for the What-if "buy something" action, which needs the balance
+ * on an arbitrary chosen date (and at the end of whichever cycle that
+ * date falls in) — a date that can easily sit beyond `three_cycles`, and
+ * which almost never coincides with a cycle end. Extracted rather than
+ * reimplemented specifically so a purchase is measured against the exact
+ * same generated occurrences, dedupe rules, and visibility floor as every
+ * figure on the Summary page; a parallel implementation would be free to
+ * drift from the real one, which is the failure mode this whole engine
+ * exists to prevent.
+ *
+ * computeProjection is now a thin wrapper over this, so the two can't
+ * disagree by construction.
+ */
+export function computeProjectionToDate(
+  data: AppDataV2,
+  personId: string,
+  payCycle: PayCycleConfig,
+  horizonEndDate: Date,
+  asOfDate: Date = new Date(),
+): Omit<ProjectionResult, 'horizon'> {
   const horizonEndIso = toIso(horizonEndDate)
 
   const person = data.people.find((p) => p.id === personId)
@@ -105,7 +134,7 @@ export function computeProjection(
   // into a real Transaction yet, would silently never appear anywhere.
   // Never generate anything before the opening balance date either, for
   // the same visibility-floor reason `stored` is filtered above.
-  const cycleStart = cycleBoundsForDate(asOfDate, payCycle.cycleStartDayOfMonth).start
+  const cycleStart = cycleBoundsForDate(asOfDate, payCycle).start
   const rangeStart = cycleStart > new Date(payCycle.openingBalanceDate) ? cycleStart : new Date(payCycle.openingBalanceDate)
 
   const generated: Omit<Transaction, 'id'>[] = []
@@ -154,7 +183,6 @@ export function computeProjection(
   const projectedBalance = round2(clearedBalance + pendingWithinHorizon.reduce((sum, t) => sum + signedAmount(t), 0))
 
   return {
-    horizon,
     horizonEnd: horizonEndIso,
     openingBalance: payCycle.openingBalance,
     clearedBalance,

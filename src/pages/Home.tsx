@@ -284,8 +284,8 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       )
     }
     case 'joint': {
-      const cycleStartDay = data.payCycles.find((pc) => pc.personId === data.primaryPersonId)?.cycleStartDayOfMonth ?? 1
-      const bounds = cycleBoundsForDate(new Date(), cycleStartDay)
+      const jointPayCycle = data.payCycles.find((pc) => pc.personId === data.primaryPersonId)
+      const bounds = cycleBoundsForDate(new Date(), jointPayCycle ?? 1)
       const summary = computeJointSummary(data, bounds.start, bounds.end)
       return (
         <BankCard variant="light" bankLabel={primaryPerson?.name ?? 'Me'} accountLabel="Joint">
@@ -873,8 +873,8 @@ function ProgressRingsSection({ data, horizon, projection }: { data: AppDataV2; 
 }
 
 function JointDetail({ data }: { data: AppDataV2 }) {
-  const cycleStartDay = data.payCycles.find((pc) => pc.personId === data.primaryPersonId)?.cycleStartDayOfMonth ?? 1
-  const bounds = cycleBoundsForDate(new Date(), cycleStartDay)
+  const jointPayCycle = data.payCycles.find((pc) => pc.personId === data.primaryPersonId)
+  const bounds = cycleBoundsForDate(new Date(), jointPayCycle ?? 1)
   const summary = computeJointSummary(data, bounds.start, bounds.end)
   const fmt = (d: Date) => toLocalIsoDate(d)
 

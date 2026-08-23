@@ -178,10 +178,70 @@ export function resolvePayday(
 // ── Cycle boundary ──────────────────────────────────────────────────────
 
 /**
- * The pay-cycle window (start/end, inclusive) containing `referenceDate`,
- * for a fixed cycle-start day of month (e.g. 14 -> 14th–13th cycles).
- * Independent of the actual adjusted payday — see the file header.
+ * Everything needed to place a cycle boundary. Passed instead of a bare
+ * day-of-month wherever the caller has a real PayCycleConfig to hand, so
+ * the `cycleStartFollowsPayday` override (types/ledger.ts) is honoured
+ * automatically rather than needing every call site to remember to check
+ * it. A PayCycleConfig is structurally assignable to this.
+ *
+ * The bare-number form of cycleBoundsForDate/cycleOffset is kept for the
+ * fixed-day maths on its own (used directly by the verify scripts that
+ * test that maths in isolation) — but note it can only ever produce
+ * fixed-day boundaries, so anything holding a PayCycleConfig should pass
+ * the config itself, NOT `config.cycleStartDayOfMonth`.
  */
+export interface CycleBoundarySpec {
+  cycleStartDayOfMonth: number
+  paydayDayOfMonth: number
+  paydayAdjustForNonWorkingDay: boolean
+  cycleStartFollowsPayday?: boolean
+}
+
+/**
+ * Cycle boundaries that follow the RESOLVED payday rather than a fixed
+ * day of the month — the `cycleStartFollowsPayday` override.
+ *
+ * Deliberately built by collecting the resolved paydays of the months
+ * AROUND the reference date and picking the last one on or before it,
+ * rather than the "is ref past this month's boundary?" branch the
+ * fixed-day path uses. That branch is only sound because a fixed-day
+ * boundary always lands inside its own month; a resolved payday doesn't.
+ * With payday on the 1st, a Sunday 1 November resolves back to Friday 30
+ * October — so October genuinely contains two boundaries (1 Oct and 30
+ * Oct) and November contains none. Asking "is ref >= October's boundary?"
+ * would answer yes for 31 October and hand back a cycle that ended on 29
+ * October, i.e. a window not containing the reference date at all.
+ * Scanning the neighbouring months and picking the true predecessor has
+ * no such blind spot.
+ *
+ * A ±3 month window is far more than enough: consecutive nominal paydays
+ * are at least 28 days apart and resolution only ever walks BACKWARD, by
+ * at most 10 days (resolvePayday's own guard), so the resolved sequence
+ * stays strictly increasing and one month either side would already
+ * suffice.
+ */
+function paydayCycleBounds(referenceDate: Date, spec: CycleBoundarySpec): { start: Date; end: Date } {
+  const ref = startOfDay(referenceDate)
+
+  const candidates: Date[] = []
+  for (let offset = -3; offset <= 3; offset++) {
+    const anchor = new Date(ref.getFullYear(), ref.getMonth() + offset, 1)
+    candidates.push(resolvePayday(anchor.getFullYear(), anchor.getMonth(), spec.paydayDayOfMonth, spec.paydayAdjustForNonWorkingDay))
+  }
+  candidates.sort((a, b) => a.getTime() - b.getTime())
+
+  let start = candidates[0]
+  let next = candidates[candidates.length - 1]
+  for (let i = 0; i < candidates.length; i++) {
+    if (candidates[i].getTime() <= ref.getTime()) {
+      start = candidates[i]
+      next = candidates[i + 1] ?? addDays(candidates[i], 28)
+    }
+  }
+
+  return { start, end: addDays(next, -1) }
+}
+
 /**
  * The cycle-boundary day for a given month, clamped to that month's
  * actual length (e.g. day 31 clamps to day 30 in a 30-day month, day 28
@@ -211,7 +271,10 @@ function clampedCycleStart(year: number, monthIndex0: number, cycleStartDayOfMon
  * is crossed — which cut a real payday out of the "next 3 cycles" view
  * whenever the cycle chain passed through September.
  */
-export function cycleBoundsForDate(referenceDate: Date, cycleStartDayOfMonth: number): { start: Date; end: Date } {
+export function cycleBoundsForDate(referenceDate: Date, cycle: number | CycleBoundarySpec): { start: Date; end: Date } {
+  if (typeof cycle !== 'number' && cycle.cycleStartFollowsPayday) return paydayCycleBounds(referenceDate, cycle)
+
+  const cycleStartDayOfMonth = typeof cycle === 'number' ? cycle : cycle.cycleStartDayOfMonth
   const ref = startOfDay(referenceDate)
   const thisMonthStart = clampedCycleStart(ref.getFullYear(), ref.getMonth(), cycleStartDayOfMonth)
 
@@ -233,11 +296,11 @@ export function cycleBoundsForDate(referenceDate: Date, cycleStartDayOfMonth: nu
 }
 
 /** Convenience: which numbered cycle (relative to `start`) `date` falls into, 0 = the cycle containing start. */
-export function cycleOffset(date: Date, start: Date, cycleStartDayOfMonth: number): number {
+export function cycleOffset(date: Date, start: Date, cycle: number | CycleBoundarySpec): number {
   let offset = 0
   let cursor = start
   while (true) {
-    const bounds = cycleBoundsForDate(cursor, cycleStartDayOfMonth)
+    const bounds = cycleBoundsForDate(cursor, cycle)
     if (date >= bounds.start && date <= bounds.end) return offset
     if (date < bounds.start) {
       cursor = addDays(bounds.start, -1)

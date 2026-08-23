@@ -103,6 +103,7 @@ export type ScenarioActionType =
   | 'loan_overpayment' // a recurring extra amount on top of a loan or credit card's normal payment
   | 'salary_change' // hypothetical new gross annual salary, for a chosen person
   | 'savings_lump_sum' // one-off lump sum toward a savings goal
+  | 'purchase' // buying a one-off thing on a specific DATE — see purchaseImpact.ts
 
 // What kind of real thing a scenario action's target points at — a loan or
 // a credit card. Both are valid targets for pay_off_loan/exclude_loan/
@@ -134,6 +135,12 @@ export interface Scenario {
     targets?: { kind: ScenarioTargetKind; id: string; amount?: number }[]
     /** @deprecated Superseded by `targets` — kept only so scenarios saved before credit-card targets existed keep working. Always loan-kind when present. */
     loanAllocations?: { loanId: string; amount?: number }[]
+    // Used by 'purchase' only — the date the money actually leaves the
+    // account. Unlike every other action type, a purchase is anchored to
+    // a real calendar date rather than being a shapeless "one-off": the
+    // whole point is to see the balance ON that day, so the date is part
+    // of the action rather than something the summary infers.
+    purchaseDate?: string // ISO date
     personId?: string // for 'salary_change' and 'savings_lump_sum' — whose salary/goal this applies to (defaults to the viewer)
     savingsEntryId?: string // for 'savings_lump_sum' — which of that person's savings goals it targets
     // Used by 'new_bill' and 'new_finance_agreement' — where the new cost sits and how it's split

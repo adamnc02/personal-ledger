@@ -338,6 +338,24 @@ export interface PayCycleConfig {
   // The budgeting cycle boundary — day of month the "month" starts on
   // for summary/projection purposes. Independent of paydayDayOfMonth.
   cycleStartDayOfMonth: number
+  // OVERRIDE: when true, the cycle boundary stops being a fixed day of
+  // the month and instead follows the RESOLVED payday — i.e. the same
+  // weekend/bank-holiday adjustment paydayAdjustForNonWorkingDay applies
+  // to payday is applied to the cycle boundary too, so a cycle always
+  // begins on the day the money actually lands.
+  //
+  // This exists because setting cycleStartDayOfMonth to the same number
+  // as paydayDayOfMonth does NOT achieve that: the two fields are
+  // deliberately independent (see lib/payCycle.ts's header), so the
+  // boundary stayed pinned to the nominal date while the real payday
+  // drifted earlier — putting a payday in the wrong cycle every time the
+  // nominal date fell on a weekend or bank holiday.
+  //
+  // Optional and defaults to FALSE, so every already-persisted config
+  // keeps the fixed-day behaviour with no migration. When true,
+  // cycleStartDayOfMonth is retained but unused (so unticking restores
+  // the previous setting rather than losing it).
+  cycleStartFollowsPayday?: boolean
 }
 
 // ── Credit cards ─────────────────────────────────────────────────────────

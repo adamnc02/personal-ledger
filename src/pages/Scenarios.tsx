@@ -5,6 +5,8 @@ import { useNavigate } from 'react-router-dom'
 import { useLedgerData } from '../context/LedgerContext'
 import { buildLegacyAppData } from '../lib/legacyBridge'
 import { calculateScenarioImpact, calculateHouseholdScenarioImpact, mergeScenarios, resolveTargets, type ScenarioImpact, type LoanImpact } from '../lib/scenarios'
+import { computePurchaseImpacts, computePurchaseImpactsForScenarios, type PurchaseImpact } from '../lib/purchaseImpact'
+import { formatFullDate } from '../lib/format'
 import { calculateNetSalary } from '../lib/tax'
 import { personalBillsTotal, jointContributionForPerson } from '../lib/bills'
 import { summarizeLoan, combineBillsWithLoans } from '../lib/loans'
@@ -27,10 +29,14 @@ const ACTION_LABELS: Record<ScenarioActionType, string> = {
   loan_overpayment: 'Regular extra payment on a loan/credit card',
   salary_change: 'Salary change',
   savings_lump_sum: 'Lump sum toward a savings goal',
+  purchase: 'Buy something',
 }
 
-const NEEDS_VALUE: ScenarioActionType[] = ['sell_asset', 'pay_off_loan', 'new_bill', 'loan_overpayment', 'salary_change', 'savings_lump_sum']
+const NEEDS_VALUE: ScenarioActionType[] = ['sell_asset', 'pay_off_loan', 'new_bill', 'loan_overpayment', 'salary_change', 'savings_lump_sum', 'purchase']
 const NEEDS_SPLIT: ScenarioActionType[] = ['new_bill', 'new_finance_agreement']
+// The only action type anchored to a real calendar date — see
+// lib/purchaseImpact.ts for why a purchase needs one and nothing else does.
+const NEEDS_DATE: ScenarioActionType[] = ['purchase']
 
 // These three action types are meaningless without a loan/credit card to
 // point at — a lump sum has nowhere to go, "exclude" has nothing to
@@ -46,6 +52,7 @@ const VALUE_LABELS: Partial<Record<ScenarioActionType, string>> = {
   loan_overpayment: 'Extra per month (£)',
   salary_change: 'New gross annual salary (£)',
   savings_lump_sum: 'Lump sum (£)',
+  purchase: 'Cost (£)',
 }
 
 export function Scenarios() {
@@ -93,6 +100,20 @@ export function Scenarios() {
     return me ? calculateScenarioImpact(scenario, data, me.id, monthlyAvailableBefore) : null
   }
 
+  // Purchases are computed off the REAL ledger (ledgerData), not the
+  // bridged legacy shape `data` — see lib/purchaseImpact.ts's header.
+  // Always against the primary person's own pay cycle and account, in
+  // both view modes: a purchase is one person's cash leaving one real
+  // account on one real day. There's no household analogue of "the
+  // balance on the 14th", so the Household toggle deliberately doesn't
+  // change these figures.
+  const purchasePayCycle = ledgerData.payCycles.find((pc) => pc.personId === ledgerData.primaryPersonId)
+
+  function getPurchases(scenario: Scenario): PurchaseImpact[] {
+    if (!purchasePayCycle) return []
+    return computePurchaseImpacts(ledgerData, ledgerData.primaryPersonId, purchasePayCycle, scenario)
+  }
+
   // "Convert to real" for a loan/credit-card impact — rather than
   // auto-saving here, the user is transported to the Borrowing page with the
   // target row already open and the relevant fields pre-populated (a
@@ -129,6 +150,13 @@ export function Scenarios() {
 
   const includedScenarios = data.scenarios.filter((s) => s.includeInCumulative)
   const combinedImpact = includedScenarios.length > 0 ? getImpact(mergeScenarios(includedScenarios)) : null
+  // Every included scenario's purchases evaluated together, in date order
+  // — so two scenarios that are each individually affordable but not
+  // affordable together show that here rather than looking fine twice.
+  const combinedPurchases =
+    includedScenarios.length > 0 && purchasePayCycle
+      ? computePurchaseImpactsForScenarios(ledgerData, ledgerData.primaryPersonId, purchasePayCycle, includedScenarios)
+      : []
 
   return (
     <div className="max-w-md mx-auto px-4 pt-6">
@@ -178,7 +206,7 @@ export function Scenarios() {
           </button>
           {combinedOpen && (
             <div className="mt-3">
-              <ImpactSummary impact={combinedImpact} viewerId={viewMode === 'personal' ? me?.id : undefined} />
+              <ImpactSummary impact={combinedImpact} viewerId={viewMode === 'personal' ? me?.id : undefined} purchases={combinedPurchases} />
             </div>
           )}
         </div>
@@ -271,6 +299,9 @@ export function Scenarios() {
                           })
                           return ` → ${parts.join(' → ')}`
                         })()}
+                        {action.type === 'purchase' && action.purchaseDate ? (
+                          <span className="block text-xs text-[var(--color-ink-faint)] mt-0.5">{formatFullDate(action.purchaseDate)}</span>
+                        ) : null}
                         {action.type === 'new_finance_agreement' && action.termMonths ? (
                           <span className="block text-xs text-[var(--color-ink-faint)] mt-0.5">
                             £{formatCurrency(action.borrowAmount ?? 0)} at {action.aprPercent ?? 0}% APR over {action.termMonths}mo · total £
@@ -289,7 +320,7 @@ export function Scenarios() {
 
                   <div className="h-px my-1" style={{ background: 'var(--color-track)' }} />
 
-                  <ImpactSummary impact={impact} viewerId={viewMode === 'personal' ? me?.id : undefined} onMakeReal={makeImpactReal} />
+                  <ImpactSummary impact={impact} viewerId={viewMode === 'personal' ? me?.id : undefined} onMakeReal={makeImpactReal} purchases={getPurchases(scenario)} />
                 </div>
               )}
             </div>
@@ -364,9 +395,89 @@ function ConvertButtons({ action, people }: { action: Scenario['actions'][number
   )
 }
 
-function ImpactSummary({ impact, viewerId, onMakeReal }: { impact: ScenarioImpact; viewerId?: string; onMakeReal?: (li: LoanImpact) => void }) {
+/**
+ * The dated view of a purchase: what the balance is on the day, what the
+ * purchase leaves behind, and where the cycle ends up as a result.
+ *
+ * Deliberately shows the BEFORE figure alongside the after one rather
+ * than just the result — the useful question isn't only "can I afford
+ * it" but "how much room does it leave", and a bare after-figure hides
+ * whether a tight number was tight already.
+ */
+function PurchaseCard({ purchase: p }: { purchase: PurchaseImpact }) {
+  const tense = p.isPastDate ? 'was' : 'will be'
+  const warn = p.goesNegativeOnDate || p.goesNegativeByCycleEnd
+
+  return (
+    <div className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
+      <p className="text-sm font-medium text-[var(--color-ink)]">
+        {p.name}
+        <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-coral)' }}>
+          Purchase
+        </span>
+      </p>
+      <p className="text-[11px] text-[var(--color-ink-faint)] mb-2">{formatFullDate(p.date)}</p>
+
+      <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
+        <span>Balance that day</span>
+        <span className="font-mono">£{formatCurrency(p.balanceOnDateBefore)}</span>
+      </div>
+      <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
+        <span>Cost</span>
+        <span className="font-mono">-£{formatCurrency(p.amount)}</span>
+      </div>
+      <div className="flex justify-between text-xs font-medium" style={{ color: p.goesNegativeOnDate ? 'var(--color-negative)' : 'var(--color-ink)' }}>
+        <span>Left that day</span>
+        <span className="font-mono">£{formatCurrency(p.balanceOnDateAfter)}</span>
+      </div>
+
+      <div className="h-px my-2" style={{ background: 'var(--color-track)' }} />
+
+      <p className="text-[11px] text-[var(--color-ink-faint)] mb-1">
+        End of that cycle ({formatFullDate(p.cycleStart)} – {formatFullDate(p.cycleEnd)})
+      </p>
+      <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
+        <span>Projected without it</span>
+        <span className="font-mono">£{formatCurrency(p.cycleEndBalanceBefore)}</span>
+      </div>
+      <div className="flex justify-between text-xs font-medium" style={{ color: p.goesNegativeByCycleEnd ? 'var(--color-negative)' : 'var(--color-positive)' }}>
+        <span>Projected including it</span>
+        <span className="font-mono">£{formatCurrency(p.cycleEndBalanceAfter)}</span>
+      </div>
+
+      {warn && (
+        <p className="text-[11px] mt-2 leading-relaxed" style={{ color: 'var(--color-negative)' }}>
+          {p.goesNegativeOnDate
+            ? `This ${tense === 'was' ? 'would have taken' : 'takes'} the balance below zero on the day itself.`
+            : `Affordable on the day, but the cycle ${tense === 'was' ? 'ended' : 'ends'} below zero once the rest of the month's outgoings are counted.`}
+        </p>
+      )}
+      {p.isPastDate && (
+        <p className="text-[11px] text-[var(--color-ink-faint)] mt-2 leading-relaxed">
+          This date has already passed, so these are the figures as they stood rather than a forecast.
+        </p>
+      )}
+    </div>
+  )
+}
+
+function ImpactSummary({
+  impact,
+  viewerId,
+  onMakeReal,
+  purchases = [],
+}: {
+  impact: ScenarioImpact
+  viewerId?: string
+  onMakeReal?: (li: LoanImpact) => void
+  purchases?: PurchaseImpact[]
+}) {
   return (
     <div className="flex flex-col gap-3">
+      {purchases.map((p) => (
+        <PurchaseCard key={p.actionId} purchase={p} />
+      ))}
+
       {impact.savingsImpacts.map((si, i) => (
         <div key={i} className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
           <p className="text-sm font-medium text-[var(--color-ink)] mb-2">
@@ -559,6 +670,10 @@ function ScenarioForm({
   // A lump-sum/exclude/recurring-overpayment action with nothing linked is
   // never valid to save — see REQUIRES_LOAN_TARGET.
   const actionsAllLinkedWhereRequired = actions.every((a) => !REQUIRES_LOAN_TARGET.includes(a.type) || resolveTargets(a).length > 0)
+  // A purchase without a date or a cost has nothing to compute against —
+  // it would save as a silently inert action, which is exactly the kind
+  // of "saved but does nothing" state this app has been bitten by before.
+  const purchasesComplete = actions.every((a) => a.type !== 'purchase' || (Boolean(a.purchaseDate) && a.value > 0))
 
   function round2(n: number): number {
     return Math.round(n * 100) / 100
@@ -618,6 +733,8 @@ function ScenarioForm({
         const showSavingsPicker = action.type === 'savings_lump_sum'
         const showValue = NEEDS_VALUE.includes(action.type)
         const showSplit = NEEDS_SPLIT.includes(action.type)
+        const showDate = NEEDS_DATE.includes(action.type)
+        const showPurchaseName = action.type === 'purchase'
         const showFinanceInputs = action.type === 'new_finance_agreement'
 
         function updateAction(patch: Partial<Scenario['actions'][number]>) {
@@ -655,6 +772,16 @@ function ScenarioForm({
               />
             )}
 
+            {showPurchaseName && (
+              <input
+                type="text"
+                placeholder="What is it? (e.g. Washing machine)"
+                value={action.name ?? ''}
+                onChange={(e) => updateAction({ name: e.target.value })}
+                className="col-span-2 w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+              />
+            )}
+
             {showValue && (
               <input
                 type="number"
@@ -662,8 +789,26 @@ function ScenarioForm({
                 placeholder={VALUE_LABELS[action.type] ?? 'Value (£)'}
                 value={action.value || ''}
                 onChange={(e) => updateAction({ value: Number(e.target.value) })}
-                className={`w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono ${showMultiLoanPicker || showSingleLoanPicker || showPersonPicker ? '' : 'col-span-2'}`}
+                className={`w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono ${showMultiLoanPicker || showSingleLoanPicker || showPersonPicker || showDate ? '' : 'col-span-2'}`}
               />
+            )}
+
+            {showDate && (
+              <label className="flex flex-col gap-0.5">
+                <span className="text-[10px] uppercase tracking-wide text-[var(--color-ink-faint)]">When</span>
+                <input
+                  type="date"
+                  value={action.purchaseDate ?? ''}
+                  onChange={(e) => updateAction({ purchaseDate: e.target.value })}
+                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                />
+              </label>
+            )}
+
+            {showDate && (!action.purchaseDate || !(action.value > 0)) && (
+              <p className="col-span-2 text-[11px]" style={{ color: 'var(--color-negative)' }}>
+                A purchase needs a date and a cost before its effect on your balance can be worked out.
+              </p>
             )}
 
             {showFinanceInputs && (
@@ -953,7 +1098,7 @@ function ScenarioForm({
         </button>
       </div>
       <button
-        disabled={!name.trim() || actions.length === 0 || !actionsAllLinkedWhereRequired}
+        disabled={!name.trim() || actions.length === 0 || !actionsAllLinkedWhereRequired || !purchasesComplete}
         onClick={() => {
           onSave({
             name: name.trim(),

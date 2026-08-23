@@ -189,6 +189,7 @@ export function Salary() {
               payday={payCycle?.paydayDayOfMonth ?? 28}
               adjustForNonWorkingDay={payCycle?.paydayAdjustForNonWorkingDay ?? true}
               cycleStartDay={payCycle?.cycleStartDayOfMonth ?? 1}
+              cycleStartFollowsPayday={payCycle?.cycleStartFollowsPayday ?? false}
               openingBalance={payCycle?.openingBalance ?? 0}
               openingBalanceDate={payCycle?.openingBalanceDate ?? todayIso()}
               onChange={(updates) => updatePayCycle(person.id, updates)}
@@ -290,6 +291,7 @@ function SalarySetupForm({
   const [paydayDayOfMonth, setPaydayDayOfMonth] = useState(String(payCycle?.paydayDayOfMonth ?? 28))
   const [paydayAdjustForNonWorkingDay, setPaydayAdjustForNonWorkingDay] = useState(payCycle?.paydayAdjustForNonWorkingDay ?? true)
   const [cycleStartDayOfMonth, setCycleStartDayOfMonth] = useState(String(payCycle?.cycleStartDayOfMonth ?? 1))
+  const [cycleStartFollowsPayday, setCycleStartFollowsPayday] = useState(payCycle?.cycleStartFollowsPayday ?? false)
   const [openingBalance, setOpeningBalance] = useState(payCycle ? String(payCycle.openingBalance) : '')
   const [openingBalanceDate, setOpeningBalanceDate] = useState(payCycle?.openingBalanceDate ?? todayIso())
 
@@ -454,15 +456,16 @@ function SalarySetupForm({
               className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
             />
           </Field>
-          <Field label="Budgeting cycle starts on">
+          <Field label={cycleStartFollowsPayday ? 'Budgeting cycle starts on (following payday)' : 'Budgeting cycle starts on'}>
             <input
               type="number"
               inputMode="numeric"
               min={1}
               max={31}
               value={cycleStartDayOfMonth}
+              disabled={cycleStartFollowsPayday}
               onChange={(e) => setCycleStartDayOfMonth(e.target.value)}
-              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono disabled:opacity-40"
             />
           </Field>
           <Field label="Opening balance (£)">
@@ -487,6 +490,12 @@ function SalarySetupForm({
           <input type="checkbox" checked={paydayAdjustForNonWorkingDay} onChange={(e) => setPaydayAdjustForNonWorkingDay(e.target.checked)} />
           <span className="text-xs text-[var(--color-ink-muted)]">If payday falls on a weekend or UK bank holiday, pay on the last working day before it</span>
         </label>
+        <label className="flex items-center gap-2 mt-2.5">
+          <input type="checkbox" checked={cycleStartFollowsPayday} onChange={(e) => setCycleStartFollowsPayday(e.target.checked)} />
+          <span className="text-xs text-[var(--color-ink-muted)]">
+            Start the budgeting cycle on payday itself, weekend/bank-holiday adjustment included
+          </span>
+        </label>
       </div>
 
       <button
@@ -505,6 +514,7 @@ function SalarySetupForm({
               paydayDayOfMonth: Number(paydayDayOfMonth),
               paydayAdjustForNonWorkingDay,
               cycleStartDayOfMonth: Number(cycleStartDayOfMonth),
+              cycleStartFollowsPayday,
               openingBalance: Number(openingBalance),
               openingBalanceDate,
             },
@@ -526,6 +536,7 @@ function PayCycleSettingsModal({
   payday,
   adjustForNonWorkingDay,
   cycleStartDay,
+  cycleStartFollowsPayday,
   openingBalance,
   openingBalanceDate,
   onChange,
@@ -535,9 +546,17 @@ function PayCycleSettingsModal({
   payday: number
   adjustForNonWorkingDay: boolean
   cycleStartDay: number
+  cycleStartFollowsPayday: boolean
   openingBalance: number
   openingBalanceDate: string
-  onChange: (updates: { paydayDayOfMonth?: number; paydayAdjustForNonWorkingDay?: boolean; cycleStartDayOfMonth?: number; openingBalance?: number; openingBalanceDate?: string }) => void
+  onChange: (updates: {
+    paydayDayOfMonth?: number
+    paydayAdjustForNonWorkingDay?: boolean
+    cycleStartDayOfMonth?: number
+    cycleStartFollowsPayday?: boolean
+    openingBalance?: number
+    openingBalanceDate?: string
+  }) => void
   onClose: () => void
 }) {
   return createPortal(
@@ -562,14 +581,15 @@ function PayCycleSettingsModal({
               className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
             />
           </Field>
-          <Field label="Budgeting cycle starts on">
+          <Field label={cycleStartFollowsPayday ? 'Budgeting cycle starts on (following payday)' : 'Budgeting cycle starts on'}>
             <NumberInput
               inputMode="numeric"
               min={1}
               max={31}
               value={cycleStartDay}
+              disabled={cycleStartFollowsPayday}
               onChange={(v) => onChange({ cycleStartDayOfMonth: Math.max(1, Math.min(31, Number(v) || 1)) })}
-              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono disabled:opacity-40"
             />
           </Field>
           <Field label="Opening balance (£)">
@@ -596,9 +616,22 @@ function PayCycleSettingsModal({
             If payday falls on a weekend or UK bank holiday, pay on the last working day before it
           </span>
         </label>
+        <label className="flex items-center gap-2 mt-2.5">
+          <input type="checkbox" checked={cycleStartFollowsPayday} onChange={(e) => onChange({ cycleStartFollowsPayday: e.target.checked })} />
+          <span className="text-xs text-[var(--color-ink-muted)]">
+            Start the budgeting cycle on payday itself, weekend/bank-holiday adjustment included
+          </span>
+        </label>
         <p className="text-xs text-[var(--color-ink-faint)] mt-2">
-          The budgeting cycle boundary stays fixed even when the actual payday drifts a day or two earlier. Nothing
-          dated before the opening balance date will appear anywhere in {personName}'s ledger.
+          {cycleStartFollowsPayday ? (
+            <>
+              Each cycle now runs from one payday to the day before the next, so a payday that shifts earlier takes its
+              cycle boundary with it. The day above is kept but unused — untick to go back to it.
+            </>
+          ) : (
+            <>The budgeting cycle boundary stays fixed even when the actual payday drifts a day or two earlier.</>
+          )}{' '}
+          Nothing dated before the opening balance date will appear anywhere in {personName}'s ledger.
         </p>
 
         <button onClick={onClose} className="w-full mt-4 py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>

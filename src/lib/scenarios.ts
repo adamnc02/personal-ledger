@@ -143,6 +143,15 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         pool = round2(pool - applied)
       }
       oneOffCashImpact += pool
+    } else if (action.type === 'purchase') {
+      // Buying something is one-off cash out, exactly like putting money
+      // into savings below. The DATED view of the same purchase (what the
+      // balance will be on the day, and at the end of that cycle) is
+      // computed separately in lib/purchaseImpact.ts — this file has no
+      // calendar, by design. Counting it here as well is not a
+      // double-count: the two answer different questions and are shown as
+      // separate figures.
+      oneOffCashImpact -= action.value
     } else if (action.type === 'savings_lump_sum' && action.savingsEntryId) {
       const targetPersonId = action.personId || personId
       const key = `${targetPersonId}:${action.savingsEntryId}`
