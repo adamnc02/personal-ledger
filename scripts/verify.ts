@@ -50,11 +50,16 @@ const ellaReal = calculateNetSalary({
     { id: 'd3', name: 'Work Charity Lottery', type: 'post_tax', amountType: 'fixed', amount: 4.0 },
   ],
 })
-check('Real payslip: gross taxable within 1p of £2411.67', ellaReal.grossTaxablePerPeriod, 2411.67, 0.02)
-check('Real payslip: income tax within £1 of £288.80 (HMRC period tables vs annual÷13 approximation)', ellaReal.incomeTaxPerPeriod, 288.8, 1)
-check('Real payslip: NI within £1 of £115.57', ellaReal.nationalInsurancePerPeriod, 115.57, 1)
-check('Real payslip: student loan within £1 of £30.00', ellaReal.studentLoanPerPeriod, 30.0, 1)
-check('Real payslip: net pay within £1 of £1973.30', ellaReal.netPerPeriod, 1973.3, 1)
+// Tolerances here are deliberately ZERO. They used to be £1, and that is
+// precisely how three separate engine defects stayed hidden — the suite went
+// green while the numbers were wrong. The engine calculates per period now and
+// should reproduce a real payslip exactly; if it can't, that's a failure, not
+// a rounding allowance. See scripts/verify-paye-engine.ts for the full set.
+check('Real payslip: gross taxable exactly £2411.67', ellaReal.grossTaxablePerPeriod, 2411.67, 0)
+check('Real payslip: income tax exactly £288.80', ellaReal.incomeTaxPerPeriod, 288.8, 0)
+check('Real payslip: NI exactly £115.57', ellaReal.nationalInsurancePerPeriod, 115.57, 0)
+check('Real payslip: student loan exactly £30.00', ellaReal.studentLoanPerPeriod, 30.0, 0)
+check('Real payslip: net pay exactly £1973.30', ellaReal.netPerPeriod, 1973.3, 0)
 check('Real payslip: preTaxDeductions recorded in order (Holiday first, Pension second)', ellaReal.preTaxDeductions.map((d) => d.name), ['Holiday Purchase Scheme', 'Pension'])
 check('Real payslip: postTaxDeductions recorded', ellaReal.postTaxDeductions.map((d) => d.name), ['Work Charity Lottery'])
 

@@ -1,6 +1,6 @@
 import { createPortal } from 'react-dom'
 import { X, ChevronUp, ChevronDown, Trash2 } from 'lucide-react'
-import type { SalaryDeduction, DeductionType } from '../lib/tax'
+import type { SalaryDeduction, DeductionType, PercentBasis } from '../lib/tax'
 
 const DEDUCTION_TYPE_LABELS: Record<DeductionType, string> = {
   salary_sacrifice: 'Salary sacrifice (before tax & NI)',
@@ -96,6 +96,25 @@ export function DeductionModal({ deduction, canMoveUp, canMoveDown, onChange, on
               />
             </label>
           </div>
+
+          {deduction.amountType === 'percent' && (
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--color-ink-muted)]">Percentage of</span>
+              <select
+                value={deduction.percentBasis ?? 'gross'}
+                onChange={(e) => onChange({ percentBasis: e.target.value as PercentBasis })}
+                className="w-full bg-transparent border-b border-[var(--color-track)] py-1.5 text-sm text-[var(--color-ink)] outline-none"
+              >
+                <option value="gross">Full gross pay</option>
+                <option value="qualifying_earnings">Qualifying earnings</option>
+              </select>
+              <span className="text-[11px] leading-snug text-[var(--color-ink-faint)]">
+                {deduction.percentBasis === 'qualifying_earnings'
+                  ? 'Only the slice of pay between £520 and £4,189 a month (£480–£3,867 if paid 4-weekly). This is what most workplace pensions actually use.'
+                  : 'The whole gross for the period. Check a payslip before assuming this — most workplace pensions are a percentage of qualifying earnings instead, which is a smaller number.'}
+              </span>
+            </label>
+          )}
 
           <div className="flex items-center justify-between mt-2 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
             <div className="flex items-center gap-1">

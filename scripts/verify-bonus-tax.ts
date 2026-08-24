@@ -48,8 +48,15 @@ const realSalary: SalaryInput = {
 }
 
 // ---- 1. The corrected figure, on real data ----
+// This figure moved from £2,938.18 to £2,938.89 when the engine switched to a
+// real per-period PAYE calculation (Aug 2026). It is NOT a bonus regression —
+// the bonus logic below is untouched. The baseline rose 71p because the old
+// engine over-deducted: a 374L code grants £3,749 of allowance, not £3,740
+// (digits × 10 + 9), and the per-period route floors taxable pay to whole
+// pounds. Hand-check: free pay ceil(3749/12) = £312.42, taxable pay floors to
+// £3,747, tax £870.46, NI £240.99 on the post-sacrifice £4,060.34.
 const base = calculateNetSalary(realSalary)
-check('Base net pay is unchanged by any of this', base.netPerPeriod, 2938.18, 0.01)
+check('Base net pay is unchanged by any of this', base.netPerPeriod, 2938.89, 0.01)
 
 const bonus = calculateBonusOnTop(realSalary, 1000)
 // £48,724 annual taxable, less a 374L allowance of £3,740, puts £7,284
@@ -93,7 +100,11 @@ check('...and 8% NI', smallBonus.nationalInsurance, 80, 0.01)
 const straddler: SalaryInput = { ...realSalary, grossAnnual: 50000, taxCode: '1257L', deductions: [] }
 const straddleBonus = calculateBonusOnTop(straddler, 2000)
 check('A bonus straddling the higher-rate threshold is taxed across BOTH bands, not at one flat rate', straddleBonus.incomeTax > 2000 * 0.2 && straddleBonus.incomeTax < 2000 * 0.4, true)
-check('Specifically: £270 basic-rate then £1,730 at 40%', straddleBonus.incomeTax, 270 * 0.2 + 1730 * 0.4, 0.01)
+// The split is £279/£1,721, not the £270/£1,730 this asserted before the tax
+// code fix. A 1257L code grants £12,579 of allowance, so the higher-rate band
+// starts at £50,279 of income (12,579 + the £37,700 basic band), not £50,270.
+// The £9 of extra allowance moves £9 of the bonus from 40% down to 20%.
+check('Specifically: £279 basic-rate then £1,721 at 40%', straddleBonus.incomeTax, 279 * 0.2 + 1721 * 0.4, 0.01)
 // NI drops to 2% above the upper earnings limit — the mirror image.
 check('NI on that same bonus mostly falls in the 2% band above the UEL', straddleBonus.nationalInsurance < 2000 * 0.08, true)
 
@@ -110,15 +121,15 @@ const person: Person = {
   salaryOverrides: [],
   savingsEntries: [],
 }
-check('With no bonus, the period reports plain snapshot net pay', computeNetPayForPeriod(person, '2026-09-14'), 2938.18, 0.01)
+check('With no bonus, the period reports plain snapshot net pay', computeNetPayForPeriod(person, '2026-09-14'), 2938.89, 0.01)
 check('computeNetBonusAmount agrees with calculateBonusOnTop', computeNetBonusAmount(person, '2026-09-14', 1000), 520, 0.01)
 
 const withBonus: Person = {
   ...person,
   salaryOverrides: [{ id: 'ov-1', personId: 'me', payPeriodDate: '2026-09-14', netPayOverride: 3393.18, reason: 'Bonus', bonusGrossAmount: 1000 }],
 }
-check('Attaching a bonus raises that period\'s net pay to base + net bonus', computeNetPayForPeriod(withBonus, '2026-09-14'), 3458.18, 0.01)
-check('Only the bonus period is affected — the next one is untouched', computeNetPayForPeriod(withBonus, '2026-10-14'), 2938.18, 0.01)
+check('Attaching a bonus raises that period\'s net pay to base + net bonus', computeNetPayForPeriod(withBonus, '2026-09-14'), 3458.89, 0.01)
+check('Only the bonus period is affected — the next one is untouched', computeNetPayForPeriod(withBonus, '2026-10-14'), 2938.89, 0.01)
 
 // ---- 5. The stored netPayOverride is a cache, not the truth ----
 // It was written when the bonus was attached (3393.18, the OLD maths).
@@ -171,7 +182,7 @@ const baseData: AppDataV2 = {
 const settled = autoClearDuePayments(baseData, asOf)
 const salaryTxn = settled.transactions.find((t) => t.type === 'salary' && t.date === '2026-08-14')
 check('The 14 Aug payday was materialized and cleared', salaryTxn?.status, 'cleared')
-check('...at plain snapshot net pay', salaryTxn?.amount, 2938.18, 0.01)
+check('...at plain snapshot net pay', salaryTxn?.amount, 2938.89, 0.01)
 
 const withLateBonus: AppDataV2 = {
   ...settled,
@@ -179,7 +190,7 @@ const withLateBonus: AppDataV2 = {
 }
 const reconciled = autoClearDuePayments(withLateBonus, asOf)
 const updatedTxn = reconciled.transactions.find((t) => t.type === 'salary' && t.date === '2026-08-14')
-check('Attaching a bonus to an ALREADY-CLEARED payday updates the stored transaction (the summary-page gap)', updatedTxn?.amount, 3458.18, 0.01)
+check('Attaching a bonus to an ALREADY-CLEARED payday updates the stored transaction (the summary-page gap)', updatedTxn?.amount, 3458.89, 0.01)
 check('...without duplicating it', reconciled.transactions.filter((t) => t.type === 'salary' && t.date === '2026-08-14').length, 1)
 
 const secondPass = autoClearDuePayments(reconciled, asOf)

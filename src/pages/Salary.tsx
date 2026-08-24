@@ -16,6 +16,20 @@ import { SwipeToDelete } from '../components/SwipeToDelete'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { NumberInput } from '../components/NumberInput'
 
+/**
+ * Compact amount label for a deduction's collapsed row.
+ *
+ * Percentage lines say what they're a percentage OF, deliberately. Two rows
+ * both reading a bare "4%" while computing quite different amounts (4% of gross
+ * vs 4% of qualifying earnings — £100.00 vs £79.20 on a £2,500 gross) is
+ * exactly the failure that prompted the tax engine rewrite, and it's invisible
+ * unless the basis is on the summary view rather than buried in the editor.
+ */
+function deductionAmountLabel(d: SalaryDeduction): string {
+  if (d.amountType !== 'percent') return `£${formatCurrency(d.amount)}`
+  return d.percentBasis === 'qualifying_earnings' ? `${d.amount}% of QE` : `${d.amount}% of gross`
+}
+
 const STUDENT_LOAN_LABELS: Record<StudentLoanPlan, string> = {
   none: 'No student loan',
   plan1: 'Plan 1',
@@ -405,7 +419,7 @@ function SalarySetupForm({
             >
               <span className="text-sm text-[var(--color-ink)]">{d.name || 'Unnamed deduction'}</span>
               <span className="flex items-center gap-3">
-                <span className="font-mono text-sm text-[var(--color-ink-muted)]">{d.amountType === 'percent' ? `${d.amount}%` : `£${formatCurrency(d.amount)}`}</span>
+                <span className="font-mono text-sm text-[var(--color-ink-muted)]">{deductionAmountLabel(d)}</span>
                 <span
                   role="button"
                   onClick={(e) => {
@@ -953,7 +967,7 @@ function PeriodEditor({
             >
               <span className="text-sm text-[var(--color-ink)]">{d.name || 'Unnamed deduction'}</span>
               <span className="flex items-center gap-3">
-                <span className="font-mono text-sm text-[var(--color-ink-muted)]">{d.amountType === 'percent' ? `${d.amount}%` : `£${formatCurrency(d.amount)}`}</span>
+                <span className="font-mono text-sm text-[var(--color-ink-muted)]">{deductionAmountLabel(d)}</span>
                 <span
                   role="button"
                   onClick={(e) => {
