@@ -72,8 +72,8 @@ with sync_playwright() as p:
 
     subtotals = page.get_by_text('Balance at', exact=False)
     print(f'        section subtotal rows visible: {subtotals.count()}')
-    # 4 sections, current collapsed by default -> 3 subtotal rows visible.
-    check('3 subtotal rows visible (4 sections, current collapsed)', subtotals.count() == 3,
+    # 4 sections, all collapsed by default -> 0 subtotal rows visible.
+    check('0 subtotal rows visible (4 sections, all collapsed)', subtotals.count() == 0,
           f'got {subtotals.count()}')
 
     print('\n=== C. Default collapse states ===')
@@ -81,7 +81,7 @@ with sync_playwright() as p:
     check('"Nothing in this cycle." only appears for genuinely empty cycles',
           True)  # informational; asserted via section count below
 
-    # Current cycle collapsed => its header must show a figure.
+    # Every cycle collapsed by default => Current cycle's header must show a figure.
     cur = page.get_by_text('Current cycle', exact=True).first
     row = cur.locator('xpath=ancestor::button[1]')
     row_text = row.inner_text()
@@ -92,7 +92,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(500)
     row_text2 = page.get_by_text('Current cycle', exact=True).first.locator('xpath=ancestor::button[1]').inner_text()
     check('expanded Current cycle header shows NO figure', '£' not in row_text2, repr(row_text2))
-    check('expanding adds a 4th subtotal row', page.get_by_text('Balance at', exact=False).count() == 4,
+    check('expanding adds a 1st subtotal row', page.get_by_text('Balance at', exact=False).count() == 1,
           f'got {page.get_by_text("Balance at", exact=False).count()}')
 
     print('\n=== D. Cleared rows labelled ===')

@@ -655,9 +655,9 @@ function CycleGroupedList({
   cycles: { start: Date; end: Date }[]
 }) {
   // Collapse state tracks what's explicitly been TOGGLED away from its
-  // default, so the defaults (current collapsed, the rest expanded) hold
-  // without seeding state per cycle — including for a cycle that first
-  // appears mid-session as the horizon rolls forward.
+  // default, so the default (every cycle collapsed) holds without seeding
+  // state per cycle — including for a cycle that first appears mid-session
+  // as the horizon rolls forward.
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
   const toggle = (key: string) =>
     setToggled((prev) => {
@@ -702,8 +702,8 @@ function CycleGroupedList({
   return (
     <div className="flex flex-col gap-2">
       {sections.map((section) => {
-        // Current cycle collapsed by default, every other expanded.
-        const expanded = section.isCurrent ? toggled.has(section.key) : !toggled.has(section.key)
+        // Every cycle collapsed by default.
+        const expanded = toggled.has(section.key)
         return (
           <div key={section.key} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
             <button onClick={() => toggle(section.key)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">

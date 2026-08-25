@@ -634,6 +634,25 @@ export interface BonusBreakdown {
  * only) — the same split calculateNetSalary already uses, so a bonus is
  * charged against exactly the same starting figures the salary itself is.
  *
+ * They're also deliberately different in which THRESHOLDS they marginal
+ * against. Income tax is annualised (annualIncomeTaxFor on annualTaxable
+ * ± bonus) because the annual bands genuinely are the per-period bands ×
+ * periods — see periodIncomeTax's own comment. NI is NOT: the published
+ * per-period PT/UEL (£1,048 / £4,189 monthly) are NOT annualNI / periods
+ * and don't even follow one rounding rule (see PERIOD_THRESHOLDS_2026_27's
+ * comment), and — more fundamentally — real NI has no annual reconciliation
+ * at all. It's assessed fresh every pay period with no memory of the
+ * periods before it. So the bonus's NI has to be the marginal cost against
+ * THIS PERIOD's niable pay, using periodNationalInsurance and the
+ * period's own PT/UEL, exactly like calculateNetSalary does for the
+ * ordinary salary. Annualising it (the old approach) silently asked "how
+ * much extra NI does this bonus cost across the whole tax year", which
+ * smears the bonus's marginal rate across every period's UEL crossing
+ * instead of just this one, and overstates it whenever the ordinary
+ * period pay is comfortably under the period UEL but annualNiable is
+ * close to the annual UEL — the two boundaries don't line up because the
+ * thresholds themselves don't scale the same way.
+ *
  * Student loan is deliberately NOT charged on a bonus — confirmed
  * explicitly: tax and NI are the only two things that touch it. The
  * `studentLoan` field below is therefore always 0. It's kept on the
@@ -648,12 +667,17 @@ export function calculateBonusOnTop(input: SalaryInput, grossBonus: number, cons
 
   const base = calculateNetSalary(input, constants)
   const annualTaxable = base.grossTaxablePerPeriod * base.periodsPerYear
-  const annualNiable = base.grossNiablePerPeriod * base.periodsPerYear
 
   const incomeTax =
     annualIncomeTaxFor(annualTaxable + grossBonus, input.taxCode, constants).totalTax - annualIncomeTaxFor(annualTaxable, input.taxCode, constants).totalTax
 
-  const nationalInsurance = calculateNationalInsurance(annualNiable + grossBonus, constants).total - calculateNationalInsurance(annualNiable, constants).total
+  // NI marginal against THIS PERIOD's niable pay and THIS PERIOD's own
+  // thresholds — see the comment above for why this can't be annualised
+  // the way income tax is.
+  const thresholds = periodThresholdsFor(input.payFrequency)
+  const nationalInsurance =
+    periodNationalInsurance(base.grossNiablePerPeriod + grossBonus, thresholds, constants).total -
+    periodNationalInsurance(base.grossNiablePerPeriod, thresholds, constants).total
 
   const studentLoan = 0
 

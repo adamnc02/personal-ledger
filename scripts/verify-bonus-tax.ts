@@ -62,14 +62,20 @@ const bonus = calculateBonusOnTop(realSalary, 1000)
 // £48,724 annual taxable, less a 374L allowance of £3,740, puts £7,284
 // past the basic-rate limit — so the marginal rate here is 40%, not 20%.
 check('£1,000 bonus: income tax at the 40% marginal rate', bonus.incomeTax, 400, 0.01)
-check('£1,000 bonus: NI at the 8% main rate (annual NIable is below the upper earnings limit)', bonus.nationalInsurance, 80, 0.01)
+// NI is per-period, not annualised (see calculateBonusOnTop's comment) —
+// this period's niable pay is already £4,060.34, £128.66 short of the
+// £4,189 monthly UEL. A £1,000 bonus in the SAME period blows through
+// that: £128.66 at 8% (£10.29) + the remaining £871.34 at 2% (£17.43) =
+// £27.72. The annual UEL having "room" left over the year doesn't matter —
+// NI has no annual reconciliation.
+check('£1,000 bonus: NI splits 8%/2% at the PERIOD upper earnings limit, not the annual one', bonus.nationalInsurance, 27.72, 0.01)
 check('£1,000 bonus: student loan is NOT charged on a bonus', bonus.studentLoan, 0)
-check('£1,000 bonus nets £520 — NOT the old £455', bonus.net, 520, 0.01)
+check('£1,000 bonus nets £572.28 — NOT the old £455, and not the annualised-NI £520 either', bonus.net, 572.28, 0.01)
 
 // The specific regression: the old approach's £455 came from £125 of
 // pension sacrifice being taken off the bonus first. Pin the gap so a
 // reversion is unmistakable rather than just "a bit low".
-check('No pension sacrifice is taken from the bonus (the £65 the old maths lost)', bonus.net - 455, 65, 0.01)
+check('No pension sacrifice is taken from the bonus (the £117.28 the old maths lost)', bonus.net - 455, 117.28, 0.01)
 check('Net is exactly gross less tax and NI, nothing else', bonus.net, 1000 - bonus.incomeTax - bonus.nationalInsurance, 0.01)
 
 // ---- 2. Deductions genuinely play no part ----
@@ -122,13 +128,13 @@ const person: Person = {
   savingsEntries: [],
 }
 check('With no bonus, the period reports plain snapshot net pay', computeNetPayForPeriod(person, '2026-09-14'), 2938.89, 0.01)
-check('computeNetBonusAmount agrees with calculateBonusOnTop', computeNetBonusAmount(person, '2026-09-14', 1000), 520, 0.01)
+check('computeNetBonusAmount agrees with calculateBonusOnTop', computeNetBonusAmount(person, '2026-09-14', 1000), 572.28, 0.01)
 
 const withBonus: Person = {
   ...person,
   salaryOverrides: [{ id: 'ov-1', personId: 'me', payPeriodDate: '2026-09-14', netPayOverride: 3393.18, reason: 'Bonus', bonusGrossAmount: 1000 }],
 }
-check('Attaching a bonus raises that period\'s net pay to base + net bonus', computeNetPayForPeriod(withBonus, '2026-09-14'), 3458.89, 0.01)
+check('Attaching a bonus raises that period\'s net pay to base + net bonus', computeNetPayForPeriod(withBonus, '2026-09-14'), 3511.17, 0.01)
 check('Only the bonus period is affected — the next one is untouched', computeNetPayForPeriod(withBonus, '2026-10-14'), 2938.89, 0.01)
 
 // ---- 5. The stored netPayOverride is a cache, not the truth ----
@@ -190,7 +196,7 @@ const withLateBonus: AppDataV2 = {
 }
 const reconciled = autoClearDuePayments(withLateBonus, asOf)
 const updatedTxn = reconciled.transactions.find((t) => t.type === 'salary' && t.date === '2026-08-14')
-check('Attaching a bonus to an ALREADY-CLEARED payday updates the stored transaction (the summary-page gap)', updatedTxn?.amount, 3458.89, 0.01)
+check('Attaching a bonus to an ALREADY-CLEARED payday updates the stored transaction (the summary-page gap)', updatedTxn?.amount, 3511.17, 0.01)
 check('...without duplicating it', reconciled.transactions.filter((t) => t.type === 'salary' && t.date === '2026-08-14').length, 1)
 
 const secondPass = autoClearDuePayments(reconciled, asOf)
