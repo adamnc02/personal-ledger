@@ -3,10 +3,10 @@ import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
-import { computeProjection, type ProjectionHorizon, type ProjectionResult } from '../lib/projection'
+import { computeProjection, horizonCycles, type ProjectionHorizon, type ProjectionResult } from '../lib/projection'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary } from '../lib/jointLedger'
-import { computeMinimumPaymentAmount, totalPaidForCard, withLiveBalance, withLiveBalances } from '../lib/creditCards'
+import { nextMinimumChargeAmount, totalPaidForCard, withLiveBalance, withLiveBalances } from '../lib/creditCards'
 import { cycleBoundsForDate } from '../lib/payCycle'
 import { isLedgerTransaction, signedAmount } from '../lib/runningBalance'
 import { computeCycleSummary, compareByDateSalaryFirst, compareByDateDescSalaryFirst } from '../lib/cycleSummary'
@@ -109,10 +109,15 @@ export function Home() {
   const [grouping, setGrouping] = useState<Grouping>('list')
   const [order, setOrder] = useState<Order>('date')
   const [showCleared, setShowCleared] = useState(false)
+  const [cycleTotals, setCycleTotals] = useState(false)
 
   const deck = useMemo(() => buildDeck(data), [data])
   const safeIndex = Math.min(activeIndex, deck.length - 1)
   const activeEntry = deck[safeIndex]
+  // Gated by the same predicate that decides whether the toggle is even
+  // offered, so a value left switched on from an earlier selection can't
+  // silently reshape a view whose control is hidden.
+  const cycleTotalsActive = !!activeEntry && cycleTotals && canShowCycleTotals(activeEntry, horizon, grouping, order)
 
   return (
     <div className="max-w-md mx-auto px-4 pt-6">
@@ -133,7 +138,17 @@ export function Home() {
       </SwipeCards>
 
       <div className="mt-6">
-        <DeckControls entry={activeEntry} horizon={horizon} setHorizon={setHorizon} grouping={grouping} setGrouping={setGrouping} order={order} setOrder={setOrder} />
+        <DeckControls
+          entry={activeEntry}
+          horizon={horizon}
+          setHorizon={setHorizon}
+          grouping={grouping}
+          setGrouping={setGrouping}
+          order={order}
+          setOrder={setOrder}
+          cycleTotals={cycleTotals}
+          setCycleTotals={setCycleTotals}
+        />
         <DeckDetail
           entry={activeEntry}
           data={data}
@@ -145,6 +160,7 @@ export function Home() {
           setOrder={setOrder}
           showCleared={showCleared}
           setShowCleared={setShowCleared}
+          cycleTotals={cycleTotalsActive}
         />
       </div>
     </div>
@@ -326,7 +342,10 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       // or a percent-of-balance card would quote a minimum for a debt
       // that's already been partly paid off.
       const card = withLiveBalance(stored, data.transactions)
-      const minPayment = computeMinimumPaymentAmount(card)
+      // Same shared generator the Summary page uses, so an overridden
+      // charge shows the overridden figure here too rather than the
+      // un-overridden computed one. See nextMinimumChargeAmount.
+      const minPayment = nextMinimumChargeAmount(stored, data.transactions) ?? 0
       return (
         <BankCard variant="custom" customColor={card.color} bankLabel={card.name} accountLabel="Credit Card" icon={<CreditCardIcon size={18} strokeWidth={1.5} color="#fff" />}>
           <div className="mt-6 space-y-1.5">
@@ -363,6 +382,7 @@ function DeckDetail(props: {
   setOrder: (v: Order) => void
   showCleared: boolean
   setShowCleared: (v: boolean) => void
+  cycleTotals: boolean
 }) {
   const { entry, data } = props
   switch (entry.kind) {
@@ -381,6 +401,15 @@ function DeckDetail(props: {
   }
 }
 
+/**
+ * The single predicate deciding whether cycle-end totals apply — used
+ * both to show the toggle and to decide whether to render the grouped
+ * list, so the control and the behaviour can never disagree.
+ */
+function canShowCycleTotals(entry: DeckEntry, horizon: ProjectionHorizon, grouping: Grouping, order: Order): boolean {
+  return entry.kind === 'personal' && horizon === 'three_cycles' && grouping === 'list' && order === 'date'
+}
+
 // ── Deck controls — cycle toggle + Group by/Order by, living BETWEEN the
 // hero deck and the detail card (not inside either one). Cycle toggle on
 // the left; Group by/Order by stacked on the right, as inline dropdown
@@ -394,6 +423,8 @@ function DeckControls({
   setGrouping,
   order,
   setOrder,
+  cycleTotals,
+  setCycleTotals,
 }: {
   entry: DeckEntry
   horizon: ProjectionHorizon
@@ -402,6 +433,8 @@ function DeckControls({
   setGrouping: (v: Grouping) => void
   order: Order
   setOrder: (v: Order) => void
+  cycleTotals: boolean
+  setCycleTotals: (v: boolean) => void
 }) {
   const showHorizon = entry.kind === 'personal' || entry.kind === 'household'
   const showGroupOrder = entry.kind === 'personal'
@@ -431,9 +464,48 @@ function DeckControls({
             onChange={setOrder}
             disabled={grouping === 'category'}
           />
+          {/* Deliberately narrow: cycle-end totals only mean anything in
+              the one view that has multiple cycles to bound (three_cycles)
+              AND a continuous date-ordered running balance to take a
+              subtotal FROM (list + date). Grouping by category destroys
+              the date ordering the fold depends on; ordering by amount
+              does the same; and the current-cycle view has exactly one
+              cycle, so a per-cycle subtotal would just restate the
+              projected balance. Rather than showing a toggle that quietly
+              does nothing, it's absent outside that combination — and
+              canShowCycleTotals gates the RENDER too, so a value left
+              over from a previous selection can't leak into a view it
+              doesn't apply to. */}
+          {canShowCycleTotals(entry, horizon, grouping, order) && (
+            <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />
+          )}
         </div>
       )}
     </div>
+  )
+}
+
+function ToggleSwitch({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className="flex items-center gap-2 text-[11px] font-medium"
+      style={{ color: 'var(--color-ink-muted)' }}
+    >
+      <span>{label}</span>
+      <span
+        className="relative inline-block rounded-full transition-colors shrink-0"
+        style={{ width: 34, height: 20, background: checked ? 'var(--color-coral)' : 'var(--color-track)' }}
+      >
+        <span
+          className="absolute rounded-full bg-white transition-transform"
+          style={{ width: 16, height: 16, top: 2, left: 2, transform: checked ? 'translateX(14px)' : 'translateX(0)', boxShadow: '0 1px 2px rgba(0,0,0,0.2)' }}
+        />
+      </span>
+    </button>
   )
 }
 
@@ -515,7 +587,19 @@ function TransactionRow({ t, data, runningBalance }: { t: Transaction; data: App
         <p className="text-sm text-[var(--color-ink)] truncate">{t.note || category?.name || t.type}</p>
         <p className="text-[11px] text-[var(--color-ink-muted)]">
           {t.date}
-          {t.status === 'pending' ? ' · Pending' : ''}
+          {/* Both states are labelled explicitly, not just pending. Once
+              cleared rows sit in the same cycle sections as pending ones
+              (cycle-end totals view), an unlabelled row reads as "no
+              status" rather than "cleared". Cleared carries the heavier
+              weight so the two stay legible at a glance in a mixed
+              section. */}
+          {t.status === 'pending' && ' · Pending'}
+          {t.status === 'cleared' && (
+            <>
+              {' · '}
+              <span className="font-semibold text-[var(--color-ink)]">Cleared</span>
+            </>
+          )}
         </p>
       </div>
       <div className="text-right shrink-0">
@@ -524,6 +608,147 @@ function TransactionRow({ t, data, runningBalance }: { t: Transaction; data: App
         </p>
         {runningBalance !== undefined && <p className="text-[10px] text-[var(--color-ink-faint)] tabular-nums">£{formatCurrency(runningBalance)}</p>}
       </div>
+    </div>
+  )
+}
+
+/** Compact "14 Sep" style label for cycle boundary dates — parsed as local, never via Date.toISOString, per the app's timezone rule. */
+function formatCycleDate(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  return new Date(y, m - 1, d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+}
+
+/**
+ * The date-ordered list, split into one collapsible section per pay
+ * cycle in the horizon, each closing with the projected balance at that
+ * cycle's end.
+ *
+ * The running balance is ONE continuous fold across every section, not a
+ * per-section restart: a cycle's closing figure is the balance carried
+ * out of it, so it has to include everything before it. That's also why
+ * a section's subtotal is the running balance on its LAST row rather
+ * than the sum of its own rows — those are different numbers, and only
+ * the former answers "what will I actually have on the 13th".
+ *
+ * Cleared rows are folded into their cycle sections alongside pending
+ * ones rather than living in a separate block at the bottom, so each
+ * section reads as a complete picture of its own window. They're sorted
+ * into the same ascending date order for that reason — the standalone
+ * cleared block sorts descending (most recent first, as a history log),
+ * but a descending run inside an ascending fold would make the running
+ * balance jump around incoherently.
+ *
+ * Sections with no rows at all are still shown: an empty cycle is
+ * meaningful information (nothing scheduled), and dropping it would make
+ * the horizon look shorter than it is. Its subtotal is simply the
+ * balance carried in from the previous cycle.
+ */
+function CycleGroupedList({
+  transactions,
+  data,
+  openingRunningBalance,
+  cycles,
+}: {
+  transactions: Transaction[]
+  data: AppDataV2
+  openingRunningBalance: number
+  cycles: { start: Date; end: Date }[]
+}) {
+  // Collapse state tracks what's explicitly been TOGGLED away from its
+  // default, so the defaults (current collapsed, the rest expanded) hold
+  // without seeding state per cycle — including for a cycle that first
+  // appears mid-session as the horizon rolls forward.
+  const [toggled, setToggled] = useState<Set<string>>(() => new Set())
+  const toggle = (key: string) =>
+    setToggled((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
+  // The fold runs over the whole window first, in one pass, so every
+  // section's figures come from the same sequence regardless of what's
+  // expanded — collapsing a section must not change any number.
+  const ordered = transactions.slice().sort(compareByDateSalaryFirst)
+  let running = openingRunningBalance
+  const withRunning = ordered.map((t) => {
+    running += signedAmount(t)
+    return { t, running }
+  })
+
+  let carried = openingRunningBalance
+  const sections = cycles.map((cycle, i) => {
+    const startIso = toLocalIsoDate(cycle.start)
+    const endIso = toLocalIsoDate(cycle.end)
+    // The FIRST section has no lower bound. A stored transaction can sit
+    // between the opening balance date and the current cycle's start —
+    // it's inside the projection (which bounds only the top end) and its
+    // value is already inside the fold, so bounding this section at
+    // cycle.start would drop the ROW while keeping its effect on every
+    // later running figure: money moving with nothing on screen to
+    // explain it. Absorbing it into the current cycle keeps the sections
+    // a complete partition of everything the projection returned, which
+    // is what makes the final section's closing figure equal
+    // projectedBalance rather than merely resemble it.
+    const rows = withRunning.filter(({ t }) => (i === 0 || t.date >= startIso) && t.date <= endIso)
+    // Balance carried OUT of this cycle — the last row's running figure,
+    // or, for an empty cycle, whatever came in from the one before.
+    const closing = rows.length > 0 ? rows[rows.length - 1].running : carried
+    carried = closing
+    return { key: startIso, isCurrent: i === 0, startIso, endIso, rows, closing }
+  })
+
+  return (
+    <div className="flex flex-col gap-2">
+      {sections.map((section) => {
+        // Current cycle collapsed by default, every other expanded.
+        const expanded = section.isCurrent ? toggled.has(section.key) : !toggled.has(section.key)
+        return (
+          <div key={section.key} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
+            <button onClick={() => toggle(section.key)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
+              <span className="flex items-center gap-1.5 min-w-0">
+                {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                <span className="text-xs font-semibold text-[var(--color-ink)] truncate">
+                  {section.isCurrent ? 'Current cycle' : `${formatCycleDate(section.startIso)} – ${formatCycleDate(section.endIso)}`}
+                </span>
+              </span>
+              {/* The header carries no figures while expanded — the
+                  subtotal row below is the one place the number lives, so
+                  it can't be read twice and disagree. Collapsed, the
+                  section's whole point would otherwise be hidden, so the
+                  closing balance surfaces here instead. */}
+              {!expanded && (
+                <span className="text-xs font-mono font-semibold tabular-nums shrink-0" style={{ color: 'var(--color-ink-muted)' }}>
+                  £{formatCurrency(section.closing)}
+                </span>
+              )}
+            </button>
+
+            {expanded && (
+              <div className="px-3 pb-1">
+                <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+                  {section.rows.map(({ t, running }) => (
+                    <TransactionRow key={t.id} t={t} data={data} runningBalance={running} />
+                  ))}
+                  {section.rows.length === 0 && (
+                    <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-3">Nothing in this cycle.</p>
+                  )}
+                </div>
+                <div
+                  className="flex items-center justify-between pt-2 pb-2 mt-1 border-t"
+                  style={{ borderColor: 'var(--color-track)' }}
+                >
+                  <span className="text-[11px] font-medium text-[var(--color-ink-muted)]">
+                    Balance at {formatCycleDate(section.endIso)}
+                  </span>
+                  <span className="text-sm font-mono font-semibold tabular-nums text-[var(--color-ink)]">£{formatCurrency(section.closing)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -656,6 +881,7 @@ function PersonalDetail({
   order,
   showCleared,
   setShowCleared,
+  cycleTotals,
 }: {
   data: AppDataV2
   horizon: ProjectionHorizon
@@ -663,12 +889,18 @@ function PersonalDetail({
   order: Order
   showCleared: boolean
   setShowCleared: (v: boolean) => void
+  cycleTotals: boolean
 }) {
   const payCycle = data.payCycles.find((pc) => pc.personId === data.primaryPersonId)
   if (!payCycle) return null
 
   const projection = computeProjection(data, data.primaryPersonId, payCycle, horizon)
   const ledgerTxns = projection.transactions.filter(isLedgerTransaction)
+  // Same helper computeProjection's own horizon end comes from, so the
+  // sections tile the window exactly — no gap at either edge, and the
+  // final section's closing balance is the projected balance by
+  // construction rather than by coincidence.
+  const cycles = horizonCycles(payCycle, horizon, new Date())
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
@@ -678,6 +910,8 @@ function PersonalDetail({
         <CategoryGroupedList transactions={ledgerTxns} data={data} />
       ) : order === 'amount' ? (
         <AmountOrderedList transactions={ledgerTxns} data={data} />
+      ) : cycleTotals ? (
+        <CycleGroupedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} cycles={cycles} />
       ) : (
         <DateOrderedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.clearedBalance} showCleared={showCleared} onToggleCleared={() => setShowCleared(!showCleared)} />
       )}

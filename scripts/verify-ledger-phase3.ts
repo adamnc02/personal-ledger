@@ -142,7 +142,10 @@ const currentCycleEnd = horizonRangeEnd(payCycle, 'current_cycle', asOf)
 check('current_cycle horizon (cycleStartDayOfMonth=1) ends 30 June', fmt(currentCycleEnd), '2026-06-30')
 
 const threeCycleEnd = horizonRangeEnd(payCycle, 'three_cycles', asOf)
-check('three_cycles horizon ends 31 August (June + July + August)', fmt(threeCycleEnd), '2026-08-31')
+// current + THREE_CYCLES_AHEAD, so from a 15 June reference: June
+// (current) + July + August + September, ending 30 Sept. Was 31 August
+// back when the horizon covered current + 2.
+check('three_cycles horizon ends 30 September (June + July + August + September)', fmt(threeCycleEnd), '2026-09-30')
 
 const currentProjection = computeProjection(data, 'me', payCycle, 'current_cycle', asOf)
 check('Current-cycle projection clearedBalance = opening + the one cleared expense', currentProjection.clearedBalance, 1000 - 200)

@@ -5,7 +5,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { Plus, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, X, Info, AlertTriangle } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { summarizeLoan, summarizeLoanProgress, estimateSettlementFigure, findLenderCalibrationProfile, previewOverpaymentRecast, previewRecurringOverpaymentRecast, buildLoanLedgerRows, loanFinishInfo, isLoanConfidentlyCalibrated, MAX_CALIBRATION_LINES, type CalibrationResult, type LoanLedgerRowType } from '../lib/ledgerLoans'
-import { computeMinimumPaymentAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
+import { nextMinimumChargeAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
 import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
@@ -202,7 +202,12 @@ export function Loans() {
             // `storedCard` for its editable balance field; see
             // CreditCardEditPanel for why those must not be confused.
             const card = withLiveBalance(storedCard, data.transactions)
-            const minPayment = computeMinimumPaymentAmount(card)
+            // Routed through the shared generator so this row honours
+            // per-date minimumPaymentOverrides exactly as the Summary
+            // page and the ledger modal do; computeMinimumPaymentAmount
+            // is date-blind and silently ignored them. See
+            // nextMinimumChargeAmount.
+            const minPayment = nextMinimumChargeAmount(storedCard, data.transactions) ?? 0
             const isOpen = expandedCard === card.id
             return (
               <CreditCardRow

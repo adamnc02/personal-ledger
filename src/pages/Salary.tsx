@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { formatCurrency } from '../lib/format'
 import { useLedgerData } from '../context/LedgerContext'
 import { calculateNetSalary, type StudentLoanPlan, type PayFrequency, type SalaryDeduction, type DeductionType } from '../lib/tax'
+import { THREE_CYCLES_AHEAD } from '../lib/projection'
 import { findApplicableSnapshot, computeNetPayForPeriod, upcomingPaydays, closedPaydays } from '../lib/salaryLedger'
 import { calculateBonusOnTop } from '../lib/tax'
 import { monthlyAmountForEntry } from '../lib/savings'
@@ -657,7 +658,7 @@ function PayCycleSettingsModal({
   )
 }
 
-// ── Pay periods — upcoming (next 3) + collapsed history, both tappable into the SAME unified editor ──
+// ── Pay periods — upcoming (next 4) + collapsed history, both tappable into the SAME unified editor ──
 
 function PayPeriodsSection({
   person,
@@ -685,7 +686,12 @@ function PayPeriodsSection({
   }, [flashDates])
 
   const today = new Date()
-  const upcoming = upcomingPaydays(payCycle, today, 3).map(toLocalIsoDate)
+  // 4, matching the Summary page's "Next 3 cycles" horizon (current +
+  // THREE_CYCLES_AHEAD). These two views are read side by side, so a
+  // payday that Summary projects into its window but Salary doesn't list
+  // reads as a missing period rather than a difference of horizon.
+  // Sourced from the shared constant so the two can't drift apart.
+  const upcoming = upcomingPaydays(payCycle, today, 1 + THREE_CYCLES_AHEAD).map(toLocalIsoDate)
   const closed = closedPaydays(payCycle, today, 6).map(toLocalIsoDate)
 
   // Saving "just this" period only ever affects the one row being edited.

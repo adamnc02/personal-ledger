@@ -24,14 +24,29 @@ import { toLocalIsoDate as toIso } from './date'
 
 export type ProjectionHorizon = 'current_cycle' | 'three_cycles'
 
-/** The end of the projection window: the current cycle's end, or the end of the cycle two ahead of it (i.e. 3 cycles total, current + 2 more). */
-export function horizonRangeEnd(payCycle: PayCycleConfig, horizon: ProjectionHorizon, asOfDate: Date): Date {
-  const current = cycleBoundsForDate(asOfDate, payCycle)
-  if (horizon === 'current_cycle') return current.end
+/**
+ * How many cycles AHEAD of the current one the `three_cycles` horizon
+ * covers. The window is the current cycle plus this many more, so the
+ * label "Next 3 cycles" names the three genuinely-upcoming ones rather
+ * than counting the part-elapsed current cycle among them.
+ */
+export const THREE_CYCLES_AHEAD = 3
 
-  const next1 = cycleBoundsForDate(addDays(current.end, 1), payCycle)
-  const next2 = cycleBoundsForDate(addDays(next1.end, 1), payCycle)
-  return next2.end
+/** Every cycle window inside the horizon, in order, starting with the one containing `asOfDate`. The Summary page's cycle-end grouping folds its rows against exactly these bounds, so grouping and totals can't disagree with the horizon they're drawn from. */
+export function horizonCycles(payCycle: PayCycleConfig, horizon: ProjectionHorizon, asOfDate: Date): { start: Date; end: Date }[] {
+  const cycles = [cycleBoundsForDate(asOfDate, payCycle)]
+  if (horizon === 'current_cycle') return cycles
+
+  for (let i = 0; i < THREE_CYCLES_AHEAD; i++) {
+    cycles.push(cycleBoundsForDate(addDays(cycles[cycles.length - 1].end, 1), payCycle))
+  }
+  return cycles
+}
+
+/** The end of the projection window: the current cycle's end, or the end of the last cycle in the horizon (current + THREE_CYCLES_AHEAD). */
+export function horizonRangeEnd(payCycle: PayCycleConfig, horizon: ProjectionHorizon, asOfDate: Date): Date {
+  const cycles = horizonCycles(payCycle, horizon, asOfDate)
+  return cycles[cycles.length - 1].end
 }
 
 /**
@@ -105,27 +120,34 @@ export function computeProjectionToDate(
   // the one place `stored` gets assembled, so both the balance maths and
   // the displayed list stay consistent with each other automatically.
   //
-  // EXCEPT a logged overpayment (loan or credit card lump payment) —
-  // confirmed as a real bug, not just an edge case: a person retroactively
-  // logging a real overpayment that happened to predate their opening
-  // balance reconciliation point (routine when backfilling a loan's
-  // history, or logging something from before they started using the
-  // app) had it silently vanish from both the displayed ledger AND the
-  // balance maths entirely — reproduced directly, confirmed by moving the
-  // same transaction's date to either side of openingBalanceDate. Unlike
-  // an old routine bill payment (genuinely fine to hide — it's already
-  // baked into whatever opening balance was reconciled), an overpayment
-  // is the person explicitly telling the app about a real, deliberate
-  // cash event; silently dropping it means the app's own numbers stop
-  // matching reality in exactly the way this whole engine exists to
-  // prevent. So it's exempted from the floor specifically, not the floor
-  // loosened generally — routine historical clutter should still hide.
-  const stored = data.transactions.filter(
-    (t) =>
-      t.location === 'personal' &&
-      t.ownerId === personId &&
-      (t.date >= payCycle.openingBalanceDate || t.sourceType === 'loan_overpayment' || t.sourceType === 'loan_recurring_overpayment' || t.sourceType === 'credit_card_lump_payment'),
-  )
+  // This floor applies to EVERYTHING, overpayments included. An earlier
+  // revision exempted loan overpayments and credit card lump payments
+  // from it, to stop a retroactively-logged overpayment "vanishing" —
+  // but that exemption was both unbounded and aimed at the wrong target,
+  // and produced a worse bug than the one it fixed. Reproduced directly:
+  // a £40 overpayment dated 2025-02-22 against an opening balance
+  // reconciled at 2026-08-22 moved clearedBalance from £570.95 to
+  // £530.95 — cash counted as leaving the account eighteen months AFTER
+  // it actually did, and already inside the reconciled opening figure.
+  // That's double-counting, which is precisely what a reconciliation
+  // point exists to prevent.
+  //
+  // The original concern was real but belongs elsewhere: an overpayment
+  // still has to affect the LOAN, and it does, independently of this
+  // file. buildLoanSchedule reads loan.overpayments directly (see
+  // ledgerLoans.ts) and cardBalanceAsOf replays against the card's own
+  // balanceAsOfDate anchor — neither consults payCycle.openingBalanceDate
+  // at all. Verified by scripts/verify-overpayment-independence.ts: the
+  // same £40 still reduces Home Improvements' capitalRemaining by £40
+  // with this exemption gone. So the overpayment keeps every effect it
+  // legitimately has; all it loses is a place in a personal cash ledger
+  // that had already accounted for it.
+  //
+  // An overpayment dated on or after the opening balance date is
+  // unaffected and lands in cleared exactly as before, which is the
+  // ordinary case — log a loan today, overpay it in a fortnight, and it
+  // clears normally.
+  const stored = data.transactions.filter((t) => t.location === 'personal' && t.ownerId === personId && t.date >= payCycle.openingBalanceDate)
   const existingKeys = new Set(stored.map(dedupeKey).filter((k): k is string => k !== null))
 
   // Generation starts from the CURRENT cycle's start, not from asOfDate —

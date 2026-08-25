@@ -5,7 +5,7 @@
 // reads from directly — not the SVG rendering itself.
 
 import { summarizeLoan } from '../src/lib/ledgerLoans'
-import { computeProjection, horizonRangeEnd } from '../src/lib/projection'
+import { computeProjection, horizonRangeEnd, THREE_CYCLES_AHEAD } from '../src/lib/projection'
 import { monthlyAmountForEntry } from '../src/lib/savings'
 import type { AppDataV2, Loan, Person, PayCycleConfig } from '../src/types/ledger'
 import { defaultLedgerData } from '../src/lib/ledgerStorage'
@@ -84,7 +84,9 @@ const threeCycleEnd = horizonRangeEnd(payCycle, 'three_cycles', asOf)
 const projection = computeProjection(data, 'adam', payCycle, 'three_cycles', asOf)
 
 const goalContributions = projection.transactions.filter((t) => t.type === 'savings_contribution' && t.sourceId === 'goal-1' && t.status === 'pending')
-check('Projection window covers 3 upcoming paydays worth of contributions (Jun, Jul, Aug)', goalContributions.length, 3)
+// 4 now, not 3: the three_cycles horizon covers the current cycle plus
+// THREE_CYCLES_AHEAD, so from 15 June that's Jun, Jul, Aug AND Sep.
+check('Projection window covers 4 upcoming paydays worth of contributions (Jun, Jul, Aug, Sep)', goalContributions.length, 1 + THREE_CYCLES_AHEAD)
 
 // generateSavingsContributions computes each contribution's amount via
 // monthlyAmountForEntry(entry) using ITS OWN default `asOf` (real
@@ -94,7 +96,7 @@ const expectedMonthly = monthlyAmountForEntry(person.savingsEntries[0])
 check('Each generated contribution equals the goal-required monthly amount', goalContributions.every((t) => t.amount === expectedMonthly), true)
 
 const projectedTotal = 500 + goalContributions.reduce((sum, t) => sum + t.amount, 0)
-check('Projected goal total after 3 cycles = 500 existing + 3× the required monthly amount', projectedTotal, 500 + expectedMonthly * 3)
+check('Projected goal total = 500 existing + one required monthly amount per cycle in the horizon', projectedTotal, 500 + expectedMonthly * (1 + THREE_CYCLES_AHEAD))
 check('Projected total is comfortably under the £2000 target (percent calc will clamp correctly, not overflow)', projectedTotal <= 2000, true)
 
 // NB: date-only formatting here MUST go through the shared toLocalIsoDate

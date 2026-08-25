@@ -75,6 +75,37 @@ export function computeMinimumPaymentAmount(card: CreditCard): number {
 }
 
 /**
+ * The card's next minimum charge — the figure to show anywhere the app
+ * says "due" or "min. due" for a card.
+ *
+ * Prefer this over computeMinimumPaymentAmount at every DISPLAY site.
+ * computeMinimumPaymentAmount is a pure balance→minimum calculation with
+ * no notion of a date, and so cannot consult minimumPaymentOverrides at
+ * all. That gave the app two independent answers to one question: the
+ * Loans collapsed row and the Home card widget computed their own figure
+ * and ignored overrides, while the Summary page and the ledger modal
+ * routed through generateMinimumPaymentTransactions and honoured them.
+ * Reproduced: a card with the 14 Sep charge overridden to £100 showed
+ * £100 on Summary and the modal, £228.07 on Loans and Home, in the same
+ * session, from the same data.
+ *
+ * Routing every display site through the same generator that Summary and
+ * the modal already use makes divergence structurally impossible rather
+ * than merely currently-absent — an override, a lump payment landing
+ * before the charge date, and the interest-then-minimum ordering are all
+ * applied in exactly one place. Returns null when the card has no
+ * upcoming charge at all (inactive, or nothing owed).
+ */
+export function nextMinimumChargeAmount(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): number | null {
+  // 13 months, so a card whose payment day has already passed this month
+  // still finds next month's, and a full year of clamping edge cases
+  // (short months, Feb) can't produce an empty window.
+  const rangeEnd = new Date(asOfDate.getFullYear() + 1, asOfDate.getMonth() + 1, 0)
+  const upcoming = generateMinimumPaymentTransactions(card, asOfDate, rangeEnd, transactions)
+  return upcoming.length > 0 ? upcoming[0].amount : null
+}
+
+/**
  * What this card ACTUALLY owes as at `asOfDate` — the single source of
  * truth for every "outstanding"/"owed"/"remaining" figure in the app.
  *
@@ -471,7 +502,16 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   const earliestStoredMs = stored.length > 0 ? Math.min(...stored.map((t) => new Date(t.date).getTime())) : asOfDate.getTime()
   const rangeStart = new Date(Math.min(earliestStoredMs, asOfDate.getTime()))
   const rangeEnd = new Date(asOfDate.getFullYear() + 2, asOfDate.getMonth(), 1)
-  const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd).filter((t) => !storedDates.has(t.date))
+  // `transactions` MUST be passed through. Omitted, the generator falls
+  // back to its default empty list, so its opening balance becomes
+  // cardBalanceAsOf(card, [], rangeStart) — which with nothing to replay
+  // is just the raw anchor. Reproduced: a Santander card anchored at £0
+  // with £228.07 of real spend after the anchor produced NO rows at all
+  // (100% of £0 fails the generator's amount > 0 guard), so the modal
+  // showed an empty future for a card that genuinely owed £228.07. Any
+  // figure that did appear was a manual minimumPaymentOverride being
+  // echoed back, never something the modal had computed.
+  const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions).filter((t) => !storedDates.has(t.date))
 
   const rows: CreditCardMinimumChargeRow[] = [
     ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true })),
