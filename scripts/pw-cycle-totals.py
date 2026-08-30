@@ -36,14 +36,15 @@ with sync_playwright() as p:
     page.reload()
     page.wait_for_timeout(1800)
 
-    print('\n=== A. Toggle visibility across control combinations ===')
-    # Default is This cycle / List / Date -> toggle must be absent.
-    check('This cycle + List + Date: toggle hidden', not toggle_present(page))
+    print('\n=== A. Defaults on load — Next 3 cycles / List / Date / cycle-end totals ON ===')
+    check('"Next 3 cycles" is the selected cycle pill', page.get_by_text('Next 3 cycles', exact=True).count() >= 1)
+    check('toggle present by default (Next 3 cycles + List + Date)', toggle_present(page))
+    sw0 = page.get_by_role('switch').first
+    check('toggle is ON by default', sw0.get_attribute('aria-checked') == 'true')
+    # Cycle-end totals on by default -> section headers, not a plain pending list.
+    check('a "Current cycle" section header rendered by default', page.get_by_text('Current cycle', exact=True).count() >= 1)
 
-    page.get_by_text('Next 3 cycles', exact=True).first.click()
-    page.wait_for_timeout(500)
-    check('Next 3 cycles + List + Date: toggle shown', toggle_present(page))
-
+    print('\n=== B. Toggle visibility across control combinations ===')
     set_dropdown(page, 'Order by', 'Amount')
     check('Next 3 cycles + List + Amount: toggle hidden', not toggle_present(page))
     set_dropdown(page, 'Order by', 'Date')
@@ -56,38 +57,35 @@ with sync_playwright() as p:
 
     page.get_by_text('This cycle', exact=True).first.click()
     page.wait_for_timeout(400)
-    check('back to This cycle: toggle hidden', not toggle_present(page))
+    check('This cycle: toggle hidden', not toggle_present(page))
     page.get_by_text('Next 3 cycles', exact=True).first.click()
     page.wait_for_timeout(400)
+    check('back to Next 3 cycles: toggle shown again', toggle_present(page))
 
-    print('\n=== B. Switching the toggle on ===')
+    print('\n=== C. Switching the toggle off ===')
     sw = page.get_by_role('switch').first
-    check('toggle starts off', sw.get_attribute('aria-checked') == 'false')
+    check('toggle starts on (default)', sw.get_attribute('aria-checked') == 'true')
     sw.click()
     page.wait_for_timeout(600)
-    check('toggle now on', page.get_by_role('switch').first.get_attribute('aria-checked') == 'true')
+    check('toggle now off', page.get_by_role('switch').first.get_attribute('aria-checked') == 'false')
+    check('no cycle section headers once off', page.get_by_text('Current cycle', exact=True).count() == 0)
+    # Switch back on for the rest of the checks (matches the default state).
+    page.get_by_role('switch').first.click()
+    page.wait_for_timeout(600)
+    check('toggle back on', page.get_by_role('switch').first.get_attribute('aria-checked') == 'true')
 
-    headers = page.get_by_text('Current cycle', exact=True)
-    check('a "Current cycle" section header rendered', headers.count() >= 1)
-
+    print('\n=== D. Default collapse states (cycle-end totals) ===')
     subtotals = page.get_by_text('Balance at', exact=False)
     print(f'        section subtotal rows visible: {subtotals.count()}')
     # 4 sections, all collapsed by default -> 0 subtotal rows visible.
     check('0 subtotal rows visible (4 sections, all collapsed)', subtotals.count() == 0,
           f'got {subtotals.count()}')
 
-    print('\n=== C. Default collapse states ===')
-    body = page.inner_text('body')
-    check('"Nothing in this cycle." only appears for genuinely empty cycles',
-          True)  # informational; asserted via section count below
-
-    # Every cycle collapsed by default => Current cycle's header must show a figure.
     cur = page.get_by_text('Current cycle', exact=True).first
     row = cur.locator('xpath=ancestor::button[1]')
     row_text = row.inner_text()
     check('collapsed Current cycle header shows a £ figure', '£' in row_text, repr(row_text))
 
-    # Expand it; the figure should move off the header into the subtotal row.
     row.click()
     page.wait_for_timeout(500)
     row_text2 = page.get_by_text('Current cycle', exact=True).first.locator('xpath=ancestor::button[1]').inner_text()
@@ -95,11 +93,33 @@ with sync_playwright() as p:
     check('expanding adds a 1st subtotal row', page.get_by_text('Balance at', exact=False).count() == 1,
           f'got {page.get_by_text("Balance at", exact=False).count()}')
 
-    print('\n=== D. Cleared rows labelled ===')
-    check('a bold "Cleared" label is present somewhere in the sections',
-          'Cleared' in page.inner_text('body'))
+    print('\n=== E. Cleared payments hidden everywhere on the Summary page ===')
+    # Cleared payments must never render as rows, in any of the four
+    # views — cycle-grouped (currently active, expanded above), plain
+    # date-ordered, amount-ordered, or category-grouped. Every real
+    # backup accumulates cleared history, so if the hide were leaky this
+    # would catch it directly rather than relying on a synthetic fixture.
+    body = page.inner_text('body')
+    check('no bold "Cleared" label anywhere (cycle-end totals view)', 'Cleared' not in body, 'found "Cleared" in body text')
 
-    print('\n=== E. Console clean ===')
+    # Turn cycle-end totals off -> plain date-ordered list.
+    page.get_by_role('switch').first.click()
+    page.wait_for_timeout(500)
+    check('no "Cleared" label in the plain date-ordered view either', 'Cleared' not in page.inner_text('body'))
+    check('no leftover "Cleared (" toggle/count button', page.get_by_text('Cleared (', exact=False).count() == 0)
+
+    set_dropdown(page, 'Order by', 'Amount')
+    check('no "Cleared" label in the amount-ordered view', 'Cleared' not in page.inner_text('body'))
+    set_dropdown(page, 'Order by', 'Date')
+
+    set_dropdown(page, 'Group by', 'Category')
+    check('no "Cleared" label in the category-grouped view', 'Cleared' not in page.inner_text('body'))
+    set_dropdown(page, 'Group by', 'List')
+    # Restore cycle-end totals to match the default state for anything after this.
+    page.get_by_role('switch').first.click()
+    page.wait_for_timeout(500)
+
+    print('\n=== F. Console clean ===')
     # fonts.googleapis.com is blocked by some sandboxed/offline environments;
     # a webfont 403 says nothing about the app, so it isn't counted.
     ignorable = ('favicon', 'fonts.googleapis', 'fonts.gstatic', 'status of 403')

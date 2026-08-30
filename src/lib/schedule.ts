@@ -90,11 +90,26 @@ export function resolveTemplateAmount(template: RecurringTemplate, dateIso: stri
   return applicable[0]?.amount ?? template.amount
 }
 
-export function generateTransactionsForTemplate(
-  template: RecurringTemplate,
-  rangeStart: Date,
-  rangeEnd: Date,
-): Omit<Transaction, 'id'>[] {
+export interface RawOccurrence {
+  originalDate: string // the naturally-scheduled date, before any per-occurrence override
+  date: string // the displayed/effective date — same as originalDate unless overridden
+  amount: number
+}
+
+/**
+ * Walks a template's frequency/anchorDate forward across [rangeStart,
+ * rangeEnd] and returns every occurrence — shared by
+ * generateTransactionsForTemplate (which turns these into full
+ * Transaction shapes) and templateOccurrencePreviews (which needs the
+ * ORIGINAL date alongside the resolved one, for Expenses.tsx's
+ * per-occurrence edit/delete UI). A 'transaction'-kind template's
+ * occurrenceOverrides are applied here, once, so both callers see
+ * exactly the same resolved schedule — a deleted occurrence is dropped
+ * entirely, an edited one carries its overridden date/amount. Templates
+ * with kind 'bill' (or absent) never carry occurrenceOverrides, so this
+ * is a no-op for them.
+ */
+function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd: Date): RawOccurrence[] {
   if (!template.active) return []
   if (rangeEnd < rangeStart) return []
 
@@ -110,35 +125,68 @@ export function generateTransactionsForTemplate(
     iterations++
   }
 
-  const results: Omit<Transaction, 'id'>[] = []
+  const results: RawOccurrence[] = []
   while (cursor <= rangeEnd && iterations < MAX_OCCURRENCES) {
-    const dateIso = toIso(cursor)
-    results.push({
-      date: dateIso,
-      amount: resolveTemplateAmount(template, dateIso),
-      direction: 'out',
-      categoryId: template.categoryId,
-      paymentMethod: template.paymentMethod,
-      status: 'pending',
-      type: 'bill_payment',
-      location: template.location,
-      ownerId: template.ownerId,
-      payee: template.payee,
-      payeeSharePercent: template.payeeSharePercent,
-      sourceType: 'recurring_template',
-      sourceId: template.id,
-      // The specific bill's own name — without this, a row falls back to
-      // its category's name for display, which duplicates the category
-      // group header when viewed grouped by category (e.g. a "TV"
-      // category group whose own rows also just say "TV" instead of
-      // "TV License").
-      note: template.name,
-    })
+    const originalDate = toIso(cursor)
+    const override = template.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
+    if (!override?.deleted) {
+      results.push({
+        originalDate,
+        date: override?.date ?? originalDate,
+        amount: override?.amount ?? resolveTemplateAmount(template, originalDate),
+      })
+    }
     cursor = nextOccurrence(cursor, template, anchorDay)
     iterations++
   }
 
   return results
+}
+
+export function generateTransactionsForTemplate(
+  template: RecurringTemplate,
+  rangeStart: Date,
+  rangeEnd: Date,
+): Omit<Transaction, 'id'>[] {
+  const isTransactionKind = template.kind === 'transaction'
+  const isIncome = isTransactionKind && template.recurringTransactionType === 'income'
+
+  return walkOccurrences(template, rangeStart, rangeEnd).map((occ) => ({
+    date: occ.date,
+    amount: occ.amount,
+    direction: isTransactionKind ? (isIncome ? 'in' : 'out') : 'out',
+    categoryId: template.categoryId,
+    paymentMethod: template.paymentMethod,
+    status: 'pending',
+    type: isTransactionKind ? template.recurringTransactionType! : 'bill_payment',
+    location: template.location,
+    ownerId: template.ownerId,
+    payee: template.payee,
+    payeeSharePercent: template.payeeSharePercent,
+    sourceType: 'recurring_template',
+    sourceId: template.id,
+    // The specific bill's/recurring transaction's own name — without
+    // this, a row falls back to its category's name for display, which
+    // duplicates the category group header when viewed grouped by
+    // category (e.g. a "TV" category group whose own rows also just say
+    // "TV" instead of "TV License").
+    note: template.name,
+    personId: isIncome ? template.personId : undefined,
+  }))
+}
+
+/**
+ * Every upcoming occurrence for a 'transaction'-kind template, WITH its
+ * original scheduled date alongside the possibly-overridden display
+ * date/amount — Expenses.tsx's "next 12 upcoming" expand panel uses this
+ * (rather than generateTransactionsForTemplate directly) because an
+ * edit/delete on one of those rows has to key itself to the ORIGINAL
+ * slot (occurrenceOverrides' own key), regardless of what date that
+ * occurrence currently displays. 15 years covers even an annual
+ * frequency's `count` occurrences comfortably.
+ */
+export function templateOccurrencePreviews(template: RecurringTemplate, asOfDate: Date, count: number): RawOccurrence[] {
+  return walkOccurrences(template, asOfDate, addYears(asOfDate, 15)).slice(0, count)
 }
 
 /**

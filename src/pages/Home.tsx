@@ -9,7 +9,7 @@ import { computeJointSummary } from '../lib/jointLedger'
 import { nextMinimumChargeAmount, totalPaidForCard, withLiveBalance, withLiveBalances } from '../lib/creditCards'
 import { cycleBoundsForDate } from '../lib/payCycle'
 import { isLedgerTransaction, signedAmount } from '../lib/runningBalance'
-import { computeCycleSummary, compareByDateSalaryFirst, compareByDateDescSalaryFirst } from '../lib/cycleSummary'
+import { computeCycleSummary, compareByDateSalaryFirst } from '../lib/cycleSummary'
 import { SwipeCards } from '../components/SwipeCards'
 import { BankCard } from '../components/BankCard'
 import { ProgressRing } from '../components/ProgressRing'
@@ -105,11 +105,15 @@ function pendingNetTotal(transactions: Transaction[]): number {
 export function Home() {
   const { data } = useLedgerData()
   const [activeIndex, setActiveIndex] = useState(0)
-  const [horizon, setHorizon] = useState<ProjectionHorizon>('current_cycle')
+  // Defaults to "Next 3 cycles" with cycle-end (month-end) totals on —
+  // canShowCycleTotals also requires grouping 'list' + order 'date',
+  // which are themselves already the defaults below, so this combination
+  // renders the cycle-grouped view immediately rather than the plain
+  // date-ordered one.
+  const [horizon, setHorizon] = useState<ProjectionHorizon>('three_cycles')
   const [grouping, setGrouping] = useState<Grouping>('list')
   const [order, setOrder] = useState<Order>('date')
-  const [showCleared, setShowCleared] = useState(false)
-  const [cycleTotals, setCycleTotals] = useState(false)
+  const [cycleTotals, setCycleTotals] = useState(true)
 
   const deck = useMemo(() => buildDeck(data), [data])
   const safeIndex = Math.min(activeIndex, deck.length - 1)
@@ -158,8 +162,6 @@ export function Home() {
           setGrouping={setGrouping}
           order={order}
           setOrder={setOrder}
-          showCleared={showCleared}
-          setShowCleared={setShowCleared}
           cycleTotals={cycleTotalsActive}
         />
       </div>
@@ -380,8 +382,6 @@ function DeckDetail(props: {
   setGrouping: (v: Grouping) => void
   order: Order
   setOrder: (v: Order) => void
-  showCleared: boolean
-  setShowCleared: (v: boolean) => void
   cycleTotals: boolean
 }) {
   const { entry, data } = props
@@ -630,18 +630,20 @@ function formatCycleDate(iso: string): string {
  * than the sum of its own rows — those are different numbers, and only
  * the former answers "what will I actually have on the 13th".
  *
- * Cleared rows are folded into their cycle sections alongside pending
- * ones rather than living in a separate block at the bottom, so each
- * section reads as a complete picture of its own window. They're sorted
- * into the same ascending date order for that reason — the standalone
- * cleared block sorts descending (most recent first, as a history log),
- * but a descending run inside an ascending fold would make the running
- * balance jump around incoherently.
+ * Cleared rows are folded into the running-balance fold and each
+ * section's closing total the same as pending ones, so those figures
+ * stay correct — but cleared rows are NOT rendered as individual lines
+ * within an expanded section (Summary-page-wide: cleared payments are
+ * hidden from every view here, see DateOrderedList's own comment).
+ * `section.rows` (used for the fold/closing balance above) therefore
+ * stays the full set; only `visibleRows`, computed per section below at
+ * render time, drops cleared ones for display.
  *
- * Sections with no rows at all are still shown: an empty cycle is
- * meaningful information (nothing scheduled), and dropping it would make
- * the horizon look shorter than it is. Its subtotal is simply the
- * balance carried in from the previous cycle.
+ * Sections with no VISIBLE rows are still shown: an empty cycle (or one
+ * whose only activity has already cleared) is meaningful information,
+ * and dropping it would make the horizon look shorter than it is. Its
+ * subtotal is simply the balance carried in from the previous cycle (or
+ * folded through whatever cleared automatically).
  */
 function CycleGroupedList({
   transactions,
@@ -696,7 +698,12 @@ function CycleGroupedList({
     // or, for an empty cycle, whatever came in from the one before.
     const closing = rows.length > 0 ? rows[rows.length - 1].running : carried
     carried = closing
-    return { key: startIso, isCurrent: i === 0, startIso, endIso, rows, closing }
+    // Cleared payments are hidden from display everywhere on this page —
+    // computed here, AFTER `closing` above already folded every row
+    // (cleared included), so hiding them from the list can't change the
+    // balance figures.
+    const visibleRows = rows.filter(({ t }) => t.status !== 'cleared')
+    return { key: startIso, isCurrent: i === 0, startIso, endIso, rows, visibleRows, closing }
   })
 
   return (
@@ -728,10 +735,10 @@ function CycleGroupedList({
             {expanded && (
               <div className="px-3 pb-1">
                 <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-                  {section.rows.map(({ t, running }) => (
+                  {section.visibleRows.map(({ t, running }) => (
                     <TransactionRow key={t.id} t={t} data={data} runningBalance={running} />
                   ))}
-                  {section.rows.length === 0 && (
+                  {section.visibleRows.length === 0 && (
                     <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-3">Nothing in this cycle.</p>
                   )}
                 </div>
@@ -753,24 +760,29 @@ function CycleGroupedList({
   )
 }
 
+/**
+ * The list-by-date view — PENDING rows only. Cleared payments are
+ * deliberately hidden here (and from every other Summary-page view
+ * below) once they've settled: they're still fully counted in every
+ * balance figure — `openingRunningBalance` is the already-cleared
+ * balance the fold starts from, and the cycle-grouped view's closing
+ * totals fold the cleared amounts in too — there's simply no per-row
+ * "Cleared" list to expand into any more. A history of what's already
+ * cleared still exists, just not surfaced on this page.
+ */
 function DateOrderedList({
   transactions,
   data,
   openingRunningBalance,
-  showCleared,
-  onToggleCleared,
 }: {
   transactions: Transaction[]
   data: AppDataV2
   openingRunningBalance: number
-  showCleared: boolean
-  onToggleCleared: () => void
 }) {
   // Salary first within its own date (see compareByDateSalaryFirst) — the
   // running balance below is a fold in list order, so a bill sorted above
   // the salary that funds it would show a dip that never really happens.
   const pending = transactions.filter((t) => t.status === 'pending').sort(compareByDateSalaryFirst)
-  const cleared = transactions.filter((t) => t.status === 'cleared').sort(compareByDateDescSalaryFirst)
 
   let running = openingRunningBalance
   const pendingWithRunning = pending.map((t) => {
@@ -784,18 +796,16 @@ function DateOrderedList({
         <TransactionRow key={t.id} t={t} data={data} runningBalance={running} />
       ))}
       {pending.length === 0 && <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">Nothing pending in this window.</p>}
-
-      <button onClick={onToggleCleared} className="flex items-center justify-between py-2.5 text-xs font-medium text-[var(--color-ink-muted)]">
-        <span>Cleared ({cleared.length})</span>
-        {showCleared ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-      </button>
-      {showCleared && cleared.map((t) => <TransactionRow key={t.id} t={t} data={data} />)}
     </div>
   )
 }
 
+/** Cleared payments are hidden from this view too (Summary-page-wide rule — see DateOrderedList's comment); this list has no separate calculation to preserve, so they're simply excluded up front. */
 function AmountOrderedList({ transactions, data }: { transactions: Transaction[]; data: AppDataV2 }) {
-  const sorted = transactions.slice().sort((a, b) => b.amount - a.amount)
+  const sorted = transactions
+    .filter((t) => t.status !== 'cleared')
+    .slice()
+    .sort((a, b) => b.amount - a.amount)
   return (
     <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
       {sorted.map((t) => (
@@ -806,6 +816,7 @@ function AmountOrderedList({ transactions, data }: { transactions: Transaction[]
   )
 }
 
+/** Cleared payments are hidden from the row listing here too (Summary-page-wide rule), but the per-category TOTAL/heading figure still includes them — `items` (used for the total) stays the full list; only `visibleItems`, computed per group at render time, drops cleared ones. */
 function CategoryGroupedList({ transactions, data }: { transactions: Transaction[]; data: AppDataV2 }) {
   // Collapse state is tracked as the set of groups explicitly COLLAPSED,
   // not the set expanded — so expanded stays the default for every group,
@@ -845,6 +856,7 @@ function CategoryGroupedList({ transactions, data }: { transactions: Transaction
         // outright — the bucket itself is still meaningful either way.
         const fallbackName = groupKey === LOANS_GROUP_CATEGORY_ID ? 'Loans' : groupKey === CREDIT_CARD_CATEGORY_ID ? 'Credit Card' : 'Uncategorised'
         const total = items.reduce((s, t) => s + (t.direction === 'in' ? t.amount : -t.amount), 0)
+        const visibleItems = items.filter((t) => t.status !== 'cleared')
         const isCollapsed = collapsed.has(groupKey)
         return (
           <div key={groupKey}>
@@ -852,7 +864,7 @@ function CategoryGroupedList({ transactions, data }: { transactions: Transaction
               <CategoryIcon category={category} size={13} />
               <span className="text-xs font-semibold text-[var(--color-ink)] flex-1">
                 {category?.name ?? fallbackName}
-                {isCollapsed && <span className="font-normal text-[var(--color-ink-faint)]"> · {items.length}</span>}
+                {isCollapsed && <span className="font-normal text-[var(--color-ink-faint)]"> · {visibleItems.length}</span>}
               </span>
               <span className="text-xs font-mono" style={{ color: total >= 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
                 {total >= 0 ? '+' : '-'}£{formatCurrency(Math.abs(total))}
@@ -861,9 +873,10 @@ function CategoryGroupedList({ transactions, data }: { transactions: Transaction
             </button>
             {!isCollapsed && (
               <div className="flex flex-col divide-y pl-6" style={{ borderColor: 'var(--color-track)' }}>
-                {items.map((t) => (
+                {visibleItems.map((t) => (
                   <TransactionRow key={t.id} t={t} data={data} />
                 ))}
+                {visibleItems.length === 0 && <p className="text-[11px] text-[var(--color-ink-faint)] py-2">Everything here has already cleared.</p>}
               </div>
             )}
           </div>
@@ -879,16 +892,12 @@ function PersonalDetail({
   horizon,
   grouping,
   order,
-  showCleared,
-  setShowCleared,
   cycleTotals,
 }: {
   data: AppDataV2
   horizon: ProjectionHorizon
   grouping: Grouping
   order: Order
-  showCleared: boolean
-  setShowCleared: (v: boolean) => void
   cycleTotals: boolean
 }) {
   const payCycle = data.payCycles.find((pc) => pc.personId === data.primaryPersonId)
@@ -913,7 +922,7 @@ function PersonalDetail({
       ) : cycleTotals ? (
         <CycleGroupedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} cycles={cycles} />
       ) : (
-        <DateOrderedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.clearedBalance} showCleared={showCleared} onToggleCleared={() => setShowCleared(!showCleared)} />
+        <DateOrderedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.clearedBalance} />
       )}
 
       <ProgressRingsSection data={data} horizon={horizon} projection={projection} />

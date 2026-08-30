@@ -211,6 +211,54 @@ export interface RecurringTemplate {
   // resolving "what applied on date X" is the same kind of
   // latest-entry-not-after-X lookup either way.
   amountHistory?: { effectiveFrom: string; amount: number }[]
+
+  // ── Recurring TRANSACTIONS (Expenses.tsx's "Recurring" pill) ──────────
+  // A RecurringTemplate normally represents a bill (see file header).
+  // `kind` generalises it to also cover a recurring ad-hoc expense/
+  // income set up from the Transactions page — same schedule engine
+  // (frequency/anchorDate/amountHistory all still apply), but it
+  // generates plain 'expense'/'income' transactions instead of
+  // 'bill_payment' ones, and is always location: 'personal' (no joint
+  // concept for these). Absent/'bill' is the default, so every template
+  // persisted before this field existed keeps behaving exactly as
+  // before with no migration needed.
+  kind?: 'bill' | 'transaction'
+  // Required when kind === 'transaction' — which ad-hoc type each
+  // generated occurrence becomes. Mirrors AdHocInput's 'expense'|'income'
+  // (LedgerContext.tsx) — direction 'out'/type 'expense' vs direction
+  // 'in'/type 'income'.
+  recurringTransactionType?: 'expense' | 'income'
+  // Whose income this is, for a 'transaction'-kind template with
+  // recurringTransactionType 'income' — mirrors addAdHocTransaction's
+  // personId, set on every generated income occurrence the same way a
+  // hand-logged one is. Not used for 'expense' (ownerId already carries
+  // whose account it's against, same as an ad-hoc expense never setting
+  // personId — see Transaction.personId's own comment above) or for
+  // kind 'bill'.
+  personId?: string
+  // Per-occurrence edits/deletions for a 'transaction'-kind template,
+  // keyed by the occurrence's ORIGINAL scheduled date (i.e. the date the
+  // frequency/anchorDate would naturally produce, before any override) —
+  // so a repeatedly-edited occurrence keeps resolving to the same slot
+  // even after its displayed date has moved. Tapping one of the "next 12
+  // upcoming" rows on the Transactions page (Expenses.tsx) writes an
+  // entry here: an amount and/or date change that applies ONLY to that
+  // single occurrence, overriding the template's frequency-derived
+  // date/amount for that slot alone — the trash icon on that same row
+  // instead writes `deleted: true`, removing it from the generated
+  // schedule entirely. Distinct from amountEffectiveFrom/amountHistory
+  // above, which still work exactly the same way on a 'transaction'
+  // template too, for "change the STANDING amount, effective from a
+  // chosen upcoming occurrence onward" (the same "which payment should
+  // this apply from" flow Bills.tsx already has).
+  occurrenceOverrides?: RecurringOccurrenceOverride[]
+}
+
+export interface RecurringOccurrenceOverride {
+  originalDate: string // ISO date — the naturally-scheduled date this override replaces
+  date?: string // overridden date; absent = originalDate unchanged
+  amount?: number // overridden amount; absent = the template's normal resolved amount
+  deleted?: boolean // true = this occurrence is skipped entirely — never generated, never shown
 }
 
 // ── Loan — updated inputs, native overpayments ─────────────────────────
