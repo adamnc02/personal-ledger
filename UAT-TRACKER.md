@@ -32,16 +32,32 @@ too). No `lib/` files touched, so the `verify-*.ts` suite is unaffected by this 
 - [x] Transfer form "From" location made editable (currently locked to Current Account) —
       `src/pages/Expenses.tsx` + real engine fix, see notes below
 
-## Batch 3 — Pot/location display bugs
-- [ ] Pot creation gets a new/existing → opening balance/date step, matching Joint Account
+## Batch 3 — Pot/location display bugs — ✅ DONE, awaiting your UAT
+- [x] Pot creation gets a new/existing → opening balance/date step, matching Joint Account
       and Savings Pot flows (currently hardcoded to £0, which is the root cause of the
-      "£100 total" bug — see below)
-- [ ] "What this pot pays" header shows opening balance + net activity (Joint Account style),
-      not raw balance
-- [ ] "Joint" pill added to joint bills in the Bills list (alongside existing pot pill)
-- [ ] Flatten Location + Pot into a single picker on Bills/Loans edit forms
-- [ ] Recurring deposit step 2 card gets Save/Cancel and becomes collapsible
-- [ ] Recurring deposit step 1 buttons → full-width pill style
+      "£100 total" bug — see below) — `src/pages/Salary.tsx` (`PotForm`)
+- [x] Pot's Wallet-page row shows opening balance + net activity (Joint Account style),
+      not raw balance — `src/pages/Salary.tsx` (`PotRow`)
+- [x] "Joint" pill added to joint bills in the Bills list (alongside existing pot pill) —
+      `src/pages/Bills.tsx`
+- [x] Flatten Location + Pot into a single picker on Bills/Loans edit forms —
+      `src/components/LocationEditor.tsx` (shared by both pages)
+- [x] Recurring deposit step 2 card gets Save/Cancel and becomes collapsible —
+      `src/pages/Salary.tsx` (`RecurringExistingDeposit`, split out of `RecurringTransferEditor`)
+- [x] Recurring deposit step 1 buttons → full-width pill style — `src/pages/Salary.tsx`
+      (`RecurringTransferEditor`, now uses the shared `FormButtonRow`)
+
+Verified: `tsc -b` clean against baseline throughout. No `lib/` files touched — pure UI/
+display plus one call-site fix (`PotForm` now passes a real `openingBalance`/`openingDate`
+into the already-existing `newPot`), so full `verify-*.ts` suite re-run with no new
+regressions (same two pre-existing gaps as every prior session: missing
+`backup-2026-08-24.json` fixture, `verify-purchase-scenario.ts`'s three
+`cycleStartFollowsPayday` failures). Also driven live in a headless-Chromium browser against
+Adam's real fixture backup (`scripts/fixtures/backup-2026-09-02.json`) — created a real pot
+with a £350 opening balance, confirmed the Wallet row's opening/net-activity breakdown,
+added/edited/cancelled/saved a recurring deposit (collapse + draft-revert-on-Cancel all
+confirmed), and set a bill to Joint via the flattened Bills-page picker, confirming both the
+Joint pill and the first-time joint-account-setup prompt fire correctly.
 
 ## Batch 4 — Logic/data bugs (needs sign-off on exact rules before starting)
 - [ ] Salary Sort → generate real Transfer-page transfers (not just ledger transactions);
@@ -96,3 +112,22 @@ unconditionally, which — separately — would have wrongly leaked a Pot→Pot 
 transfer into the *personal* ledger too) — fixed via a new shared
 `locationTypeForTransfer` helper (`lib/transferLedger.ts`) plus a dedicated
 autoClear.ts materialization pass scoped to exactly this case.
+
+**2026-09-04 — Batch 3, two checklist items clarified before building.** Two of the six
+items read as more concrete than the actual code supported, so confirmed with Adam rather
+than guessed:
+- *"'What this pot pays' header shows opening balance + net activity, not raw balance"* —
+  the literal string "What this pot pays" only exists on the bill/loan checklist label
+  (no balance display there at all); the plain-balance display Adam actually meant was the
+  Wallet page's collapsed pot row. Confirmed: Wallet page pot row, not the checklist label,
+  not the Summary-page detail card (which already showed `£X now · £Y projected`).
+- *"Recurring deposit step 2 card gets Save/Cancel and becomes collapsible"* — the existing
+  recurring-deposit editor auto-saved every field live, no draft state. Confirmed: convert
+  to a real draft-then-commit pattern (Cancel reverts, Save commits), collapsed by default
+  — not just bolting a no-op Save button onto the existing live-editing behaviour.
+
+Also found and fixed one near-miss while building the Joint pill: the app already has a
+`--color-joint` CSS token, but it's `#fdfdfd` (a near-white `BankCard` background fill, not
+a badge accent) — using it for white-on-token badge text would have reproduced the exact
+invisible-Cancel-button bug from Batch 2, just on a new element. Used a neutral outlined
+pill (same border-based approach as that fix) instead.
