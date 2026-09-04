@@ -810,7 +810,16 @@ function RecurringTransferEditor({
   return <RecurringExistingDeposit template={existing!} onUpdate={onUpdate} onRemove={onRemove} />
 }
 
-/** The already-configured-template half of RecurringTransferEditor, above — split out once it needed its own draft/collapse state. Batch 3 (2026-09-04 UAT): this used to live-save every field the instant it changed and was always expanded; now a collapsed one-line summary by default (tap to expand), and edits are a local draft that only commits on Save/reverts on Cancel — matching every other editable card in this file (PotRow, SavingsPotRow) rather than being the one live-editing exception. */
+/** The already-configured-template half of RecurringTransferEditor, above — split out once it needed its own draft/collapse state. Batch 3 (2026-09-04 UAT): this used to live-save every field the instant it changed and was always expanded; now a collapsed one-line summary by default (tap to expand), and edits are a local draft that only commits on Save/reverts on Cancel — matching every other editable card in this file (PotRow, SavingsPotRow) rather than being the one live-editing exception.
+ *
+ * Batch 4 (2026-09-04 UAT): gained the same mutually-exclusive
+ * `followsCycleStart` checkbox the Transfer page's own recurring-transfer
+ * form already has, worded identically ("Land on payday, even if it
+ * moves" / "Land on the start of my budgeting cycle instead") — plus the
+ * "On day of month" field greys out (and is functionally frozen, via
+ * EditField's new `disabled`) whenever either checkbox is ticked, since
+ * the day only matters when neither payday nor cycle-start governs the
+ * date. */
 function RecurringExistingDeposit({
   template,
   onUpdate,
@@ -824,11 +833,13 @@ function RecurringExistingDeposit({
   const [draftAmount, setDraftAmount] = useState(template.amount)
   const [draftDay, setDraftDay] = useState(new Date(template.anchorDate).getDate())
   const [draftFollowsPayday, setDraftFollowsPayday] = useState(!!template.followsPayday)
+  const [draftFollowsCycleStart, setDraftFollowsCycleStart] = useState(!!template.followsCycleStart)
 
   function startEditing() {
     setDraftAmount(template.amount)
     setDraftDay(new Date(template.anchorDate).getDate())
     setDraftFollowsPayday(!!template.followsPayday)
+    setDraftFollowsCycleStart(!!template.followsCycleStart)
     setExpanded(true)
   }
 
@@ -840,12 +851,15 @@ function RecurringExistingDeposit({
           <p className="text-xs text-[var(--color-ink-muted)]">
             £{formatCurrency(template.amount)}/mo · day {new Date(template.anchorDate).getDate()}
             {template.followsPayday ? ' · follows payday' : ''}
+            {template.followsCycleStart ? ' · follows cycle start' : ''}
           </p>
         </div>
         <ChevronDown size={16} className="text-[var(--color-ink-muted)] shrink-0" />
       </button>
     )
   }
+
+  const dayFieldDisabled = draftFollowsPayday || draftFollowsCycleStart
 
   return (
     <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
@@ -857,11 +871,35 @@ function RecurringExistingDeposit({
       </div>
       <div className="grid grid-cols-2 gap-2">
         <EditField label="Amount (£)" type="number" value={draftAmount} onChange={(v) => setDraftAmount(Number(v) || 0)} />
-        <EditField label="On day of month" type="number" value={draftDay} onChange={(v) => setDraftDay(Math.min(31, Math.max(1, Number(v) || 1)))} />
+        <EditField
+          label="On day of month"
+          type="number"
+          value={draftDay}
+          onChange={(v) => setDraftDay(Math.min(31, Math.max(1, Number(v) || 1)))}
+          disabled={dayFieldDisabled}
+        />
       </div>
       <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
-        <input type="checkbox" checked={draftFollowsPayday} onChange={(e) => setDraftFollowsPayday(e.target.checked)} />
+        <input
+          type="checkbox"
+          checked={draftFollowsPayday}
+          onChange={(e) => {
+            setDraftFollowsPayday(e.target.checked)
+            if (e.target.checked) setDraftFollowsCycleStart(false)
+          }}
+        />
         Land on payday, even if it moves
+      </label>
+      <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+        <input
+          type="checkbox"
+          checked={draftFollowsCycleStart}
+          onChange={(e) => {
+            setDraftFollowsCycleStart(e.target.checked)
+            if (e.target.checked) setDraftFollowsPayday(false)
+          }}
+        />
+        Land on the start of my budgeting cycle instead
       </label>
       <RecurringTransferPauseControl template={template} onUpdate={(updates) => onUpdate(template.id, updates)} />
       <FormButtonRow
@@ -869,7 +907,12 @@ function RecurringExistingDeposit({
         onSave={() => {
           const anchor = new Date(template.anchorDate)
           anchor.setDate(draftDay)
-          onUpdate(template.id, { amount: draftAmount, anchorDate: toLocalIsoDate(anchor), followsPayday: draftFollowsPayday })
+          onUpdate(template.id, {
+            amount: draftAmount,
+            anchorDate: toLocalIsoDate(anchor),
+            followsPayday: draftFollowsPayday,
+            followsCycleStart: draftFollowsCycleStart,
+          })
           setExpanded(false)
         }}
         saveDisabled={!(draftAmount > 0)}

@@ -85,7 +85,7 @@ showing on Adam's pay-period rows once a pot/joint account exist.
       pot → pot, which is nonsensical)
 - [x] Joint bill shares should not appear in the Personal ledger at all; Joint ledger should
       show full bill amount, not the per-person share
-- [ ] "Land on cycle period" option added alongside "follow payday"; checkboxes grey out
+- [x] "Land on cycle period" option added alongside "follow payday"; checkboxes grey out
       day-of-month field when ticked; wording matched with Transfers page; row collapsible
 - [x] Deletion guard: transactions/bills/transfers created **today** hard-delete regardless
       of cleared status (this is also what fixes the stray pot balance bug above)
@@ -236,3 +236,29 @@ into this merged form, checking a bill shows it as dirty, and Save persists both
 the bill's new location together (collapsed summary correctly updates to "pays 1 bill/loan").
 Pure UI change, no `lib/` files touched — confirmed by direct code review plus a clean
 `tsc -b` rather than a verify script.
+
+**2026-09-04 — Batch 4, item 4 (cycle-start option on the pot/savings/joint recurring-deposit
+editor) — built and live-tested.** The Transfer page's own recurring-transfer form already
+had both `followsPayday` and `followsCycleStart`, correctly worded and mutually exclusive —
+only Salary.tsx's `RecurringExistingDeposit` (the Pots/Savings/Joint Wallet-card editor) was
+missing `followsCycleStart` entirely, and neither checkbox greyed out the "On day of month"
+field. Added the second checkbox with the exact same wording as the Transfer page ("Land on
+payday, even if it moves" / "Land on the start of my budgeting cycle instead"), mutual
+exclusivity, and `disabled` on the day field whenever either is ticked — `EditField`
+(`components/EditField.tsx`) gained a `disabled` prop (threading through to `NumberInput`,
+which already forwarded arbitrary input props) since nothing in the app needed a disabled
+form field before this. The row was already collapsible from Batch 3, unchanged. Verified
+live: created a recurring deposit, opened its editor, confirmed both checkboxes toggle each
+other off and the day field visibly greys out under either. `tsc -b` + full verify suite
+re-run: no new regressions.
+
+**Flagged, not fixed (out of Batch 4's five-item scope) — pot bill/loan checklist can list
+the pot's own recurring-deposit transfer template as if it were a payable bill.**
+`potEligibleItems` (`Salary.tsx`, moved verbatim from the pre-existing
+`PotBillsAndLoansControl` during item 6's relocation) filters templates by `ownerId`/
+`location` only, with no `kind` check — so a `kind: 'transfer'` recurring deposit into the
+pot (named after the pot itself, e.g. "Bills Pot") shows up in "What this pot pays" alongside
+real bills, checkable as if it could be reassigned there. Pre-existing behaviour, not
+introduced by this session; noticed live-testing item 4, not one of the five signed-off Batch
+4 items, so left as-is — flagged for a future pass (likely fix: add `t.kind !== 'transfer'`
+to the eligible-templates filter).

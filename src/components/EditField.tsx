@@ -6,13 +6,14 @@ interface EditFieldProps {
   onChange: (v: string) => void
   type?: string
   inputRef?: React.RefObject<HTMLInputElement | null>
+  disabled?: boolean
 }
 
 const INPUT_CLASS = 'w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono'
 
-export function EditField({ label, value, onChange, type = 'text', inputRef }: EditFieldProps) {
+export function EditField({ label, value, onChange, type = 'text', inputRef, disabled }: EditFieldProps) {
   return (
-    <label className="flex flex-col gap-1">
+    <label className={`flex flex-col gap-1 ${disabled ? 'opacity-40' : ''}`}>
       <span className="text-xs text-[var(--color-ink-muted)]">{label}</span>
       {type === 'number' ? (
         // Routed through NumberInput rather than a plain controlled
@@ -20,13 +21,14 @@ export function EditField({ label, value, onChange, type = 'text', inputRef }: E
         // header for the leading-zero bug this fixes. Every numeric
         // EditField in the app inherits the fix from here, which is why
         // it's applied at this level rather than call site by call site.
-        <NumberInput value={value} onChange={onChange} className={INPUT_CLASS} inputRef={inputRef} />
+        <NumberInput value={value} onChange={onChange} className={INPUT_CLASS} inputRef={inputRef} disabled={disabled} />
       ) : (
         <input
           ref={inputRef}
           type={type}
           value={value}
           onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
           className={INPUT_CLASS}
           // Confirmed directly via real on-device measurements (not a
           // guess): iOS Safari renders a native `type="date"` input with
