@@ -168,13 +168,15 @@ const personalDataForA: AppDataV2 = {
   ],
 }
 
-// Confirm the ordinary personal projection DOES include a synthetic share
-// of the joint bill (generateJointContributionTransactions) — proving the
-// household filter below is actually removing something real, not a no-op.
+// UAT Batch 4 (2026-09-04, Adam-specified): the Personal ledger used to
+// include a synthetic share of the joint bill — deliberately reversed,
+// Personal now shows nothing about joint bills at all. The Household
+// filter (householdLedger.ts) is kept regardless, since it's still
+// correct for any already-stored cleared row from before that change.
 const personACycle = personalDataForA.payCycles.find((pc) => pc.personId === 'a')!
 const personalProjectionA = computeProjection(personalDataForA, 'a', personACycle, 'current_cycle', new Date('2026-09-20'))
 const personalHasJointShare = personalProjectionA.transactions.some((t) => t.sourceType === 'recurring_template' && t.sourceId === 'joint-rent')
-check('sanity check: Person A\'s OWN personal projection includes their share of the joint rent', personalHasJointShare, true)
+check('Person A\'s OWN personal projection does NOT include their share of the joint rent', personalHasJointShare, false)
 
 const householdA = computeHouseholdPersonProjection(personalDataForA, 'a', 'current_cycle', new Date('2026-09-20'))
 const householdHasJointShare = householdA?.transactions.some((t) => t.sourceType === 'recurring_template' && t.sourceId === 'joint-rent')

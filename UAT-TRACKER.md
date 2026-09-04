@@ -83,12 +83,14 @@ showing on Adam's pay-period rows once a pot/joint account exist.
       deleting a transfer zeroes its sort; clearing/deleting a sort deletes its transfers
 - [ ] Pot recurring-deposit flow needs its own From-location picker (currently implies
       pot → pot, which is nonsensical)
-- [ ] Joint bill shares should not appear in the Personal ledger at all; Joint ledger should
+- [x] Joint bill shares should not appear in the Personal ledger at all; Joint ledger should
       show full bill amount, not the per-person share
 - [ ] "Land on cycle period" option added alongside "follow payday"; checkboxes grey out
       day-of-month field when ticked; wording matched with Transfers page; row collapsible
 - [ ] Deletion guard: transactions/bills/transfers created **today** hard-delete regardless
       of cleared status (this is also what fixes the stray pot balance bug above)
+- [ ] Pots editable fields currently only name. Let’s make use of the space and permanently move the manage payments form this pot list into this dark-background form, still as a checklist, and drop the red inline text button to manage.
+- [ ] Savings/joint account/pots log deposit/withdrawl and recurring all need a location (to location if withdrawn, from location if deposit). Remember anything created here will auto create the transfer in the transactions page. Further to this, when creating a recurring, this should all be picker modals. First in the flow is the amount, second is the location (from or to based on deposit/withdrawal), third is frequency (options will be weekly, every n weeks, monthly, quarterly, annual, follow pay day or follow pay cycle), and if user selects weekly, every n weeks (gets it’s own step 3a to state number of weeks), monthly, quarterly or annually, then step 4 is a date picker. Step 3a and 4 get skipped if user selects follow payday or pay cycle (search the app for the commonly used wording). This is the standard for all recurring transfers (deposits or withdrawals). This should be the exact same flow when creating recurring transfers in the transactions page except we insert a to location after step 2. For log a deposit or withdrawal, flow is shorter, step 1 is amount, step 2 is from location. This is the same flow used on the transfer section in the transactions page, only has a step 3 for to location. If using the salary page to log these transactions, for deposits, the to location is whatever the deposit is being built on (pot, savings pot or joint account), and reversed for withdrawals, the from location is the target where the withdrawal is being built on.
 
 ---
 
@@ -157,3 +159,34 @@ deliberately moved off the Salary rows into a dedicated People modal in an earli
 me' at the top of the salary section" did NOT mean reversing that move — confirmed it means
 the primary person's row should always be sorted first in the Salary section's own list.
 The People modal remains the only place to actually change who's primary.
+
+**2026-09-04 — Batch 4, item 1 (Salary Sort → real transfers) found already built.** Before
+writing any code, cross-checked the checklist against the actual current code (per the
+"docs may describe an earlier plan, verify before relying on them" instruction) — the entire
+mechanism (`lib/salarySortLedger.ts`, `saveSalarySort`/`clearSalarySortTarget`/
+`clearSalarySort`/`dropSalarySortTarget` in `LedgerContext.tsx`, `SalarySortModal` in
+`Salary.tsx`) already existed, committed as part of the "8 days of uncommitted UAT work"
+snapshot predating Batch 1. Each sort target creates a real `type: 'transfer'` transaction
+(`sourceType: 'salary_sort'`) visible on the Transfer page; deleting it drops just that
+target from the sort; clearing a target/whole sort deletes the matching transaction(s).
+Confirmed with Adam this only needed live verification, not a rebuild — see live-testing
+notes once done.
+
+**2026-09-04 — Batch 4, item 3 (joint bill shares in Personal ledger) — root cause found and
+reversed.** `lib/jointLedger.ts`'s `generateJointContributionTransactions` was deliberately
+folding each person's own SHARE of every joint bill/loan into their Personal ledger
+projection (`projection.ts`) AND materializing it into a real, permanently-cleared
+Transaction once due (`autoClear.ts`) — built in an earlier session specifically to fix a
+then-flagged "joint costs invisible in Personal" gap. Adam's explicit call: reverse it
+entirely — Personal shows nothing about joint bills now, full stop. Removed both call sites;
+the generator function itself is kept (still used by `salarySortLedger.ts`'s joint-top-up
+suggestion, a pure calculation, never displayed as a personal transaction) and the Household
+card's own filter for this shape (`householdLedger.ts`) is deliberately left in place, since
+it's still correct for any transaction already materialized under the old code (cleared
+transactions are immutable historic fact, per the app's own rule — never retroactively
+rewritten). Checked Adam's real fixture backup (`backup-2026-09-02.json`) for any
+already-materialized "Your share of X" rows — none found, so no retroactive data cleanup was
+needed this time; flagged here in case an older backup ever surfaces one. Two verify scripts
+(`verify-ledger-phase3.ts`, `verify-joint-account.ts`) had "sanity check" assertions baked in
+that literally asserted the old (now-reversed) behaviour — updated to assert the new one.
+Full verify suite + `tsc -b` re-run: no new regressions (same pre-existing gaps as always).

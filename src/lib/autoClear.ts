@@ -33,7 +33,6 @@ import { resolvePensionAmount, generatePensionTransactions } from './pensionLedg
 import { generateSavingsContributions } from './savingsLedger'
 import { generateSavingsDepositTransactions, generateSavingsInterestTransactions, generateSavingsWithdrawalTransactions } from './savingsPotLedger'
 import { generatePotDepositTransactions, generatePotOutgoingTransactions } from './potLedger'
-import { generateJointContributionTransactions } from './jointLedger'
 import { dedupeKey } from './projection'
 import { applyClearSideEffects } from './clearTransaction'
 import { toLocalIsoDate } from './date'
@@ -197,8 +196,6 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
     for (const pot of (result.pots ?? []).filter((p) => p.personId === person.id && p.active)) {
       candidates.push(...generatePotDepositTransactions(pot, rangeStart, asOf))
     }
-    candidates.push(...generateJointContributionTransactions(result, person.id, rangeStart, asOf))
-
     for (const candidate of candidates) {
       if (candidate.date > asOfIso) continue // safety net — generators are already range-bounded to asOf, but never settle a future-dated one
       const key = dedupeKey(candidate)

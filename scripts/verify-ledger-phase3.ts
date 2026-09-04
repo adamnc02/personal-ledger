@@ -250,7 +250,12 @@ check(
 )
 check("Alice's rent share is 60% of £1000", aliceShareTxns.find((t) => t.note?.includes('Rent'))?.amount, 600)
 
-// ---- 6. Joint contribution folded into the person's OWN projection ----
+// ---- 6. Joint contribution NOT folded into the person's OWN projection ----
+// UAT Batch 4 (2026-09-04, Adam-specified): the Personal ledger used to
+// fold in each person's own SHARE of every joint bill/loan — deliberately
+// reversed. Personal shows nothing about joint bills at all now; the
+// Joint card (jointAccountLedger.ts) is the only place they appear, at
+// full amount.
 const alicePayCycle: PayCycleConfig = {
   personId: 'alice',
   openingBalance: 2000,
@@ -261,12 +266,12 @@ const alicePayCycle: PayCycleConfig = {
 }
 const jointDataWithCycle: AppDataV2 = { ...jointData, payCycles: [alicePayCycle] }
 const aliceProjection = computeProjection(jointDataWithCycle, 'alice', alicePayCycle, 'current_cycle', new Date(2026, 5, 15))
-check("Alice's own projection includes her joint rent share as a pending item", aliceProjection.transactions.some((t) => t.note?.includes('Rent') && t.amount === 600), true)
-check("Alice's own projection does NOT include the full £1000 rent anywhere (only her share)", aliceProjection.transactions.some((t) => t.amount === 1000), false)
+check("Alice's own projection does NOT include her joint rent share", aliceProjection.transactions.some((t) => t.note?.includes('Rent')), false)
+check("Alice's own projection does NOT include the full £1000 rent anywhere either", aliceProjection.transactions.some((t) => t.amount === 1000), false)
 check(
-  "Alice's projected balance reflects her joint share as a real outgoing",
+  "Alice's projected balance is unaffected by the joint bills entirely",
   aliceProjection.projectedBalance,
-  aliceProjection.clearedBalance - 600 - 120, // her 60% share of £1000 rent + £200 loan payment
+  aliceProjection.clearedBalance,
 )
 
 // ---- 7. Upcoming / closed payday lists ----

@@ -2,10 +2,16 @@
 // all pending/scheduled transactions up to a configurable horizon,
 // defaulting to the end of the current pay cycle, extendable to 3
 // cycles." This file generates the not-yet-materialized future
-// occurrences (bills, loans, credit card minimums, salary, and — via
-// jointLedger.ts — this person's share of joint bills/loans) that fill
-// in that horizon, dedupes them against anything that already exists as
-// a real Transaction, and combines the two into one figure + one list.
+// occurrences (bills, loans, credit card minimums, salary) that fill in
+// that horizon, dedupes them against anything that already exists as a
+// real Transaction, and combines the two into one figure + one list.
+//
+// UAT Batch 4 (2026-09-04): this used to also fold in each person's own
+// SHARE of every joint bill/loan (jointLedger.ts's
+// generateJointContributionTransactions) — deliberately reversed per
+// Adam's explicit call: the Personal ledger should show nothing about
+// joint bills at all, full stop. The Joint card (jointAccountLedger.ts)
+// remains the only place joint costs appear, at their full amount.
 
 import { addDays } from 'date-fns'
 import { nanoid } from 'nanoid'
@@ -17,7 +23,6 @@ import { generatePensionTransactions } from './pensionLedger'
 import { generateSavingsContributions } from './savingsLedger'
 import { generateSavingsDepositTransactions, generateSavingsInterestTransactions, generateSavingsWithdrawalTransactions } from './savingsPotLedger'
 import { generatePotDepositTransactions } from './potLedger'
-import { generateJointContributionTransactions } from './jointLedger'
 import { resolveCycleBounds } from './pensionLedger'
 import { isLedgerTransaction, signedAmount } from './runningBalance'
 import type { AppDataV2, PayCycleConfig, Transaction } from '../types/ledger'
@@ -255,12 +260,6 @@ export function computeProjectionToDate(
       generated.push(...generatePotDepositTransactions(pot, rangeStart, horizonEndDate))
     }
   }
-  // This person's share of every joint bill/loan — the piece that used to
-  // be missing entirely (doc's flagged Joint/Household gap). Not scoped
-  // by ownerId since joint items don't have a meaningful one; every joint
-  // template/loan is split for whichever personId this projection is for.
-  generated.push(...generateJointContributionTransactions(data, personId, rangeStart, horizonEndDate))
-
   const dedupedGenerated: Transaction[] = generated
     .filter((t) => {
       const key = dedupeKey(t)

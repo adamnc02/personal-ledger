@@ -2,15 +2,14 @@
 // Household card shows EACH person's own personal picture only (income,
 // personal-location bills/loans/ad-hoc, and joint_deposit/
 // joint_withdrawal transactions) — no joint bills, and no synthetic
-// per-person SHARE of a joint bill either. That share genuinely belongs
-// on the person's own Personal card (it does reduce their real personal
-// cash — see projection.ts's generateJointContributionTransactions), but
-// showing it a second time here, unsplit-looking, would misrepresent it
-// as a personal bill in its own right. So it's filtered out below, by
-// tracing a transaction's sourceId back to a joint-location
-// RecurringTemplate/Loan — the one reliable marker, since
-// generateJointContributionTransactions is the ONLY generator that
-// produces these (jointLedger.ts).
+// per-person SHARE of a joint bill either. UAT Batch 4 (2026-09-04):
+// projection.ts no longer folds that share into the Personal ledger at
+// all, so this filter is now mostly a no-op going forward — kept because
+// it's still the correct behaviour for any ALREADY-STORED cleared
+// transaction from before that change (cleared transactions are
+// immutable historic fact, never retroactively rewritten — see
+// LedgerContext.tsx's own comment on that rule), traced by sourceId back
+// to a joint-location RecurringTemplate/Loan.
 //
 // The joint account's own real ledger — actual joint bills paid, actual
 // deposits/withdrawals — lives entirely on the Joint card instead (see

@@ -1,14 +1,15 @@
-// Joint cost-splitting, ported to the ledger model (closes the gap
-// explicitly flagged in projection.ts and Home.tsx's Joint/Household
-// placeholders). Two things live here:
+// Joint cost-splitting, ported to the ledger model. Two things live here:
 //  - personShareOfJointAmount: the actual split math, shared by both use
 //    sites below.
 //  - generateJointContributionTransactions: synthetic, personal-scoped
 //    transactions representing ONE person's share of every joint bill/
-//    loan occurrence — folded into that person's own projection, so a
-//    joint bill genuinely reduces their personal balance by their share
-//    (same idea as the pre-rebuild app's jointContribution figure, which
-//    got folded into the Personal card's own total).
+//    loan occurrence. UAT Batch 4 (2026-09-04): this USED TO be folded
+//    into that person's own Personal-ledger projection (projection.ts) —
+//    deliberately reversed per Adam's explicit call, the Personal ledger
+//    shows nothing about joint bills at all now. This generator's only
+//    remaining consumer is salarySortLedger.ts's suggested joint top-up
+//    amount ("how much of this cycle's joint bills is MY share"), which
+//    is a pure calculation, never displayed as a personal transaction.
 //  - computeJointSummary: the Joint card's own view — full joint amounts
 //    (not split), plus a per-person contribution breakdown.
 //
@@ -31,9 +32,10 @@ export function personShareOfJointAmount(amount: number, payee: string, payeeSha
 
 /**
  * This person's SHARE of every joint recurring-bill/loan occurrence in
- * the range, as synthetic transactions tagged to their own personal
- * account (location: 'personal', ownerId: personId) — not real ledger
- * entries, purely for folding into their own projection.
+ * the range, as synthetic transactions shaped like a personal one
+ * (location: 'personal', ownerId: personId) — not real ledger entries,
+ * purely a calculation input for salarySortLedger.ts. NOT folded into
+ * any projection any more (see file header).
  */
 export function generateJointContributionTransactions(data: AppDataV2, personId: string, rangeStart: Date, rangeEnd: Date): Omit<Transaction, 'id'>[] {
   const results: Omit<Transaction, 'id'>[] = []
