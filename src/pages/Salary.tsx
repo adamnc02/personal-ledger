@@ -216,6 +216,22 @@ function PensionForm({
   // private one) so this starts opt-in rather than assumed.
   const [adjustForNonWorkingDay, setAdjustForNonWorkingDay] = useState(initial?.adjustForNonWorkingDay ?? false)
   const [cycleStartFollowsPayday, setCycleStartFollowsPayday] = useState(initial?.cycleStartFollowsPayday ?? false)
+  // UAT follow-up (2026-09-04, Adam-reported): when editing (initial is
+  // set), Save must be dimmed until something actually changed — a pure
+  // validity check (name non-empty) was always true for an
+  // already-saved pension, so Save sat at full brightness the instant
+  // the row expanded. Creating a new pension (no `initial`) has nothing
+  // to diff against, so validity is the only meaningful gate there.
+  const dirty =
+    !initial ||
+    personId !== defaultPersonId ||
+    name.trim() !== initial.name ||
+    amount !== initial.amount ||
+    frequency !== initial.frequency ||
+    (frequency === 'every_n_weeks' && intervalWeeks !== (initial.intervalWeeks ?? 2)) ||
+    anchorDate !== initial.anchorDate ||
+    adjustForNonWorkingDay !== initial.adjustForNonWorkingDay ||
+    cycleStartFollowsPayday !== initial.cycleStartFollowsPayday
 
   return (
     <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
@@ -278,7 +294,7 @@ function PensionForm({
           Cancel
         </button>
         <button
-          disabled={!name.trim()}
+          disabled={!name.trim() || !dirty}
           onClick={() => {
             if (!name.trim()) return
             onSave(personId, {
@@ -554,6 +570,12 @@ export function SavingsPotForm({
   const [confirming, setConfirming] = useState(false)
 
   const method = defaultMethodOfType(methodType, aer)
+  // UAT follow-up (2026-09-04, Adam-reported): Save used to gate on
+  // `!name.trim()` alone — always false (so always enabled) once a
+  // savings pot already has a name, regardless of whether anything had
+  // actually changed. Creating a new pot (no `initial`) has nothing to
+  // diff against, so validity is the only meaningful gate there.
+  const dirty = !initial || JSON.stringify(buildFields()) !== JSON.stringify(initial)
 
   function buildFields(): SavingsPotFields {
     return {
@@ -724,7 +746,7 @@ export function SavingsPotForm({
           Cancel
         </button>
         <button
-          disabled={!name.trim()}
+          disabled={!name.trim() || !dirty}
           onClick={() => {
             if (!name.trim()) return
             setConfirming(true)
@@ -998,6 +1020,15 @@ function RecurringExistingDeposit({
   }
 
   const dayFieldDisabled = draftFollowsPayday || draftFollowsCycleStart
+  // UAT follow-up (2026-09-04, Adam-reported): Save used to gate on
+  // `draftAmount > 0` alone — always true for an already-saved template,
+  // so it sat at full brightness the instant this expanded, whether or
+  // not anything had actually changed.
+  const dirty =
+    draftAmount !== template.amount ||
+    draftDay !== new Date(template.anchorDate).getDate() ||
+    draftFollowsPayday !== !!template.followsPayday ||
+    draftFollowsCycleStart !== !!template.followsCycleStart
 
   return (
     <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
@@ -1053,7 +1084,7 @@ function RecurringExistingDeposit({
           })
           setExpanded(false)
         }}
-        saveDisabled={!(draftAmount > 0)}
+        saveDisabled={!(draftAmount > 0) || !dirty}
       />
     </div>
   )
@@ -1699,7 +1730,13 @@ function PotEditForm({
   // form stayed open (e.g. via "+ Add a recurring transfer" just below)
   // rendered unticked until the pot row was collapsed and reopened.
   const isChecked = (item: (typeof items)[number]) => (item.locked ? item.inPot : checked.has(item.key))
-  const dirty = items.some((i) => !i.locked && checked.has(i.key) !== i.inPot)
+  const checklistDirty = items.some((i) => !i.locked && checked.has(i.key) !== i.inPot)
+  const nameDirty = name.trim() !== pot.name
+  // UAT follow-up (2026-09-04, Adam-reported): Save used to gate on
+  // `!name.trim()` alone — always false (so always enabled) for an
+  // already-named pot, regardless of whether the name or the checklist
+  // had actually changed.
+  const dirty = nameDirty || checklistDirty
 
   function toggle(key: string) {
     setChecked((prev) => {
@@ -1755,7 +1792,7 @@ function PotEditForm({
               </label>
             ))}
           </div>
-          {dirty && (
+          {checklistDirty && (
             <div className="mt-3">
               <EditField label="Changes take effect from" type="date" value={effectiveFrom} onChange={setEffectiveFrom} />
             </div>
@@ -1763,7 +1800,7 @@ function PotEditForm({
         </div>
       )}
 
-      <FormButtonRow onCancel={onCancel} onSave={handleSave} saveDisabled={!name.trim()} />
+      <FormButtonRow onCancel={onCancel} onSave={handleSave} saveDisabled={!name.trim() || !dirty} />
     </div>
   )
 }
@@ -3832,6 +3869,20 @@ function PeriodEditor({
   }
 
   const fullDraft = draft
+  // UAT follow-up (2026-09-04, Adam-reported): Save had NO disabled state
+  // at all here — full brightness the instant this period expanded,
+  // regardless of whether anything had changed. Compared against the
+  // same applicableSnapshot-derived shape the draft was seeded from.
+  const dirty =
+    JSON.stringify(draft) !==
+    JSON.stringify({
+      grossAnnual: applicableSnapshot.grossAnnual,
+      taxCode: applicableSnapshot.taxCode,
+      studentLoanPlan: applicableSnapshot.studentLoanPlan,
+      payFrequency: applicableSnapshot.payFrequency,
+      deductions: applicableSnapshot.deductions,
+      employerPensionPercent: applicableSnapshot.employerPensionPercent,
+    })
   const breakdown = calculateNetSalary(fullDraft)
   const periodLabel = draft.payFrequency === 'four_weekly' ? 'every 4 weeks' : 'monthly'
 
@@ -4045,6 +4096,7 @@ function PeriodEditor({
       </div>
 
       <button
+        disabled={!dirty}
         onClick={() => {
           if (isClosed) {
             onSaveJustThis(fullDraft)
@@ -4052,7 +4104,7 @@ function PeriodEditor({
             setConfirming(true)
           }
         }}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white"
+        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
         style={{ background: 'var(--color-coral)' }}
       >
         Save
