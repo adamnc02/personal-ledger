@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency, formatFullDate, formatMonthYear } from '../lib/format'
-import { Plus, Trash2, X, ChevronDown, ChevronUp, ArrowRight } from 'lucide-react'
+import { Plus, Trash2, X, ChevronDown, ChevronUp, ArrowRight, ArrowLeftRight } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { EditField } from '../components/EditField'
 import { CategoryIcon } from '../components/CategoryIcon'
@@ -716,20 +716,22 @@ function ExpenseForm({
 // ── Transfer (2026-09-04 session, "Salary Sorter & Transfer Pill") ──────
 // Replaces the old Savings/Joint/Pots pills entirely (Adam-specified:
 // "remove Savings/Joint/Pots pills entirely"). One form covers every
-// combination of Current Account <-> Savings pot / Joint account / Pot,
-// one-off or recurring — the "current account" side is always the
-// primary person, never a picker (Adam-specified 2026-09-04: "always
-// assume current account is me, no option to change"), so the form only
-// ever asks for the OTHER side plus a direction toggle.
+// combination of Current Account / Savings pot / Joint account / Pot on
+// EITHER side (2026-09 UAT session: "Transfer form 'From' location made
+// editable" — Current Account is no longer pinned to one fixed side; a
+// direct Pot ↔ Pot / Pot ↔ Savings / Savings ↔ Joint transfer with no
+// personal leg at all is now reachable too — see locationTypeForTransfer
+// in transferLedger.ts and autoClear.ts's own dedicated materialization
+// pass for how that's kept correct end-to-end).
 
-/** One pickable "other side" of a transfer — a specific savings pot, a specific pot, or the (singleton) joint account. */
-interface TransferOtherOption {
+/** One pickable location — Current Account, the (singleton) joint account, a specific savings pot, or a specific pot. Used for BOTH the From and To pickers. */
+interface TransferLocationOption {
   key: string
   label: string
   location: TransferLocation
 }
 
-function buildOtherOptions(savingsPots: SavingsPot[], pots: Pot[], hasJoint: boolean, primaryPersonId: string): TransferOtherOption[] {
+function buildTransferLocationOptions(savingsPots: SavingsPot[], pots: Pot[], hasJoint: boolean, primaryPersonId: string): TransferLocationOption[] {
   // Own pots first, same "silently scope to me, fall back to everyone
   // if I own none" rule SavingsTransactionForm used to apply — see this
   // file's git history for that reasoning; unchanged here.
@@ -739,6 +741,7 @@ function buildOtherOptions(savingsPots: SavingsPot[], pots: Pot[], hasJoint: boo
   const pickablePots = ownPots.length > 0 ? ownPots : pots
 
   return [
+    { key: 'personal', label: 'Current Account', location: { type: 'personal' as const } },
     ...(hasJoint ? [{ key: 'joint', label: 'Joint Account', location: { type: 'joint' as const } }] : []),
     ...pickableSavingsPots.map((p) => ({ key: `savings:${p.id}`, label: p.name, location: { type: 'savings' as const, savingsPotId: p.id } })),
     ...pickablePots.map((p) => ({ key: `pot:${p.id}`, label: p.name, location: { type: 'pot' as const, potId: p.id } })),
@@ -765,16 +768,12 @@ function TransferForm({
   ) => void
 }) {
   const { savingsPots, pots, jointAccount, primaryPersonId } = data
-  const otherOptions = buildOtherOptions(savingsPots, pots, !!jointAccount, primaryPersonId)
+  const options = buildTransferLocationOptions(savingsPots, pots, !!jointAccount, primaryPersonId)
   const payCycle = data.payCycles.find((pc) => pc.personId === primaryPersonId)
 
   const [mode, setMode] = useState<TransferMode>('one_off')
-  // 'out' = Current Account → other (a deposit); 'in' = other → Current
-  // Account (a withdrawal) — same DEPOSIT/WITHDRAWAL vocabulary the old
-  // per-entity pills used, just generalised across all three entity
-  // kinds instead of one form per kind.
-  const [direction, setDirection] = useState<'out' | 'in'>('out')
-  const [otherKey, setOtherKey] = useState(otherOptions[0]?.key ?? '')
+  const [fromKey, setFromKey] = useState('personal')
+  const [toKey, setToKey] = useState(options.find((o) => o.key !== 'personal')?.key ?? 'personal')
   const [amount, setAmount] = useState('')
   const [date, setDate] = useState(todayIso())
   const [note, setNote] = useState('')
@@ -792,11 +791,14 @@ function TransferForm({
   // all" call).
   const [pendingConflicts, setPendingConflicts] = useState<{ conflicts: { payDate: string; amount: number }[]; isRecurring: boolean } | null>(null)
 
-  const other = otherOptions.find((o) => o.key === otherKey)
+  const fromOption = options.find((o) => o.key === fromKey)
+  const toOption = options.find((o) => o.key === toKey)
   const amountNumber = Number(amount)
-  const canSave = !!other && amountNumber > 0 && date && (mode === 'one_off' || name.trim())
+  const canSave = !!fromOption && !!toOption && fromKey !== toKey && amountNumber > 0 && date && (mode === 'one_off' || name.trim())
 
-  if (otherOptions.length === 0) {
+  // Current Account + exactly one other destination is the floor — with
+  // nothing to transfer to/from beyond personal, there's nowhere to go.
+  if (options.length < 2) {
     return (
       <div className="mb-6 p-4 rounded-2xl flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
         <div className="flex items-center justify-between">
@@ -810,10 +812,15 @@ function TransferForm({
     )
   }
 
+  function swap() {
+    setFromKey(toKey)
+    setToKey(fromKey)
+  }
+
   function commitSave() {
-    if (!other) return
-    const from: TransferLocation = direction === 'out' ? { type: 'personal' } : other.location
-    const to: TransferLocation = direction === 'out' ? other.location : { type: 'personal' }
+    if (!fromOption || !toOption) return
+    const from = fromOption.location
+    const to = toOption.location
     if (mode === 'one_off') {
       onSaveOneOff(from, to, amountNumber, date, note.trim() || undefined)
     } else {
@@ -832,18 +839,19 @@ function TransferForm({
   }
 
   function handleSave() {
-    if (!other) return
-    // The reverse Salary Sort guard only makes sense for a deposit
-    // (Current Account → destination) — a withdrawal never competes
-    // with a sort, which only ever moves money the other way. Same
+    if (!fromOption || !toOption) return
+    // The reverse Salary Sort guard only makes sense when Current
+    // Account is the SOURCE (a deposit out of it) — a sort only ever
+    // moves money that same direction, never the reverse, and never
+    // touches a transfer with no personal leg at all. Same
     // exact-location-match rule as the sort's own guard (locationsEqual,
     // no amount check).
-    if (direction !== 'out') {
+    if (fromOption.location.type !== 'personal') {
       commitSave()
       return
     }
     if (mode === 'one_off') {
-      const conflicts = findSalarySortConflicts(data, other.location, [date])
+      const conflicts = findSalarySortConflicts(data, toOption.location, [date])
       if (conflicts.length > 0) {
         setPendingConflicts({ conflicts, isRecurring: false })
         return
@@ -869,15 +877,15 @@ function TransferForm({
         payeeSharePercent: 100,
         active: true,
         kind: 'transfer',
-        transferFrom: { type: 'personal' },
-        transferTo: other.location,
+        transferFrom: fromOption.location,
+        transferTo: toOption.location,
         followsPayday,
         followsCycleStart,
       }
       const occurrenceDates = generateTransactionsForTemplate(draftTemplate, new Date(), addYears(new Date(), 2), payCycle)
         .map((o) => o.date)
         .slice(0, 4)
-      const conflicts = findSalarySortConflicts(data, other.location, occurrenceDates)
+      const conflicts = findSalarySortConflicts(data, toOption.location, occurrenceDates)
       if (conflicts.length > 0) {
         setPendingConflicts({ conflicts, isRecurring: true })
         return
@@ -908,31 +916,35 @@ function TransferForm({
         ))}
       </div>
 
-      <div className="flex items-center gap-2 text-sm text-[var(--color-ink)]">
-        <span className="font-medium">{direction === 'out' ? 'Current Account' : (other?.label ?? 'Other')}</span>
-        <button
-          onClick={() => setDirection((d) => (d === 'out' ? 'in' : 'out'))}
-          className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
-          style={{ background: 'var(--color-bg-elevated)' }}
-          aria-label="Swap direction"
-        >
-          <ArrowRight size={14} className="text-[var(--color-ink-muted)]" />
-        </button>
-        <span className="font-medium truncate">{direction === 'out' ? (other?.label ?? 'Other') : 'Current Account'}</span>
-      </div>
-
-      {otherOptions.length > 1 && (
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-[var(--color-ink-muted)]">{direction === 'out' ? 'To' : 'From'}</span>
-          <select value={otherKey} onChange={(e) => setOtherKey(e.target.value)} className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none">
-            {otherOptions.map((o) => (
-              <option key={o.key} value={o.key} style={{ color: '#000' }}>
-                {o.label}
-              </option>
-            ))}
+      <div className="flex items-end gap-2">
+        <label className="flex-1 flex flex-col gap-1 min-w-0">
+          <span className="text-xs text-[var(--color-ink-muted)]">From</span>
+          <select value={fromKey} onChange={(e) => setFromKey(e.target.value)} className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none">
+            {options
+              .filter((o) => o.key !== toKey)
+              .map((o) => (
+                <option key={o.key} value={o.key} style={{ color: '#000' }}>
+                  {o.label}
+                </option>
+              ))}
           </select>
         </label>
-      )}
+        <button onClick={swap} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 mb-1" style={{ background: 'var(--color-bg-elevated)' }} aria-label="Swap From/To">
+          <ArrowLeftRight size={14} className="text-[var(--color-ink-muted)]" />
+        </button>
+        <label className="flex-1 flex flex-col gap-1 min-w-0">
+          <span className="text-xs text-[var(--color-ink-muted)]">To</span>
+          <select value={toKey} onChange={(e) => setToKey(e.target.value)} className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none">
+            {options
+              .filter((o) => o.key !== fromKey)
+              .map((o) => (
+                <option key={o.key} value={o.key} style={{ color: '#000' }}>
+                  {o.label}
+                </option>
+              ))}
+          </select>
+        </label>
+      </div>
 
       {mode === 'recurring' && <EditField key="transfer-name" label="Name" type="text" value={name} onChange={setName} />}
 
@@ -983,9 +995,8 @@ function TransferForm({
       <EditField key="transfer-note" label="Note (optional)" type="text" value={note} onChange={setNote} />
 
       <p className="text-xs text-[var(--color-ink-faint)]">
-        {direction === 'out'
-          ? `Moves money OUT of your personal balance and INTO ${other?.label ?? 'the other account'}.`
-          : `Moves money OUT of ${other?.label ?? 'the other account'} and INTO your personal balance, shown as income.`}
+        Moves money OUT of {fromOption?.label ?? 'the source'} and INTO {toOption?.label ?? 'the destination'}
+        {toOption?.location.type === 'personal' ? ', shown as income' : ''}.
       </p>
 
       <FormButtonRow onCancel={onCancel} onSave={handleSave} saveDisabled={!canSave} />
@@ -994,7 +1005,7 @@ function TransferForm({
         <ConfirmModal
           title="Already sorted"
           description={
-            `${other?.label ?? 'This destination'} already has a salary sort covering ` +
+            `${toOption?.label ?? 'This destination'} already has a salary sort covering ` +
             pendingConflicts.conflicts.map((c) => `${c.payDate} (£${c.amount.toFixed(2)})`).join(', ') +
             (pendingConflicts.isRecurring
               ? '. Go ahead and create this recurring transfer alongside it, or cancel — no transfer will be created.'
@@ -1028,12 +1039,20 @@ function TransferRowItem({
   onRemove: () => void
 }) {
   const [isEditing, setIsEditing] = useState(false)
+  const touchesPersonal = t.fromLocation?.type === 'personal' || t.toLocation?.type === 'personal'
   const isWithdrawal = t.toLocation?.type === 'personal'
   const otherLocation = isWithdrawal ? t.fromLocation : t.toLocation
   const otherLabel = transferLocationLabel(otherLocation, savingsPots, pots)
+  // A direct transfer with no personal leg at all (Pot ↔ Pot, etc., 2026-09
+  // UAT session) doesn't fit "Deposit"/"Withdrawal" — neither side is MY
+  // personal balance — so it shows both endpoints instead, and its amount
+  // is shown plain (not +/- green/red) since it doesn't affect personal
+  // cash either way.
+  const fromLabel = transferLocationLabel(t.fromLocation, savingsPots, pots)
+  const toLabel = transferLocationLabel(t.toLocation, savingsPots, pots)
 
   return (
-    <SwipeToDelete onDelete={onRemove} confirmLabel={otherLabel}>
+    <SwipeToDelete onDelete={onRemove} confirmLabel={touchesPersonal ? otherLabel : `${fromLabel} → ${toLabel}`}>
       <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
         <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center justify-between p-3 text-left">
           <div className="min-w-0">
@@ -1043,9 +1062,13 @@ function TransferRowItem({
                   <ArrowRight size={13} className="text-[var(--color-coral)] shrink-0" />
                   Salary Sort · {otherLabel}
                 </>
-              ) : (
+              ) : touchesPersonal ? (
                 <>
                   {isWithdrawal ? 'Withdrawal' : 'Deposit'} · {otherLabel}
+                </>
+              ) : (
+                <>
+                  {fromLabel} → {toLabel}
                 </>
               )}
             </p>
@@ -1054,8 +1077,8 @@ function TransferRowItem({
               {t.status === 'pending' ? ' · Pending' : ''}
             </p>
           </div>
-          <p className="text-sm font-mono font-semibold shrink-0" style={{ color: isWithdrawal ? 'var(--color-positive)' : 'var(--color-ink)' }}>
-            {isWithdrawal ? '+' : '-'}£{formatCurrency(t.amount)}
+          <p className="text-sm font-mono font-semibold shrink-0" style={{ color: touchesPersonal ? (isWithdrawal ? 'var(--color-positive)' : 'var(--color-ink)') : 'var(--color-ink)' }}>
+            {touchesPersonal ? (isWithdrawal ? '+' : '-') : ''}£{formatCurrency(t.amount)}
           </p>
         </button>
         {isEditing && (
@@ -1098,6 +1121,7 @@ function TransferRecurringRow({
   const [open, setOpen] = useState(false)
   const [amount, setAmount] = useState(String(template.amount))
 
+  const touchesPersonal = template.transferFrom?.type === 'personal' || template.transferTo?.type === 'personal'
   const isWithdrawal = template.transferTo?.type === 'personal'
   const fromLabel = transferLocationLabel(template.transferFrom, savingsPots, pots)
   const toLabel = transferLocationLabel(template.transferTo, savingsPots, pots)
@@ -1112,7 +1136,7 @@ function TransferRecurringRow({
         <button className="w-full flex items-start justify-between gap-2 text-left" onClick={() => setOpen(!open)}>
           <div className="min-w-0">
             <p className="font-body text-sm text-[var(--color-ink)] truncate">
-              {fromLabel} · {isWithdrawal ? 'Withdrawal' : 'Deposit'} · {toLabel}
+              {touchesPersonal ? `${fromLabel} · ${isWithdrawal ? 'Withdrawal' : 'Deposit'} · ${toLabel}` : `${fromLabel} → ${toLabel}`}
             </p>
             <p className="text-xs text-[var(--color-ink-faint)]">
               {RECURRING_FREQUENCY_LABELS[template.frequency as RecurringFrequency] ?? template.frequency}
@@ -1122,7 +1146,7 @@ function TransferRecurringRow({
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0 pt-0.5">
-            <span className="font-mono text-sm text-[var(--color-ink)]">{isWithdrawal ? '+' : '-'}£{formatCurrency(template.amount)}</span>
+            <span className="font-mono text-sm text-[var(--color-ink)]">{touchesPersonal ? (isWithdrawal ? '+' : '-') : ''}£{formatCurrency(template.amount)}</span>
             {open ? <ChevronUp size={14} className="text-[var(--color-ink-faint)]" /> : <ChevronDown size={14} className="text-[var(--color-ink-faint)]" />}
           </div>
         </button>

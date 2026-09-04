@@ -261,6 +261,23 @@ export function potSignedAmount(t: Pick<Transaction, 'type' | 'amount' | 'fromLo
 }
 
 /**
+ * True when a STORED Transaction belongs on this pot's own ledger —
+ * `t.potId === pot.id` alone is the right check for every non-transfer
+ * type (a bill/loan payment only ever funds ONE pot), but is genuinely
+ * ambiguous for a `type: 'transfer'` row with a Pot on BOTH ends (e.g.
+ * Pot A → Pot B) — `potId` can only ever equal ONE of them (whichever
+ * `buildTransferTransaction`/schedule.ts happened to pick), so the OTHER
+ * pot's own stored-transaction lookup would silently never find its
+ * half of the transfer without this. `transferTouchesPot` reads
+ * fromLocation/toLocation directly instead, which correctly identifies
+ * either side regardless of what the flat `potId` field says.
+ */
+function transactionTouchesPot(t: Pick<Transaction, 'type' | 'potId' | 'fromLocation' | 'toLocation'>, potId: string): boolean {
+  if (t.type === 'transfer') return transferTouchesPot(t.fromLocation, t.toLocation, potId)
+  return t.potId === potId
+}
+
+/**
  * This pot's balance as of a given date: openingBalance, plus every
  * pot_deposit, minus every pot_withdrawal AND every bill_payment/
  * loan_payment funded from it (a pot-funded bill payment reduces the
@@ -274,7 +291,7 @@ export function potSignedAmount(t: Pick<Transaction, 'type' | 'amount' | 'fromLo
 export function potBalanceAsOf(pot: Pot, activity: Transaction[], asOfDate: Date): number {
   const asOfIso = toIso(asOfDate)
   const relevant = activity
-    .filter((t) => t.potId === pot.id && t.date >= pot.openingDate && t.date <= asOfIso)
+    .filter((t) => transactionTouchesPot(t, pot.id) && t.date >= pot.openingDate && t.date <= asOfIso)
     .sort((a, b) => a.date.localeCompare(b.date))
 
   let balance = pot.openingBalance
@@ -318,7 +335,7 @@ export function computePotProjection(data: AppDataV2, pot: Pot, horizon: Project
   const openingDateObj = new Date(pot.openingDate)
   const genStart = cycles[0].start > openingDateObj ? cycles[0].start : openingDateObj
 
-  const stored = data.transactions.filter((t) => t.potId === pot.id && t.date >= pot.openingDate)
+  const stored = data.transactions.filter((t) => transactionTouchesPot(t, pot.id) && t.date >= pot.openingDate)
   const existingKeys = new Set(stored.map(dedupeKey).filter((k): k is string => k !== null))
 
   const generated: Omit<Transaction, 'id'>[] = [
@@ -376,7 +393,7 @@ export interface PotScheduleRow {
  */
 export function buildPotScheduleRows(data: AppDataV2, pot: Pot, asOfDate: Date = new Date()): PotScheduleRow[] {
   const { start, end } = schedulePotPreviewWindow(pot, asOfDate)
-  const potStored = data.transactions.filter((t) => t.potId === pot.id && t.date >= toIso(start) && t.date <= toIso(end))
+  const potStored = data.transactions.filter((t) => transactionTouchesPot(t, pot.id) && t.date >= toIso(start) && t.date <= toIso(end))
   const storedKeys = new Set(potStored.map((t) => `${t.type}:${t.sourceId ?? ''}:${t.date}`))
   const payCycle = data.payCycles.find((c) => c.personId === data.primaryPersonId)
 
@@ -385,7 +402,18 @@ export function buildPotScheduleRows(data: AppDataV2, pot: Pot, asOfDate: Date =
   const generatedOutgoing = generatePotOutgoingTransactions(data, pot, start, end).filter((t) => !storedKeys.has(`${t.type}:${t.sourceId ?? ''}:${t.date}`))
 
   const rows: PotScheduleRow[] = [
-    ...potStored.map((t) => ({ date: t.date, type: (t.type === 'transfer' ? (t.toLocation?.type === 'pot' ? 'pot_deposit' : 'pot_withdrawal') : t.type) as PotScheduleRow['type'], amount: t.amount, status: t.status, note: t.note })),
+    // `toLocation.type === 'pot'` alone isn't enough to tell deposit from
+    // withdrawal for THIS pot — a Pot A → Pot B transfer has toLocation
+    // type 'pot' on BOTH pots' own rows, so it must check whose id it
+    // actually is (same ambiguity transactionTouchesPot's own comment
+    // describes).
+    ...potStored.map((t) => ({
+      date: t.date,
+      type: (t.type === 'transfer' ? (t.toLocation?.type === 'pot' && t.toLocation.potId === pot.id ? 'pot_deposit' : 'pot_withdrawal') : t.type) as PotScheduleRow['type'],
+      amount: t.amount,
+      status: t.status,
+      note: t.note,
+    })),
     ...generatedDeposits.map((t) => ({ date: t.date, type: 'pot_deposit' as const, amount: t.amount, status: 'pending' as const, note: t.note })),
     ...generatedWithdrawals.map((t) => ({ date: t.date, type: 'pot_withdrawal' as const, amount: t.amount, status: 'pending' as const, note: t.note })),
     ...generatedOutgoing.map((t) => ({ date: t.date, type: t.type as 'bill_payment' | 'loan_payment', amount: t.amount, status: 'pending' as const, note: t.note })),

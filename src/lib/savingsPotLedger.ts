@@ -248,11 +248,23 @@ export function depositOccurrencePreviews(pot: SavingsPot, asOfDate: Date, count
 
 // ── Balance — derived, never stored, same philosophy as CreditCard's currentBalance-as-anchor-plus-replay (see cardBalanceAsOf) ──
 
+/**
+ * True when a STORED Transaction belongs on this savings pot's own
+ * ledger — `t.savingsPotId === pot.id` alone is right for every non-
+ * transfer type, but ambiguous for a `type: 'transfer'` row with a
+ * savings pot on BOTH ends (e.g. Savings A → Savings B) — same reasoning
+ * as potLedger.ts's transactionTouchesPot.
+ */
+function transactionTouchesSavingsPot(t: Pick<Transaction, 'type' | 'savingsPotId' | 'fromLocation' | 'toLocation'>, savingsPotId: string): boolean {
+  if (t.type === 'transfer') return transferTouchesSavingsPot(t.fromLocation, t.toLocation, savingsPotId)
+  return t.savingsPotId === savingsPotId
+}
+
 /** This pot's balance as of a given date, folding openingBalance against every deposit/withdrawal/interest transaction for it dated within [openingDate, asOfDate]. `activity` should already include any generated-but-not-yet-materialized rows the caller wants counted (e.g. projected future deposits/interest) — this function only folds, it never generates. Anything dated before openingDate is ignored outright, per spec. */
 export function savingsPotBalanceAsOf(pot: SavingsPot, activity: Transaction[], asOfDate: Date): number {
   const asOfIso = toIso(asOfDate)
   const relevant = activity
-    .filter((t) => t.savingsPotId === pot.id && t.date >= pot.openingDate && t.date <= asOfIso)
+    .filter((t) => transactionTouchesSavingsPot(t, pot.id) && t.date >= pot.openingDate && t.date <= asOfIso)
     .sort((a, b) => a.date.localeCompare(b.date))
 
   let balance = pot.openingBalance
@@ -354,7 +366,7 @@ function dailyBalancesFor(pot: SavingsPot, activity: Transaction[], periodStart:
   const movements = activity
     .filter(
       (t) =>
-        t.savingsPotId === pot.id &&
+        transactionTouchesSavingsPot(t, pot.id) &&
         (t.type === 'savings_deposit' || t.type === 'savings_withdrawal' || t.type === 'transfer') &&
         t.date >= toIso(periodStart) &&
         t.date < toIso(periodEnd),
@@ -416,7 +428,7 @@ export function buildSavingsPotScheduleRows(
   payCycle?: PayCycleConfig,
 ): SavingsPotScheduleRow[] {
   const { start, end } = schedulePreviewWindow(pot, asOfDate)
-  const potStored = stored.filter((t) => t.savingsPotId === pot.id && t.date >= toIso(start) && t.date <= toIso(end))
+  const potStored = stored.filter((t) => transactionTouchesSavingsPot(t, pot.id) && t.date >= toIso(start) && t.date <= toIso(end))
   const storedDates = new Set(potStored.map((t) => `${t.type}:${t.date}`))
 
   const generatedDeposits = generateSavingsDepositTransactions(pot, start, end, transferTemplates, payCycle).filter((t) => !storedDates.has(`${t.type}:${t.date}`))
@@ -429,7 +441,18 @@ export function buildSavingsPotScheduleRows(
   ).filter((t) => !storedDates.has(`savings_interest:${t.date}`))
 
   const rows: SavingsPotScheduleRow[] = [
-    ...potStored.map((t) => ({ date: t.date, type: t.type as SavingsPotScheduleRow['type'], amount: t.amount, status: t.status, overridable: t.type === 'savings_interest' })),
+    // A stored `type: 'transfer'` row isn't itself a member of this row's
+    // type union — resolve it to deposit/withdrawal from THIS pot's own
+    // side (checking `savingsPotId` specifically, not just `type ===
+    // 'savings'`, for the same Savings A → Savings B ambiguity
+    // transactionTouchesSavingsPot's own comment describes).
+    ...potStored.map((t) => ({
+      date: t.date,
+      type: (t.type === 'transfer' ? (t.toLocation?.type === 'savings' && t.toLocation.savingsPotId === pot.id ? 'savings_deposit' : 'savings_withdrawal') : t.type) as SavingsPotScheduleRow['type'],
+      amount: t.amount,
+      status: t.status,
+      overridable: t.type === 'savings_interest',
+    })),
     ...generatedDeposits.map((t) => ({ date: t.date, type: (t.type === 'transfer' ? 'savings_deposit' : t.type) as 'savings_deposit', amount: t.amount, status: 'pending' as const, overridable: false })),
     ...generatedWithdrawals.map((t) => ({ date: t.date, type: 'savings_withdrawal' as const, amount: t.amount, status: 'pending' as const, overridable: false })),
     ...generatedInterest.map((t) => ({ date: t.date, type: 'savings_interest' as const, amount: t.amount, status: 'pending' as const, overridable: true })),
@@ -493,7 +516,7 @@ export function projectedBalanceAt(
   const generatedInterest = generateSavingsInterestTransactions(pot, combinedForInterest, asOfDate, targetDate)
 
   // Same dedupe convention as buildSavingsPotScheduleRows/computeProjection: a real row already covers whatever a generator would produce for the same type+date, so the generated one is dropped, not double-counted.
-  const realKeys = new Set(realActivity.filter((t) => t.savingsPotId === pot.id).map((t) => `${t.type}:${t.date}`))
+  const realKeys = new Set(realActivity.filter((t) => transactionTouchesSavingsPot(t, pot.id)).map((t) => `${t.type}:${t.date}`))
   const dedupedGenerated = [...generatedDeposits, ...generatedWithdrawals, ...generatedInterest].filter((t) => !realKeys.has(`${t.type}:${t.date}`))
 
   const allActivity = [...realActivity, ...dedupedGenerated.map((t, i) => ({ ...t, id: `generated:proj:${i}` }))]

@@ -240,5 +240,42 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
     }
   }
 
+  // Step 4 — materialize recurring TRANSFERS where NEITHER endpoint is
+  // personal (e.g. Pot → Pot, Pot → Savings, Savings → Joint — 2026-09
+  // UAT session, "Transfer form From location made editable"). Every
+  // other recurring generator above is reached through the per-person
+  // 'personal'-scoped loop, but a transfer like this never carries
+  // `location: 'personal'` at all (by design — see
+  // locationTypeForTransfer's own comment in transferLedger.ts), so it's
+  // entirely invisible to that loop and would otherwise exist forever
+  // only as a freshly-recomputed preview, never a real settled
+  // Transaction. Scoped globally rather than per-person/per-pot —
+  // dedupeKey already uniquely keys each occurrence by
+  // sourceType:sourceId:date regardless of which entities are on either
+  // end, so there's nothing to gain from scoping this any narrower.
+  const nonPersonalTransferTemplates = result.recurringTemplates.filter((t) => t.kind === 'transfer' && t.active && t.location !== 'personal')
+  if (nonPersonalTransferTemplates.length > 0) {
+    const primaryPayCycle = result.payCycles.find((pc) => pc.personId === result.primaryPersonId)
+    const transferRangeStart = primaryPayCycle ? new Date(primaryPayCycle.openingBalanceDate) : new Date(0)
+    if (transferRangeStart <= asOf) {
+      const transferStored = result.transactions.filter((t) => t.type === 'transfer' && t.sourceType === 'recurring_template')
+      const transferExistingKeys = new Set(transferStored.map(dedupeKey).filter((k): k is string => k !== null))
+
+      for (const template of nonPersonalTransferTemplates) {
+        const candidates = generateTransactionsForTemplate(template, transferRangeStart, asOf, primaryPayCycle)
+        for (const candidate of candidates) {
+          if (candidate.date > asOfIso) continue
+          const key = dedupeKey(candidate)
+          if (key && transferExistingKeys.has(key)) continue
+
+          const real: Transaction = { ...candidate, id: nanoid(8), status: 'cleared' }
+          result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
+          if (key) transferExistingKeys.add(key)
+          changed = true
+        }
+      }
+    }
+  }
+
   return changed ? result : data
 }

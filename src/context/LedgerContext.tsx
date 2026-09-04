@@ -21,7 +21,7 @@ import type {
   TransferLocation,
 } from '../types/ledger'
 import type { BillLocation } from '../types/models'
-import { categoryForTransfer, buildTransferTransaction, locationsEqual, transferLocationLabel } from '../lib/transferLedger'
+import { categoryForTransfer, buildTransferTransaction, locationsEqual, locationTypeForTransfer, transferLocationLabel } from '../lib/transferLedger'
 import { reassignTransactionsForLocationChange, priorLocationEntry } from '../lib/locationChange'
 
 import type { Scenario } from '../types/models'
@@ -792,13 +792,13 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
       kind: 'transfer',
       categoryId: categoryForTransfer(template.transferFrom, template.transferTo),
       paymentMethod: 'bank_transfer',
-      // Always 'personal' + the primary person — see logTransfer's own
-      // comment on why this is safe/correct for every transfer, and
-      // schedule.ts's generateTransactionsForTemplate for how a
-      // non-personal-only pair (e.g. a direct Savings → Pot sweep,
-      // currently unreachable from the UI) still generates correctly
-      // even though this field says 'personal'.
-      location: 'personal',
+      // 'personal' whenever the primary person's own account is either
+      // endpoint (the common case); 'joint' or 'pot' for a direct
+      // Savings/Pot/Joint sweep with no personal leg at all — see
+      // locationTypeForTransfer's own comment for why this can't just be
+      // hardcoded 'personal' (autoClear.ts's dedicated non-personal
+      // transfer materialization pass depends on this being correct).
+      location: locationTypeForTransfer(template.transferFrom, template.transferTo),
       ownerId: data.primaryPersonId,
       payee: '',
       payeeSharePercent: 100,

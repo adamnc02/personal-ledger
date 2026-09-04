@@ -5,19 +5,30 @@
 // types/ledger.ts) now covers every combination of current account /
 // savings pot / joint account / pot, one-off or recurring.
 //
-// The "current account" endpoint is ALWAYS the primary person (Adam-
-// specified 2026-09-04: "always assume current account is me, no option
-// to change") — this is what lets every transfer flow through the
-// EXISTING personal-ledger machinery (projection.ts/autoClear.ts/
-// runningBalance.ts) unchanged: whenever 'personal' is one of the two
-// endpoints, the transaction still carries `location: 'personal'`,
-// `ownerId: <primary person>`, and a `direction` derived from which side
-// personal is on — exactly the shape savings_deposit/joint_deposit/
-// pot_deposit used to set by hand. `fromLocation`/`toLocation` are the
-// new, explicit fields; `savingsPotId`/`potId` are ALSO still populated
-// (whichever endpoint is a savings pot / pot) purely so every existing
-// simple `t.savingsPotId === pot.id` / `t.potId === pot.id` filter
-// elsewhere in the app keeps working unchanged.
+// Whenever 'personal' (the primary person's own account) is one of the
+// two endpoints — still the overwhelmingly common case — the transaction
+// carries `location: 'personal'`, `ownerId: <primary person>`, and a
+// `direction` derived from which side personal is on, exactly the shape
+// savings_deposit/joint_deposit/pot_deposit used to set by hand; this is
+// what lets that transfer flow through the EXISTING personal-ledger
+// machinery (projection.ts/autoClear.ts/runningBalance.ts) unchanged.
+//
+// A direct transfer with NO personal leg at all (Pot ↔ Pot, Pot ↔
+// Savings, Savings ↔ Joint — UAT session, 2026-09) — reachable from the
+// UI via TransferForm's own From picker — gets `location: 'joint'` or
+// `'pot'` instead (see locationTypeForTransfer below), which is what
+// correctly keeps it OFF the personal ledger; each entity's own ledger
+// file (potLedger.ts/savingsPotLedger.ts/jointAccountLedger.ts) picks it
+// up via `transferTouchesX(fromLocation, toLocation, ...)` regardless of
+// what `location` says, and autoClear.ts has its own dedicated
+// materialization pass for exactly this non-personal-endpoint case (see
+// that file's own comment). `fromLocation`/`toLocation` are the
+// authoritative fields for both endpoints; `savingsPotId`/`potId` are
+// ALSO still populated (whichever ONE endpoint is a savings pot / pot —
+// ambiguous when BOTH are, e.g. Pot A → Pot B, see potSignedAmount's own
+// comment) purely so every existing simple `t.savingsPotId === pot.id` /
+// `t.potId === pot.id` filter elsewhere in the app keeps working
+// unchanged for the single-sided case.
 //
 // This file is the one place that knows how to read BOTH sides of a
 // transfer — locationsEqual/matchesLocation for filtering, and a signed-
@@ -37,6 +48,25 @@ import type { Transaction, TransferLocation } from '../types/ledger'
 // (not re-exported from LedgerContext, to avoid a circular import; both
 // sides independently derive the same deterministic id).
 export const TRANSFER_JOINT_CATEGORY_ID = seededCategoryIdForIcon('joint')
+
+/**
+ * Which `location`/`ownerId` bucket a transfer's transactions/template
+ * fall into — 'personal' whenever the primary person's own account is
+ * either endpoint (the common case, and the ONLY thing that lets a
+ * transfer flow through the existing personal-ledger machinery
+ * unchanged), 'joint' when the joint account is an endpoint but personal
+ * isn't, otherwise 'pot' — a direct Savings ↔ Pot ↔ Joint movement with
+ * no personal leg at all (2026-09 UAT session: "Transfer form 'From'
+ * location made editable" — previously unreachable from the UI, now is).
+ * The single shared source of truth for this so buildTransferTransaction
+ * (one-off) and LedgerContext.addRecurringTransfer (recurring) can't
+ * drift into computing it two different ways.
+ */
+export function locationTypeForTransfer(from: TransferLocation | undefined, to: TransferLocation | undefined): 'personal' | 'joint' | 'pot' {
+  if (from?.type === 'personal' || to?.type === 'personal') return 'personal'
+  if (from?.type === 'joint' || to?.type === 'joint') return 'joint'
+  return 'pot'
+}
 
 /** True when two TransferLocations refer to the exact same place (same type, and same id when one is required). */
 export function locationsEqual(a: TransferLocation | undefined, b: TransferLocation | undefined): boolean {
@@ -134,17 +164,18 @@ export function buildTransferTransaction(
     id: nanoid(8),
     date,
     amount,
-    // Personal is always one of the two endpoints in practice (Adam-
-    // specified 2026-09-04: "always assume current account is me, no
-    // option to change") — 'out' when personal is the source, 'in' when
-    // it's the destination. See logTransfer's own comment for the
-    // (currently UI-unreachable) neither-endpoint-personal fallback.
+    // 'out' when personal is the source (or isn't involved at all — see
+    // locationTypeForTransfer), 'in' when it's the destination. Unused by
+    // any non-personal ledger's own sign calc (each reads fromLocation/
+    // toLocation directly — see potSignedAmount's own comment), so this
+    // is purely the PERSONAL ledger's sign, meaningless when personal
+    // isn't an endpoint at all.
     direction: from.type === 'personal' ? 'out' : 'in',
     categoryId: categoryForTransfer(from, to),
     paymentMethod: 'bank_transfer',
     status: date <= toIso(new Date()) ? 'cleared' : 'pending',
     type: 'transfer',
-    location: from.type === 'personal' || to.type === 'personal' ? 'personal' : from.type === 'joint' || to.type === 'joint' ? 'joint' : 'pot',
+    location: locationTypeForTransfer(from, to),
     ownerId: primaryPersonId,
     savingsPotId: from.type === 'savings' ? from.savingsPotId : to.type === 'savings' ? to.savingsPotId : undefined,
     potId: from.type === 'pot' ? from.potId : to.type === 'pot' ? to.potId : undefined,
