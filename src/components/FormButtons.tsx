@@ -13,7 +13,11 @@
 
 export function CancelButton({ onClick, label = 'Cancel' }: { onClick: () => void; label?: string }) {
   return (
-    <button onClick={onClick} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)' }}>
+    <button
+      onClick={onClick}
+      className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]"
+      style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}
+    >
       {label}
     </button>
   )

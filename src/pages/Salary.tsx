@@ -273,7 +273,7 @@ function PensionForm({
         </span>
       </label>
       <div className="flex gap-2 mt-4">
-        <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)' }}>
+        <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}>
           Cancel
         </button>
         <button
@@ -718,7 +718,7 @@ export function SavingsPotForm({
         Target amount shows a progress pie chart on this pot's card. Target date shows how much to save each payday to hit it by then — the two are independent; set either, both, or neither.
       </p>
       <div className="flex gap-2 mt-4">
-        <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)' }}>
+        <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}>
           Cancel
         </button>
         <button
@@ -1415,7 +1415,7 @@ function PotForm({
       )}
 
       <div className="flex gap-2 mt-4">
-        <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)' }}>
+        <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}>
           Cancel
         </button>
         <button
