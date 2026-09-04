@@ -100,7 +100,7 @@ check('Spend increases the derived balance', cardBalanceAsOf(card, [{ ...spend.t
 check('A spend never counts as "paid"', totalPaidForCard('card-1', [{ ...spend.transaction, id: 'tx-spend' }], new Date(2026, 7, 25)), 0)
 
 // ---- 4. No double-counting: clearing has no side effect any more ----
-const data: AppDataV2 = { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [card], transactions: paid200, payCycles: [], scenarios: [], primaryPersonId: '' }
+const data: AppDataV2 = { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [card], pensions: [], transactions: paid200, payCycles: [], scenarios: [], primaryPersonId: '' }
 const afterClear = applyClearSideEffects(data, paid200[0])
 check('applyClearSideEffects is a no-op for credit card payments (reintroducing the mutation would double-count)', afterClear.creditCards[0].currentBalance, 1600)
 check('...so the derived balance after a clear pass is still the single, correct figure', cardBalanceAsOf(afterClear.creditCards[0], afterClear.transactions, today), 1400)
@@ -145,7 +145,7 @@ check('A lump payment before rangeStart is not subtracted twice (once via the an
 const todayIso = toLocalIsoDate(new Date())
 const legacyCard = { ...card, currentBalance: 1400 } as Partial<CreditCard>
 delete legacyCard.balanceAsOfDate
-const legacy = { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [legacyCard], transactions: [], payCycles: [], scenarios: [], primaryPersonId: '' } as unknown as AppDataV2
+const legacy = { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [legacyCard], pensions: [], transactions: [], payCycles: [], scenarios: [], primaryPersonId: '' } as unknown as AppDataV2
 const migrated = migrateLedgerData(legacy)
 check('Migration backfills balanceAsOfDate to today', migrated.creditCards[0].balanceAsOfDate, todayIso)
 check('Migration preserves the stored figure when there is no activity today', migrated.creditCards[0].currentBalance, 1400)

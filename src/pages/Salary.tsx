@@ -4,18 +4,46 @@ import { formatCurrency } from '../lib/format'
 import { useLedgerData } from '../context/LedgerContext'
 import { calculateNetSalary, type StudentLoanPlan, type PayFrequency, type SalaryDeduction, type DeductionType } from '../lib/tax'
 import { THREE_CYCLES_AHEAD } from '../lib/projection'
-import { findApplicableSnapshot, computeNetPayForPeriod, upcomingPaydays, closedPaydays } from '../lib/salaryLedger'
+import { findApplicableSnapshot, latestSalarySnapshot, computeNetPayForPeriod, upcomingPaydays, closedPaydays } from '../lib/salaryLedger'
 import { calculateBonusOnTop } from '../lib/tax'
-import { monthlyAmountForEntry } from '../lib/savings'
 import { AttachBonusButton } from '../components/AttachBonusButton'
 import { downloadLedgerBackup, parseLedgerBackupJson } from '../lib/ledgerStorage'
-import { Plus, Trash2, Download, Upload, ChevronDown, ChevronUp, Settings, X } from 'lucide-react'
-import type { AppDataV2, PayCycleConfig, Person, SavingsEntry } from '../types/ledger'
+import { Plus, Trash2, Download, Upload, ChevronDown, ChevronUp, Settings, X, Users, CalendarClock, Info, ArrowUpDown } from 'lucide-react'
+import type { AppDataV2, Loan, PayCycleConfig, Pension, Person, Pot, RecurrenceFrequency, RecurringTemplate, SavingsInterestMethod, SavingsPot, Transaction } from '../types/ledger'
 import { nanoid } from 'nanoid'
 import { DeductionModal } from '../components/DeductionModal'
 import { SwipeToDelete } from '../components/SwipeToDelete'
-import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
+import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
+import { ConfirmModal } from '../components/ConfirmModal'
+import { FormButtonRow } from '../components/FormButtons'
+import { SavedFlashOverlay } from '../components/SavedFlash'
 import { NumberInput } from '../components/NumberInput'
+import { CollapsibleSection } from '../components/CollapsibleSection'
+import { EditField } from '../components/EditField'
+import { hasSalaryConfigured } from '../lib/household'
+import { pensionOccurrencePreviews, applyPensionAmountChange, newPension, scheduledPensionDates, setPausedPensionOccurrences, resolvePensionAmount } from '../lib/pensionLedger'
+import { JointAccountSetupModal } from '../components/JointAccountSetupModal'
+import { formatFullDate } from '../lib/format'
+import {
+  newSavingsPot,
+  applyInterestMethodChange,
+  depositOccurrencePreviews,
+  savingsPotBalanceAsOf,
+  buildSavingsPotScheduleRows,
+  type SavingsPotScheduleRow,
+} from '../lib/savingsPotLedger'
+import { buildExampleLedger } from '../lib/savingsInterest'
+import { newPot, potBalanceAsOf, potDepositOccurrencePreviews } from '../lib/potLedger'
+import { setPausedTemplateOccurrences, scheduledTemplateDates, templateOccurrencePreviews } from '../lib/schedule'
+import { locationsEqual, transferLocationLabel } from '../lib/transferLedger'
+import {
+  hasSalarySortDestinations,
+  salarySortDestinations,
+  salarySortSuggestion,
+  findOneOffTransferConflict,
+  findRecurringTransferConflict,
+} from '../lib/salarySortLedger'
+import type { TransferLocation } from '../types/ledger'
 
 /**
  * Compact amount label for a deduction's collapsed row.
@@ -40,6 +68,7 @@ const STUDENT_LOAN_LABELS: Record<StudentLoanPlan, string> = {
   postgrad: 'Postgraduate loan',
 }
 
+import { addDays, addMonths } from 'date-fns'
 import { todayIso, toLocalIsoDate } from '../lib/date'
 
 function emptySalaryFields() {
@@ -53,6 +82,1681 @@ function emptySalaryFields() {
   }
 }
 
+// Same style as Borrowing's per-section AddButton (Loans.tsx) — kept as
+// its own local copy rather than a shared import, matching this
+// codebase's existing per-page-file convention for small one-off UI bits.
+function AddButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button onClick={onClick} className="w-7 h-7 rounded-full flex items-center justify-center" style={{ background: 'var(--color-coral)' }}>
+      <Plus size={14} className="text-white" />
+    </button>
+  )
+}
+
+/**
+ * "For" person picker — used inside every new-entry form on this page
+ * (Pension's, Savings') per Adam's spec: invisible with just one person
+ * (silently binds to them, exactly today's single-user behaviour), an
+ * editable dropdown once a second person exists — same field, both at
+ * creation AND when editing an existing record afterward, since it's
+ * just rendered inline in the form rather than a separate one-off picker
+ * step. Defaults to the primary person when nothing's been chosen yet.
+ */
+function PersonSelectField({ people, value, onChange }: { people: Person[]; value: string; onChange: (personId: string) => void }) {
+  if (people.length <= 1) return null
+  return (
+    <Field label="For">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+      >
+        {people.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+    </Field>
+  )
+}
+
+function activeIncomeSourceCount(person: Person, pensions: Pension[]): number {
+  return (hasSalaryConfigured(person) ? 1 : 0) + pensions.filter((p) => p.personId === person.id && p.active).length
+}
+
+function FollowingTag() {
+  return (
+    <span
+      className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide shrink-0"
+      style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink-muted)' }}
+    >
+      Following
+    </span>
+  )
+}
+
+function FollowingPickerButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button onClick={onClick} className="w-7 h-7 rounded-full flex items-center justify-center" style={{ background: 'var(--color-bg-elevated)' }} aria-label="Choose which income source the budgeting cycle follows">
+      <CalendarClock size={14} className="text-[var(--color-ink)]" />
+    </button>
+  )
+}
+
+/** Inline "who's this for?" picker — shown before a form when 2+ candidates exist (Adam's spec: skip straight to the form with exactly one). */
+function PersonPickerCard({ people, onPick, onCancel }: { people: Person[]; onPick: (personId: string) => void; onCancel: () => void }) {
+  return (
+    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Who's this for?</span>
+        <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {people.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => onPick(p.id)}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+const PENSION_FREQUENCY_LABELS: Record<RecurrenceFrequency, string> = {
+  weekly: 'Weekly',
+  every_n_weeks: 'Every N weeks',
+  monthly: 'Monthly',
+  quarterly: 'Quarterly',
+  annual: 'Annually',
+}
+
+interface PensionFields {
+  name: string
+  amount: number
+  frequency: RecurrenceFrequency
+  intervalWeeks?: number
+  anchorDate: string
+  adjustForNonWorkingDay: boolean
+  cycleStartFollowsPayday: boolean
+}
+
+/** New-pension form — same "For" person picker as every other new-entry form on this page (PersonSelectField), reused unmodified when editing an existing pension's owner (PensionRow passes the same field through). */
+function PensionForm({
+  people,
+  defaultPersonId,
+  initial,
+  onSave,
+  onCancel,
+}: {
+  people: Person[]
+  defaultPersonId: string
+  initial?: PensionFields
+  onSave: (personId: string, fields: PensionFields) => void
+  onCancel: () => void
+}) {
+  const [personId, setPersonId] = useState(defaultPersonId)
+  const [name, setName] = useState(initial?.name ?? '')
+  const [amount, setAmount] = useState(initial?.amount ?? 0)
+  const [frequency, setFrequency] = useState<RecurrenceFrequency>(initial?.frequency ?? 'monthly')
+  const [intervalWeeks, setIntervalWeeks] = useState(initial?.intervalWeeks ?? 2)
+  const [anchorDate, setAnchorDate] = useState(initial?.anchorDate ?? todayIso())
+  // Same two fields as the salary form's pay-cycle checkboxes — unticked
+  // by default here (initial?.adjustForNonWorkingDay ?? false), unlike
+  // salary's default-ticked adjustForNonWorkingDay, per Adam's spec: a
+  // pension's cadence varies far more (weekly state pension vs monthly
+  // private one) so this starts opt-in rather than assumed.
+  const [adjustForNonWorkingDay, setAdjustForNonWorkingDay] = useState(initial?.adjustForNonWorkingDay ?? false)
+  const [cycleStartFollowsPayday, setCycleStartFollowsPayday] = useState(initial?.cycleStartFollowsPayday ?? false)
+
+  return (
+    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="grid grid-cols-2 gap-3">
+        {/* Only shown when EDITING an existing pension (initial is set) —
+            creation goes through the person-picker-first flow instead
+            (Pensions section header's "+"), same as every other new-entry
+            flow on this page. Editing still needs the field live in the
+            form itself so reassignment is reachable after creation, per
+            Adam's spec — this is that same PersonSelectField, just gated
+            to the edit path only rather than always rendered. */}
+        {initial && <PersonSelectField people={people} value={personId} onChange={setPersonId} />}
+        <Field label="Name">
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. State Pension"
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          />
+        </Field>
+        <Field label="Net amount (£)">
+          <NumberInput
+            inputMode="decimal"
+            value={amount || ''}
+            onChange={(v) => setAmount(Number(v) || 0)}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+          />
+        </Field>
+        <Field label="Frequency">
+          <select
+            value={frequency}
+            onChange={(e) => setFrequency(e.target.value as RecurrenceFrequency)}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          >
+            {(Object.keys(PENSION_FREQUENCY_LABELS) as RecurrenceFrequency[]).map((f) => (
+              <option key={f} value={f} style={{ color: '#000' }}>
+                {PENSION_FREQUENCY_LABELS[f]}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {frequency === 'every_n_weeks' && (
+          <EditField label="Every N weeks" type="number" value={String(intervalWeeks)} onChange={(v) => setIntervalWeeks(Math.max(1, Number(v) || 1))} />
+        )}
+        <EditField label={frequency === 'weekly' || frequency === 'every_n_weeks' ? 'First payment date' : 'Payment date'} type="date" value={anchorDate} onChange={setAnchorDate} />
+      </div>
+      <label className="flex items-center gap-2 mt-3">
+        <input type="checkbox" checked={adjustForNonWorkingDay} onChange={(e) => setAdjustForNonWorkingDay(e.target.checked)} />
+        <span className="text-xs text-[var(--color-ink-muted)]">If payment falls on a weekend or UK bank holiday, pay on the last working day before it</span>
+      </label>
+      <label className="flex items-center gap-2 mt-2.5">
+        <input type="checkbox" checked={cycleStartFollowsPayday} onChange={(e) => setCycleStartFollowsPayday(e.target.checked)} />
+        <span className="text-xs text-[var(--color-ink-muted)]">
+          Start the budgeting cycle on this payment itself, weekend/BH adjustment included — only takes effect while this pension is the one "Following" (see the calendar icon)
+        </span>
+      </label>
+      <div className="flex gap-2 mt-4">
+        <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)' }}>
+          Cancel
+        </button>
+        <button
+          onClick={() => {
+            if (!name.trim()) return
+            onSave(personId, {
+              name: name.trim(),
+              amount,
+              frequency,
+              intervalWeeks: frequency === 'every_n_weeks' ? intervalWeeks : undefined,
+              anchorDate,
+              adjustForNonWorkingDay,
+              cycleStartFollowsPayday,
+            })
+          }}
+          className="flex-1 py-2 rounded-full text-sm font-semibold text-white"
+          style={{ background: 'var(--color-coral)' }}
+        >
+          Save
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** A single pension's row — collapsed summary + expand, same pattern as Borrowing's LoanRow/CreditCardRow, and the Salary section's own person rows. */
+function PensionRow({
+  pension,
+  people,
+  showFollowingTag,
+  isOpen,
+  onToggle,
+  onSave,
+  onRemove,
+}: {
+  pension: Pension
+  people: Person[]
+  showFollowingTag: boolean
+  isOpen: boolean
+  onToggle: () => void
+  onSave: (updates: Partial<Omit<Pension, 'id' | 'personId'>> & { personId?: string }) => void
+  onRemove: () => void
+}) {
+  const owner = people.find((p) => p.id === pension.personId)
+  const previews = pensionOccurrencePreviews(pension, new Date(), 1)
+  const next = previews[0]
+  // Same 2-months-back/12-months-forward window SavingsPot's own pause
+  // picker uses — pensions have no "opening date" ramp-up concept to
+  // clamp against, so this is simpler than schedulePreviewWindow.
+  const pauseWindowStart = addMonths(new Date(), -2)
+  const pauseWindowEnd = addMonths(new Date(), 12)
+  const pauseWindowDates = scheduledPensionDates(pension, pauseWindowStart, pauseWindowEnd)
+  const currentlyPausedPensionDates = new Set((pension.occurrenceOverrides ?? []).filter((o) => o.deleted && pauseWindowDates.includes(o.originalDate)).map((o) => o.originalDate))
+
+  return (
+    <SwipeToDelete onDelete={onRemove} confirmLabel={pension.name}>
+      <div className="rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-display text-base font-semibold text-[var(--color-ink)] truncate">{pension.name}</span>
+            {people.length > 1 && <span className="text-xs text-[var(--color-ink-muted)] shrink-0">{owner?.name ?? 'Unknown'}</span>}
+            {showFollowingTag && <FollowingTag />}
+          </div>
+        </div>
+
+        <button onClick={onToggle} className="w-full flex items-center justify-between text-left py-1">
+          <span className="text-sm text-[var(--color-ink-muted)]">
+            {pension.active ? (next ? <>Next payment {next.date} · £{formatCurrency(next.amount)}</> : 'No upcoming payment') : 'Paused'}
+          </span>
+          <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
+        </button>
+
+        {isOpen && (
+          <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
+            <PensionForm
+              people={people}
+              defaultPersonId={pension.personId}
+              initial={{
+                name: pension.name,
+                amount: pension.amount,
+                frequency: pension.frequency,
+                intervalWeeks: pension.intervalWeeks,
+                anchorDate: pension.anchorDate,
+                adjustForNonWorkingDay: pension.adjustForNonWorkingDay,
+                cycleStartFollowsPayday: pension.cycleStartFollowsPayday,
+              }}
+              onCancel={onToggle}
+              onSave={(personId, fields) => {
+                // A standing amount change goes through applyPensionAmountChange
+                // (historized, same as a salary snapshot or a bill's amount
+                // change) — but only when the amount actually changed; editing
+                // just the name/frequency/date shouldn't fabricate a change
+                // record for an amount that never moved.
+                const amountPatch = fields.amount !== pension.amount ? applyPensionAmountChange(pension, fields.amount, todayIso()) : { amount: fields.amount }
+                onSave({
+                  personId,
+                  name: fields.name,
+                  frequency: fields.frequency,
+                  intervalWeeks: fields.intervalWeeks,
+                  anchorDate: fields.anchorDate,
+                  adjustForNonWorkingDay: fields.adjustForNonWorkingDay,
+                  cycleStartFollowsPayday: fields.cycleStartFollowsPayday,
+                  ...amountPatch,
+                })
+                onToggle()
+              }}
+            />
+            <label className="flex items-center gap-2 mt-1">
+              <input type="checkbox" checked={pension.active} onChange={(e) => onSave({ active: e.target.checked })} />
+              <span className="text-xs text-[var(--color-ink-muted)]">Active — paused pensions stop generating new payments</span>
+            </label>
+            <PausedOccurrencesControl
+              windowDates={pauseWindowDates}
+              currentlyPaused={currentlyPausedPensionDates}
+              amountForDate={(date) => resolvePensionAmount(pension, date)}
+              itemLabel="payments"
+              nextPaymentPreview={(tentative) => {
+                const previewPension: Pension = { ...pension, ...setPausedPensionOccurrences(pension, pauseWindowDates, tentative) }
+                return pensionOccurrencePreviews(previewPension, new Date(), 1)[0]?.date ?? null
+              }}
+              onSave={(pausedDates) => onSave(setPausedPensionOccurrences(pension, pauseWindowDates, pausedDates))}
+            />
+          </div>
+        )}
+      </div>
+    </SwipeToDelete>
+  )
+}
+
+// ── Savings pots (backlog item a) ────────────────────────────────────
+
+const INTEREST_METHOD_LABELS: Record<SavingsInterestMethod['type'], string> = {
+  aer_credited: 'AER, credited at a fixed frequency',
+  daily_accrual_monthly_credited: 'Daily accrual, credited monthly',
+}
+const CREDITING_FREQUENCY_LABELS: Record<'monthly' | 'quarterly' | 'annual', string> = {
+  monthly: 'Monthly',
+  quarterly: 'Quarterly',
+  annual: 'Annually',
+}
+
+function defaultMethodOfType(type: SavingsInterestMethod['type'], aer: number): SavingsInterestMethod {
+  return type === 'aer_credited' ? { type: 'aer_credited', aer, creditingFrequency: 'monthly' } : { type: 'daily_accrual_monthly_credited', aer }
+}
+
+/**
+ * Explanation pop-up shown on save, per Adam's spec — a plain description
+ * of the chosen method plus a worked example ledger (buildExampleLedger,
+ * a fixed £1,000 illustrative balance, has nothing to do with the real
+ * pot being created/edited) so the mechanic — especially the "credited
+ * monthly but accrues daily from the moment money lands" difference the
+ * two methods actually have — is visible, not just described in prose.
+ * Confirming here is what actually commits the save; "Back" returns to
+ * the form with nothing written yet.
+ */
+function InterestExplanationModal({ method, onConfirm, onBack }: { method: SavingsInterestMethod; onConfirm: () => void; onBack: () => void }) {
+  const rows = buildExampleLedger(method)
+  return createPortal(
+    <div className="fixed inset-0 z-[600] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onBack}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] flex flex-col"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* BUGFIX (Adam-reported, 2026-09-02): the Back/Confirm buttons
+            used to be the last children INSIDE this same overflow-y-auto
+            scroll region, alongside the worked-example rows. On touch
+            devices, a tap on an element inside a scrollable container
+            that the browser hasn't yet settled as "not a scroll" can be
+            swallowed rather than registered as a click — exactly
+            matching "first tap does nothing, second tap works" (the
+            first tap resolves the scroll-vs-tap ambiguity, the second is
+            unambiguously a tap). The buttons are now a separate, fixed
+            footer OUTSIDE the scrolling region entirely — only the
+            description + example ledger scroll, same split
+            SavingsPotLedgerModal already uses between its header and its
+            row list. */}
+        <div className="overflow-y-auto flex-1 -mx-5 px-5">
+          <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-2">{INTEREST_METHOD_LABELS[method.type]}</h3>
+          {method.type === 'aer_credited' ? (
+            <p className="text-xs text-[var(--color-ink-muted)] mb-4">
+              Interest is worked out against the balance at the start of each period and paid in {CREDITING_FREQUENCY_LABELS[method.creditingFrequency].toLowerCase()} — a deposit made partway
+              through a period doesn't start earning until the following one.
+            </p>
+          ) : (
+            <p className="text-xs text-[var(--color-ink-muted)] mb-4">
+              Interest builds up every day against whatever the balance actually is that day — a deposit starts earning from the day it lands — but is only actually paid into the pot once a
+              month.
+            </p>
+          )}
+          <p className="text-xs font-semibold text-[var(--color-ink-muted)] mb-2">Worked example, starting from £1,000</p>
+          <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+            {rows.map((r, i) => (
+              <div key={i} className="py-2 flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-[var(--color-ink)]">{r.label}</p>
+                  <p className="text-[10px] text-[var(--color-ink-faint)]">{r.date}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs font-mono" style={{ color: r.label.startsWith('Interest') ? 'var(--color-positive)' : 'var(--color-ink)' }}>
+                    {r.label.startsWith('Interest') ? '+' : ''}£{formatCurrency(r.amount)}
+                  </p>
+                  <p className="text-[10px] text-[var(--color-ink-faint)] font-mono">Balance £{formatCurrency(r.balanceAfter)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="flex gap-2 pt-4 shrink-0">
+          <button onClick={onBack} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-bg-elevated)' }}>
+            Back
+          </button>
+          <button
+            onClick={onConfirm}
+            className="flex-1 py-2 rounded-full text-sm font-semibold text-white"
+            style={{ background: 'var(--color-coral)' }}
+          >
+            Looks good, save
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+interface SavingsPotFields {
+  name: string
+  openingBalance: number
+  openingDate: string
+  interestMethod: SavingsInterestMethod
+  targetAmount?: number
+  targetDate?: string
+  recurringDepositAmount?: number
+  recurringDepositDayOfMonth?: number
+}
+
+/**
+ * Create/edit form for a savings pot. Creation asks "new or existing"
+ * FIRST (Adam's spec) — a brand-new pot skips straight to the form with
+ * openingBalance locked at 0 and openingDate locked to today (no reason
+ * to backdate money that was never there); an existing one shows both
+ * fields, openingDate defaulting to today but freely editable. Editing an
+ * already-created pot (initial set) skips the chooser entirely — the
+ * opening balance/date are a one-time anchor, not something to re-pick
+ * every edit (same "immutable anchor, not a live field" treatment
+ * CreditCard.balanceAsOfDate already gets).
+ */
+export function SavingsPotForm({
+  people,
+  defaultPersonId,
+  initial,
+  onSave,
+  onCancel,
+}: {
+  people: Person[]
+  defaultPersonId: string
+  initial?: SavingsPotFields
+  onSave: (personId: string, fields: SavingsPotFields) => void
+  onCancel: () => void
+}) {
+  const [personId, setPersonId] = useState(defaultPersonId)
+  const [kind, setKind] = useState<'new' | 'existing' | null>(initial ? 'existing' : null)
+  const [name, setName] = useState(initial?.name ?? '')
+  const [openingBalance, setOpeningBalance] = useState(initial?.openingBalance ?? 0)
+  const [openingDate, setOpeningDate] = useState(initial?.openingDate ?? todayIso())
+  const [methodType, setMethodType] = useState<SavingsInterestMethod['type']>(initial?.interestMethod.type ?? 'aer_credited')
+  const [aer, setAer] = useState(initial?.interestMethod.aer ?? 4.5)
+  const [creditingFrequency, setCreditingFrequency] = useState<'monthly' | 'quarterly' | 'annual'>(
+    initial?.interestMethod.type === 'aer_credited' ? initial.interestMethod.creditingFrequency : 'monthly',
+  )
+  const [targetAmount, setTargetAmount] = useState(initial?.targetAmount ?? 0)
+  const [targetDate, setTargetDate] = useState(initial?.targetDate ?? '')
+  const [recurringDepositAmount, setRecurringDepositAmount] = useState(initial?.recurringDepositAmount ?? 0)
+  const [recurringDepositDayOfMonth, setRecurringDepositDayOfMonth] = useState(initial?.recurringDepositDayOfMonth ?? 28)
+  const [confirming, setConfirming] = useState(false)
+
+  const method = defaultMethodOfType(methodType, aer)
+
+  function buildFields(): SavingsPotFields {
+    return {
+      name: name.trim(),
+      openingBalance: kind === 'new' && !initial ? 0 : openingBalance,
+      openingDate,
+      interestMethod: method,
+      targetAmount: targetAmount > 0 ? targetAmount : undefined,
+      targetDate: targetDate || undefined,
+      recurringDepositAmount: recurringDepositAmount > 0 ? recurringDepositAmount : undefined,
+      recurringDepositDayOfMonth: recurringDepositAmount > 0 ? recurringDepositDayOfMonth : undefined,
+    }
+  }
+
+  // Creation only: ask new-vs-existing before showing any fields at all.
+  if (!initial && kind === null) {
+    return (
+      <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Is this a new pot, or one you already have?</span>
+          <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <button
+            onClick={() => {
+              setKind('new')
+              setOpeningBalance(0)
+              setOpeningDate(todayIso())
+            }}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            New pot — starts at £0.00
+          </button>
+          <button
+            onClick={() => setKind('existing')}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            Existing pot — I already have a balance
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      {/* BUGFIX (Adam-reported, 2026-09-02 — "I create a deposit of £250,
+          save, and it changes to 243 or 239"): every field below is a
+          direct sibling in this grid, and several are conditionally
+          shown/hidden (Credited only for aer_credited, On day of month
+          only once a deposit amount is entered, Opening balance/date
+          only for an existing pot). Without an explicit `key`, React
+          reconciles by POSITION — when a conditional sibling appears or
+          disappears, everything after it shifts position, and React can
+          silently REUSE a NumberInput's underlying instance (uncommitted
+          typed text and all) for what is now a DIFFERENT logical field.
+          That's a real, known React footgun, and it's the most plausible
+          concrete mechanism for a typed value silently becoming a
+          different one. Every field now has a stable key tied to what it
+          actually IS, not its position, which removes this failure mode
+          entirely regardless of how the surrounding fields shift. */}
+      <div className="grid grid-cols-2 gap-3">
+        {initial && <PersonSelectField key="person" people={people} value={personId} onChange={setPersonId} />}
+        <Field key="name" label="Name">
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Rainy day fund"
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          />
+        </Field>
+        {/* BUGFIX (Adam-reported, 2026-09-02): the opening balance/date
+            are a one-time anchor set once at creation — same "immutable
+            anchor, not a live field" treatment CreditCard.balanceAsOfDate
+            gets — and were NEVER meant to be editable afterward. `kind`
+            defaults to 'existing' whenever `initial` is set (see its own
+            useState above) purely so this form doesn't ask "new or
+            existing?" again when editing — that default was silently
+            ALSO making these two fields reappear on every edit, for
+            every pot regardless of how it was originally created. Now
+            gated on `!initial` too, so they only ever show during the
+            actual creation flow. */}
+        {kind === 'existing' && !initial && (
+          <Field key="opening-balance" label="Opening balance (£)">
+            <NumberInput
+              inputMode="decimal"
+              value={openingBalance || ''}
+              onChange={(v) => setOpeningBalance(Number(v) || 0)}
+              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+            />
+          </Field>
+        )}
+        {kind === 'existing' && !initial && <EditField key="opening-date" label="Opening date" type="date" value={openingDate} onChange={setOpeningDate} />}
+        <Field key="interest-method" label="Interest method">
+          <select
+            value={methodType}
+            onChange={(e) => setMethodType(e.target.value as SavingsInterestMethod['type'])}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          >
+            {(Object.keys(INTEREST_METHOD_LABELS) as SavingsInterestMethod['type'][]).map((t) => (
+              <option key={t} value={t} style={{ color: '#000' }}>
+                {INTEREST_METHOD_LABELS[t]}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field key="aer" label="AER (%)">
+          <NumberInput
+            inputMode="decimal"
+            value={aer || ''}
+            onChange={(v) => setAer(Number(v) || 0)}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+          />
+        </Field>
+        {/* Only the aer_credited method has a crediting-frequency choice — daily_accrual is always monthly, per that method's own comment in types/ledger.ts. Dynamically shown/hidden by methodType, per Adam's spec. */}
+        {methodType === 'aer_credited' && (
+          <Field key="crediting-frequency" label="Credited">
+            <select
+              value={creditingFrequency}
+              onChange={(e) => setCreditingFrequency(e.target.value as 'monthly' | 'quarterly' | 'annual')}
+              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+            >
+              {(Object.keys(CREDITING_FREQUENCY_LABELS) as ('monthly' | 'quarterly' | 'annual')[]).map((f) => (
+                <option key={f} value={f} style={{ color: '#000' }}>
+                  {CREDITING_FREQUENCY_LABELS[f]}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        <Field key="recurring-deposit-amount" label="Monthly deposit (£, optional)">
+          <NumberInput
+            inputMode="decimal"
+            value={recurringDepositAmount || ''}
+            onChange={(v) => setRecurringDepositAmount(Number(v) || 0)}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+          />
+        </Field>
+        {recurringDepositAmount > 0 && (
+          <EditField
+            key="recurring-deposit-day"
+            label="On day of month"
+            type="number"
+            value={String(recurringDepositDayOfMonth)}
+            onChange={(v) => setRecurringDepositDayOfMonth(Math.min(31, Math.max(1, Number(v) || 1)))}
+          />
+        )}
+        <Field key="target-amount" label="Target amount (£, optional)">
+          <NumberInput
+            inputMode="decimal"
+            value={targetAmount || ''}
+            onChange={(v) => setTargetAmount(Number(v) || 0)}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+          />
+        </Field>
+        <EditField key="target-date" label="Target date (optional)" type="date" value={targetDate} onChange={setTargetDate} />
+      </div>
+      <p className="text-[10px] text-[var(--color-ink-faint)] mt-2">
+        Target amount shows a progress pie chart on this pot's card. Target date shows how much to save each payday to hit it by then — the two are independent; set either, both, or neither.
+      </p>
+      <div className="flex gap-2 mt-4">
+        <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)' }}>
+          Cancel
+        </button>
+        <button
+          onClick={() => {
+            if (!name.trim()) return
+            setConfirming(true)
+          }}
+          className="flex-1 py-2 rounded-full text-sm font-semibold text-white"
+          style={{ background: 'var(--color-coral)' }}
+        >
+          Save
+        </button>
+      </div>
+      {confirming && (
+        <InterestExplanationModal
+          method={method}
+          onBack={() => setConfirming(false)}
+          onConfirm={() => {
+            onSave(personId, buildFields())
+            setConfirming(false)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/** A single pot's row — collapsed summary + expand, mirroring PensionRow exactly, plus the info-icon ledger modal (same placement/pattern as CreditCardRow's in Loans.tsx). */
+/**
+ * The recurring-deposit editor shared by Savings/Pots/Joint Wallet-page
+ * cards (2026-09-04 session, "single clean consistent method to create
+ * them throughout" — Adam-specified). Writes/edits a RecurringTemplate
+ * with kind: 'transfer', transferTo: `location` — the EXACT same entity
+ * the Transactions page's Transfer pill creates, so a recurring deposit
+ * set up from either place shows up (and is editable) from the other.
+ * Deliberately deposit-only (transferFrom always 'personal') — a
+ * recurring WITHDRAWAL from one of these entities is set up from the
+ * Transfer pill itself, same as it always was for a one-off withdrawal.
+ */
+function RecurringTransferEditor({
+  location,
+  defaultName,
+  templates,
+  onAdd,
+  onUpdate,
+  onRemove,
+}: {
+  location: TransferLocation
+  defaultName: string
+  templates: RecurringTemplate[]
+  onAdd: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
+  onUpdate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
+  onRemove: (id: string) => void
+}) {
+  const existing = templates.find((t) => t.kind === 'transfer' && locationsEqual(t.transferTo, location))
+  const [draftAmount, setDraftAmount] = useState<number | null>(null)
+
+  if (!existing && draftAmount === null) {
+    return (
+      <button onClick={() => setDraftAmount(50)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+        + Add a recurring deposit
+      </button>
+    )
+  }
+
+  if (!existing && draftAmount !== null) {
+    return (
+      <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+        <EditField label="Amount (£)" type="number" value={draftAmount} onChange={(v) => setDraftAmount(Number(v) || 0)} />
+        <div className="flex justify-end gap-3 mt-1">
+          <button onClick={() => setDraftAmount(null)} className="text-xs text-[var(--color-ink-muted)]">
+            Cancel
+          </button>
+          <button
+            disabled={!(draftAmount > 0)}
+            onClick={() => {
+              onAdd({ name: defaultName, amount: draftAmount, frequency: 'monthly', anchorDate: todayIso(), transferFrom: { type: 'personal' }, transferTo: location })
+              setDraftAmount(null)
+            }}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
+            style={{ background: 'var(--color-coral)' }}
+          >
+            Continue
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const template = existing!
+  return (
+    <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-[var(--color-ink)]">Recurring deposit</span>
+        <button onClick={() => onRemove(template.id)} className="text-xs" style={{ color: 'var(--color-negative)' }}>
+          Remove
+        </button>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <EditField label="Amount (£)" type="number" value={template.amount} onChange={(v) => onUpdate(template.id, { amount: Number(v) || 0 })} />
+        <EditField
+          label="On day of month"
+          type="number"
+          value={new Date(template.anchorDate).getDate()}
+          onChange={(v) => {
+            const day = Math.min(31, Math.max(1, Number(v) || 1))
+            const anchor = new Date(template.anchorDate)
+            anchor.setDate(day)
+            onUpdate(template.id, { anchorDate: toLocalIsoDate(anchor) })
+          }}
+        />
+      </div>
+      <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+        <input type="checkbox" checked={!!template.followsPayday} onChange={(e) => onUpdate(template.id, { followsPayday: e.target.checked })} />
+        Land on payday, even if it moves
+      </label>
+      <RecurringTransferPauseControl template={template} onUpdate={(updates) => onUpdate(template.id, updates)} />
+    </div>
+  )
+}
+
+/** Pause/resume checklist for a recurring transfer — same shared PausedOccurrencesControl widget every other recurring entity (Bills/Pensions/the old SavingsPot fields) already uses, against schedule.ts's generic template occurrence functions rather than an entity-specific pair. */
+function RecurringTransferPauseControl({ template, onUpdate }: { template: RecurringTemplate; onUpdate: (updates: Partial<Omit<RecurringTemplate, 'id'>>) => void }) {
+  const start = new Date()
+  const end = new Date()
+  end.setFullYear(end.getFullYear() + 1)
+  const windowDates = scheduledTemplateDates(template, start, end)
+  const currentlyPaused = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && windowDates.includes(o.originalDate)).map((o) => o.originalDate))
+
+  return (
+    <PausedOccurrencesControl
+      windowDates={windowDates}
+      currentlyPaused={currentlyPaused}
+      amountForDate={() => template.amount}
+      itemLabel="deposits"
+      nextPaymentPreview={(tentative) => {
+        const previewTemplate: RecurringTemplate = { ...template, ...setPausedTemplateOccurrences(template, windowDates, tentative) }
+        return templateOccurrencePreviews(previewTemplate, new Date(), 1)[0]?.date ?? null
+      }}
+      onSave={(pausedDates) => onUpdate(setPausedTemplateOccurrences(template, windowDates, pausedDates))}
+    />
+  )
+}
+
+function SavingsPotRow({
+  pot,
+  people,
+  transactions,
+  isOpen,
+  onToggle,
+  onSave,
+  onRemove,
+  onOverrideInterest,
+  onLogDeposit,
+  onLogWithdrawal,
+  recurringTemplates,
+  onAddRecurringTransfer,
+  onUpdateRecurringTemplate,
+  onRemoveRecurringTemplate,
+}: {
+  pot: SavingsPot
+  people: Person[]
+  transactions: Transaction[]
+  isOpen: boolean
+  onToggle: () => void
+  onSave: (updates: Partial<Omit<SavingsPot, 'id' | 'personId'>> & { personId?: string }) => void
+  onRemove: () => void
+  onOverrideInterest: (date: string, amount: number) => void
+  // Phase 5 (2026-09 session) — same entry point Loans.tsx gives a loan
+  // for logging an overpayment, right on the pot's own row. Calls
+  // straight through to logSavingsDeposit/logSavingsWithdrawal — the
+  // SAME functions the Transactions page's Savings pill already uses, so
+  // whichever entry point someone logs from, it shows up (and is
+  // editable) from the other one too. Deliberately additive, not a
+  // replacement for the Transactions-page path.
+  onLogDeposit: (amount: number, date: string, note?: string) => void
+  onLogWithdrawal: (amount: number, date: string, note?: string) => void
+  // Transfer pill (2026-09-04 session) — the recurring deposit editor
+  // below now creates/edits a RecurringTemplate against these, the same
+  // "single clean consistent method" the Transactions page's Transfer
+  // pill uses, rather than writing to this pot's own legacy fields.
+  recurringTemplates: RecurringTemplate[]
+  onAddRecurringTransfer: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
+  onUpdateRecurringTemplate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
+  onRemoveRecurringTemplate: (id: string) => void
+}) {
+  const owner = people.find((p) => p.id === pot.personId)
+  const balance = savingsPotBalanceAsOf(pot, transactions, new Date())
+  const nextDeposit = depositOccurrencePreviews(pot, new Date(), 1)[0]
+  const [ledgerOpen, setLedgerOpen] = useState(false)
+
+  return (
+    <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
+      <div className="relative rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
+        <div className="flex items-center gap-2">
+          <button onClick={onToggle} className="flex-1 min-w-0 flex items-center justify-between text-left">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-display text-base font-semibold text-[var(--color-ink)] truncate">{pot.name}</span>
+                {people.length > 1 && <span className="text-xs text-[var(--color-ink-muted)] shrink-0">{owner?.name ?? 'Unknown'}</span>}
+              </div>
+              <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+                £{formatCurrency(balance)} · {nextDeposit ? `next deposit ${nextDeposit.date}` : 'no recurring deposit'}
+              </p>
+            </div>
+            <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
+          </button>
+          <button onClick={() => setLedgerOpen(true)} className="shrink-0 text-[var(--color-ink-faint)]" aria-label={`View ${pot.name}'s ledger`}>
+            <Info size={16} />
+          </button>
+        </div>
+
+        {ledgerOpen && <SavingsPotLedgerModal pot={pot} transactions={transactions} onOverrideInterest={onOverrideInterest} onClose={() => setLedgerOpen(false)} />}
+
+        {isOpen && (
+          <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
+            <SavingsPotForm
+              people={people}
+              defaultPersonId={pot.personId}
+              initial={{
+                name: pot.name,
+                openingBalance: pot.openingBalance,
+                openingDate: pot.openingDate,
+                interestMethod: pot.interestMethod,
+                targetAmount: pot.targetAmount,
+                targetDate: pot.targetDate,
+                recurringDepositAmount: pot.recurringDepositAmount,
+                recurringDepositDayOfMonth: pot.recurringDepositDayOfMonth,
+              }}
+              onCancel={onToggle}
+              onSave={(personId, fields) => {
+                // A rate CHANGE goes through applyInterestMethodChange
+                // (historized, same as Pension's amount changes/a bill's
+                // amount change) — but only when the method actually
+                // changed, same "don't fabricate a change record for
+                // nothing that moved" guard PensionRow already applies.
+                const methodChanged = JSON.stringify(fields.interestMethod) !== JSON.stringify(pot.interestMethod)
+                const methodPatch = methodChanged ? applyInterestMethodChange(pot, fields.interestMethod, todayIso()) : { interestMethod: fields.interestMethod }
+                onSave({
+                  personId,
+                  name: fields.name,
+                  targetAmount: fields.targetAmount,
+                  targetDate: fields.targetDate,
+                  recurringDepositAmount: fields.recurringDepositAmount,
+                  recurringDepositDayOfMonth: fields.recurringDepositDayOfMonth,
+                  recurringDepositStartDate: fields.recurringDepositAmount ? (pot.recurringDepositStartDate ?? todayIso()) : undefined,
+                  ...methodPatch,
+                })
+                onToggle()
+              }}
+            />
+
+            {/* Phase 5 (2026-09 session) — same "+ Log a payment" pattern
+                Loans.tsx gives a loan, right on the pot's own row. Writes
+                through logSavingsDeposit/logSavingsWithdrawal — the SAME
+                functions the Transactions page's Savings pill already
+                uses, so this is a second entry point onto existing data,
+                not a parallel mechanism. */}
+            <LogSavingsTransactionButton onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
+
+            {/* Transfer pill (2026-09-04 session) — same discoverable,
+                Loan-style entry point as before, now creating/editing a
+                RecurringTemplate (kind: 'transfer') instead of this
+                pot's own legacy fields, so it shows up in the
+                Transactions page's Transfer pill too. */}
+            <RecurringTransferEditor
+              location={{ type: 'savings', savingsPotId: pot.id }}
+              defaultName={pot.name}
+              templates={recurringTemplates}
+              onAdd={onAddRecurringTransfer}
+              onUpdate={onUpdateRecurringTemplate}
+              onRemove={onRemoveRecurringTemplate}
+            />
+          </div>
+        )}
+      </div>
+    </SwipeToDelete>
+  )
+}
+
+/**
+ * Pause/resume the recurring deposit schedule — redesigned per Adam's
+ * explicit spec (2026-09-02), replacing an earlier "Active" checkbox
+ * that conflated pot-wide activity with just pausing deposits, which
+ * wasn't what was asked for. Tap "Pause deposits" (inline red text, per
+ * spec), pick one of the SAME last-2/next-12 deposit occurrences the
+ * info-icon ledger modal shows, Save — that occurrence and everything
+ * after it stops generating. The button becomes "Resume deposits";
+ * picking a date there closes the pause window from that point on.
+ * Growth-over-time concern (Adam's own): openPauseWindow/pauseDepositsFrom/
+ * resumeDepositsFrom's own comments in savingsPotLedger.ts cover why this
+ * doesn't run away — one array entry per pause CYCLE, not per skipped
+ * occurrence, same shape as every other historized array in this app.
+ */
+/**
+ * Manage paused deposits — REDESIGNED 2026-09-02 per Adam's explicit
+ * correction: no separate pause/resume flow. One checklist, over the
+ * SAME last-2/next-12 window the info-icon modal shows, pre-checked with
+ * whichever dates are already paused. Multi-select freely, Save writes
+ * the whole set in one go (setPausedDeposits reconciles the checked set
+ * against recurringDepositOverrides — see its own comment). Checking a
+ * date pauses it; unchecking an already-paused one un-pauses it; there's
+ * no separate "resume" concept or button any more.
+ */
+/**
+ * "+ Log a deposit / withdrawal" — Phase 5's other new entry point,
+ * mirroring Loans.tsx's LoggedPaymentEditForm/"+ Log a payment" flow
+ * exactly: a lightweight toggle button that reveals amount/date/type/note
+ * fields, with a Cancel/Save pair, writing straight through to
+ * logSavingsDeposit/logSavingsWithdrawal on save. Deliberately simpler
+ * than the loan version — a deposit has no recast-mode choice to make,
+ * it's genuinely just "how much, when, which direction."
+ */
+function LogSavingsTransactionButton({
+  onLogDeposit,
+  onLogWithdrawal,
+}: {
+  onLogDeposit: (amount: number, date: string, note?: string) => void
+  onLogWithdrawal: (amount: number, date: string, note?: string) => void
+}) {
+  const [logging, setLogging] = useState(false)
+  const [type, setType] = useState<'deposit' | 'withdrawal'>('deposit')
+  const [amount, setAmount] = useState('')
+  const [date, setDate] = useState(todayIso())
+  const [note, setNote] = useState('')
+
+  if (!logging) {
+    return (
+      <button onClick={() => setLogging(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+        + Log a deposit or withdrawal
+      </button>
+    )
+  }
+
+  const amountNumber = Number(amount)
+  const canSave = amountNumber > 0 && !!date
+
+  function reset() {
+    setLogging(false)
+    setType('deposit')
+    setAmount('')
+    setDate(todayIso())
+    setNote('')
+  }
+
+  return (
+    <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="flex gap-2">
+        <button
+          onClick={() => setType('deposit')}
+          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+          style={{ background: type === 'deposit' ? 'var(--color-coral)' : 'var(--color-surface)', color: type === 'deposit' ? '#fff' : 'var(--color-ink-muted)' }}
+        >
+          Deposit
+        </button>
+        <button
+          onClick={() => setType('withdrawal')}
+          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+          style={{ background: type === 'withdrawal' ? 'var(--color-coral)' : 'var(--color-surface)', color: type === 'withdrawal' ? '#fff' : 'var(--color-ink-muted)' }}
+        >
+          Withdrawal
+        </button>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+        <EditField label="Date" type="date" value={date} onChange={setDate} />
+      </div>
+      <EditField label="Note (optional)" value={note} onChange={setNote} />
+      <FormButtonRow
+        onCancel={reset}
+        onSave={() => {
+          if (type === 'deposit') onLogDeposit(amountNumber, date, note || undefined)
+          else onLogWithdrawal(amountNumber, date, note || undefined)
+          reset()
+        }}
+        saveDisabled={!canSave}
+      />
+    </div>
+  )
+}
+
+/**
+ * Info-icon ledger modal — same bottom-sheet/"tap a row to adjust"
+ * pattern as CreditCardLedgerModal (Loans.tsx), against
+ * buildSavingsPotScheduleRows' ramp-up window instead of a fixed
+ * lookback. Only interest rows are tappable — deposits/withdrawals are
+ * shown but not editable from here, per Adam's spec.
+ */
+function SavingsPotLedgerModal({
+  pot,
+  transactions,
+  onOverrideInterest,
+  onClose,
+}: {
+  pot: SavingsPot
+  transactions: Transaction[]
+  onOverrideInterest: (date: string, amount: number) => void
+  onClose: () => void
+}) {
+  const rows = buildSavingsPotScheduleRows(pot, transactions)
+  const [editingDate, setEditingDate] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState('')
+
+  function startEditing(row: { date: string; amount: number }) {
+    setEditingDate(row.date)
+    setEditValue(String(row.amount))
+  }
+  function commitEdit() {
+    if (editingDate && Number(editValue) >= 0) onOverrideInterest(editingDate, Number(editValue))
+    setEditingDate(null)
+  }
+
+  const rowLabel = (type: SavingsPotScheduleRow['type']) => (type === 'savings_deposit' ? 'Deposit' : type === 'savings_withdrawal' ? 'Withdrawal' : 'Interest')
+
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] flex flex-col"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">{pot.name} — ledger</h3>
+          <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+            <X size={20} />
+          </button>
+        </div>
+        <p className="text-xs text-[var(--color-ink-muted)] mb-3">Tap an interest payment to adjust it. Deposits and withdrawals come from the Transactions page.</p>
+
+        <div className="overflow-y-auto flex-1 -mx-5 px-5 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+          {rows.map((row) =>
+            editingDate === row.date && row.type === 'savings_interest' ? (
+              <div key={`${row.type}-${row.date}`} className="py-2 flex items-center gap-2">
+                <span className="text-xs text-[var(--color-ink-muted)] flex-1">{row.date}</span>
+                <input
+                  type="number"
+                  autoFocus
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  className="w-24 bg-transparent border-b border-[var(--color-track)] py-1 text-right text-[var(--color-ink)] outline-none font-mono"
+                />
+                <button onClick={commitEdit} className="text-xs font-semibold px-2 py-1 rounded-lg text-white" style={{ background: 'var(--color-coral)' }}>
+                  Save
+                </button>
+                <button onClick={() => setEditingDate(null)} className="text-xs text-[var(--color-ink-muted)]">
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                key={`${row.type}-${row.date}`}
+                onClick={() => row.overridable && startEditing(row)}
+                disabled={!row.overridable}
+                className="py-2 flex items-center justify-between text-left"
+              >
+                <span className="text-xs text-[var(--color-ink)]">
+                  {row.date} · {rowLabel(row.type)}
+                  {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
+                </span>
+                <span className="text-xs font-mono" style={{ color: row.type === 'savings_withdrawal' ? 'var(--color-negative)' : 'var(--color-positive)' }}>
+                  {row.type === 'savings_withdrawal' ? '-' : '+'}£{formatCurrency(row.amount)}
+                </span>
+              </button>
+            ),
+          )}
+          {rows.length === 0 && <p className="py-4 text-center text-xs text-[var(--color-ink-faint)]">Nothing scheduled yet.</p>}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+/**
+ * PHASE 4 (2026-09 session) — the Pots backlog item's Wallet-page half.
+ * Mirrors SavingsPot's component set immediately above wherever the two
+ * genuinely share shape (recurring deposit, pause control, hand-logged
+ * deposit/withdrawal), and is genuinely new wherever they don't (the
+ * bill/loan include/exclude checklist — see Pot's own header comment in
+ * types/ledger.ts for why membership is derived, not stored). No
+ * info-icon ledger modal here, deliberately — Adam's own spec: "No info
+ * modal needed for this." The pot's full ledger view (deposits,
+ * withdrawals, and every bill/loan payment it funds, same "this cycle /
+ * next 3 cycles" style as Personal) lives on the Summary page's own pot
+ * swipe card instead (Phase 7) — this row only needs enough to manage
+ * the pot itself, not re-show its whole history a second time.
+ */
+
+/** Hand-logged "+ Log a deposit or withdrawal" — identical shape to LogSavingsTransactionButton, writing through logPotDeposit/logPotWithdrawal instead. */
+function LogPotTransactionButton({
+  onLogDeposit,
+  onLogWithdrawal,
+}: {
+  onLogDeposit: (amount: number, date: string, note?: string) => void
+  onLogWithdrawal: (amount: number, date: string, note?: string) => void
+}) {
+  const [logging, setLogging] = useState(false)
+  const [type, setType] = useState<'deposit' | 'withdrawal'>('deposit')
+  const [amount, setAmount] = useState('')
+  const [date, setDate] = useState(todayIso())
+  const [note, setNote] = useState('')
+
+  if (!logging) {
+    return (
+      <button onClick={() => setLogging(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+        + Log a deposit or withdrawal
+      </button>
+    )
+  }
+
+  const amountNumber = Number(amount)
+  const canSave = amountNumber > 0 && !!date
+
+  function reset() {
+    setLogging(false)
+    setType('deposit')
+    setAmount('')
+    setDate(todayIso())
+    setNote('')
+  }
+
+  return (
+    <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="flex gap-2">
+        <button
+          onClick={() => setType('deposit')}
+          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+          style={{ background: type === 'deposit' ? 'var(--color-coral)' : 'var(--color-surface)', color: type === 'deposit' ? '#fff' : 'var(--color-ink-muted)' }}
+        >
+          Deposit
+        </button>
+        <button
+          onClick={() => setType('withdrawal')}
+          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+          style={{ background: type === 'withdrawal' ? 'var(--color-coral)' : 'var(--color-surface)', color: type === 'withdrawal' ? '#fff' : 'var(--color-ink-muted)' }}
+        >
+          Withdrawal
+        </button>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+        <EditField label="Date" type="date" value={date} onChange={setDate} />
+      </div>
+      <EditField label="Note (optional)" value={note} onChange={setNote} />
+      <FormButtonRow
+        onCancel={reset}
+        onSave={() => {
+          if (type === 'deposit') onLogDeposit(amountNumber, date, note || undefined)
+          else onLogWithdrawal(amountNumber, date, note || undefined)
+          reset()
+        }}
+        saveDisabled={!canSave}
+      />
+    </div>
+  )
+}
+
+function PotBillsAndLoansControl({
+  pot,
+  templates,
+  loans,
+  onAssignTemplateLocation,
+  onAssignLoanLocation,
+}: {
+  pot: Pot
+  templates: RecurringTemplate[]
+  loans: Loan[]
+  onAssignTemplateLocation: (templateId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
+  onAssignLoanLocation: (loanId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
+}) {
+  const eligibleTemplates = templates.filter((t) => t.ownerId === pot.personId && (t.location === 'personal' || (t.location === 'pot' && t.potId === pot.id)))
+  const eligibleLoans = loans.filter((l) => l.ownerId === pot.personId && (l.location === 'personal' || (l.location === 'pot' && l.potId === pot.id)))
+
+  type Item = { key: string; id: string; kind: 'template' | 'loan'; name: string; amount: number; inPot: boolean }
+  const items: Item[] = [
+    ...eligibleTemplates.map((t) => ({ key: `t:${t.id}`, id: t.id, kind: 'template' as const, name: t.name, amount: t.amount, inPot: t.location === 'pot' })),
+    ...eligibleLoans.map((l) => ({ key: `l:${l.id}`, id: l.id, kind: 'loan' as const, name: l.name, amount: l.monthlyPayment, inPot: l.location === 'pot' })),
+  ]
+
+  const [checked, setChecked] = useState<Set<string>>(new Set(items.filter((i) => i.inPot).map((i) => i.key)))
+  const [effectiveFrom, setEffectiveFrom] = useState(todayIso())
+  const [editing, setEditing] = useState(false)
+
+  if (items.length === 0) return null
+
+  const dirty = items.some((i) => checked.has(i.key) !== i.inPot)
+
+  if (!editing) {
+    const inPotCount = items.filter((i) => i.inPot).length
+    return (
+      <button onClick={() => setEditing(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+        {inPotCount > 0 ? `Manage what this pot pays (${inPotCount} of ${items.length})` : 'Choose what this pot pays'}
+      </button>
+    )
+  }
+
+  function toggle(key: string) {
+    setChecked((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+  function reset() {
+    setChecked(new Set(items.filter((i) => i.inPot).map((i) => i.key)))
+    setEffectiveFrom(todayIso())
+    setEditing(false)
+  }
+
+  return (
+    <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+      <span className="text-xs font-medium text-[var(--color-ink)]">What this pot pays</span>
+      <div className="flex flex-col divide-y max-h-64 overflow-y-auto" style={{ borderColor: 'var(--color-track)' }}>
+        {items.map((item) => (
+          <label key={item.key} className="py-2 flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" checked={checked.has(item.key)} onChange={() => toggle(item.key)} className="accent-[var(--color-coral)]" />
+            <span className="flex-1 text-sm text-[var(--color-ink)] truncate">{item.name}</span>
+            <span className="text-xs font-mono text-[var(--color-ink-muted)] shrink-0">£{formatCurrency(item.amount)}</span>
+          </label>
+        ))}
+      </div>
+      {dirty && <EditField label="Changes take effect from" type="date" value={effectiveFrom} onChange={setEffectiveFrom} />}
+      <FormButtonRow
+        onCancel={reset}
+        onSave={() => {
+          for (const item of items) {
+            const nowChecked = checked.has(item.key)
+            if (nowChecked === item.inPot) continue // untouched — nothing to do
+            if (item.kind === 'template') onAssignTemplateLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
+            else onAssignLoanLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
+          }
+          setEditing(false)
+        }}
+        saveDisabled={!dirty}
+      />
+    </div>
+  )
+}
+
+/** Pot creation — person is already chosen by the PersonPickerCard step before this ever renders (Adam's spec step 1), so unlike SavingsPotForm there's no person selector here, creation-only or edit-mode split. Just name (step 2), then — only if this person actually has any eligible personal bills — the move-in checklist (step 3) and its effective date (step 4). A brand-new pot always starts at £0 as of today; Adam's spec never describes an "existing pot with a starting balance" option the way SavingsPot/Pension/Loan get, so this deliberately doesn't offer one. */
+function PotForm({
+  eligibleBills,
+  onCancel,
+  onSave,
+}: {
+  eligibleBills: RecurringTemplate[]
+  onCancel: () => void
+  onSave: (fields: { name: string; billIdsToMoveIn: string[]; effectiveFrom: string }) => void
+}) {
+  const [name, setName] = useState('')
+  const [checkedBillIds, setCheckedBillIds] = useState<Set<string>>(new Set())
+  const [effectiveFrom, setEffectiveFrom] = useState(todayIso())
+
+  function toggle(id: string) {
+    setCheckedBillIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  return (
+    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <Field label="Name">
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. Bills"
+          className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+        />
+      </Field>
+
+      {eligibleBills.length > 0 && (
+        <div className="mt-4">
+          <p className="text-xs font-semibold text-[var(--color-ink-muted)] mb-2">Move any existing personal bills into this pot? (optional)</p>
+          <div className="flex flex-col divide-y max-h-64 overflow-y-auto" style={{ borderColor: 'var(--color-track)' }}>
+            {eligibleBills.map((bill) => (
+              <label key={bill.id} className="py-2 flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" checked={checkedBillIds.has(bill.id)} onChange={() => toggle(bill.id)} className="accent-[var(--color-coral)]" />
+                <span className="flex-1 text-sm text-[var(--color-ink)] truncate">{bill.name}</span>
+                <span className="text-xs font-mono text-[var(--color-ink-muted)] shrink-0">£{formatCurrency(bill.amount)}</span>
+              </label>
+            ))}
+          </div>
+          {checkedBillIds.size > 0 && (
+            <div className="mt-3">
+              <EditField label="Changes take effect from" type="date" value={effectiveFrom} onChange={setEffectiveFrom} />
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="flex gap-2 mt-4">
+        <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)' }}>
+          Cancel
+        </button>
+        <button
+          disabled={!name.trim()}
+          onClick={() => onSave({ name: name.trim(), billIdsToMoveIn: [...checkedBillIds], effectiveFrom })}
+          className="flex-1 py-2 rounded-full text-sm font-semibold text-white disabled:opacity-40"
+          style={{ background: 'var(--color-coral)' }}
+        >
+          Create
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** A single pot's row — collapsed summary + expand, mirroring SavingsPotRow's shape minus the ledger modal (see this section's own header comment for why). */
+function PotRow({
+  pot,
+  people,
+  templates,
+  loans,
+  transactions,
+  isOpen,
+  onToggle,
+  onSave,
+  onRemove,
+  onLogDeposit,
+  onLogWithdrawal,
+  onAssignTemplateLocation,
+  onAssignLoanLocation,
+  onAddRecurringTransfer,
+  onUpdateRecurringTemplate,
+  onRemoveRecurringTemplate,
+}: {
+  pot: Pot
+  people: Person[]
+  templates: RecurringTemplate[]
+  loans: Loan[]
+  transactions: Transaction[]
+  isOpen: boolean
+  onToggle: () => void
+  onSave: (updates: Partial<Omit<Pot, 'id' | 'personId'>>) => void
+  onRemove: () => void
+  onLogDeposit: (amount: number, date: string, note?: string) => void
+  onLogWithdrawal: (amount: number, date: string, note?: string) => void
+  onAssignTemplateLocation: (templateId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
+  onAssignLoanLocation: (loanId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
+  onAddRecurringTransfer: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
+  onUpdateRecurringTemplate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
+  onRemoveRecurringTemplate: (id: string) => void
+}) {
+  const owner = people.find((p) => p.id === pot.personId)
+  const balance = potBalanceAsOf(pot, transactions, new Date())
+  const nextDeposit = potDepositOccurrencePreviews(pot, new Date(), 1)[0]
+  const payingCount = templates.filter((t) => t.location === 'pot' && t.potId === pot.id).length + loans.filter((l) => l.location === 'pot' && l.potId === pot.id).length
+
+  return (
+    <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
+      <div className="relative rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
+        <button onClick={onToggle} className="w-full flex items-center justify-between text-left">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-display text-base font-semibold text-[var(--color-ink)] truncate">{pot.name}</span>
+              {people.length > 1 && <span className="text-xs text-[var(--color-ink-muted)] shrink-0">{owner?.name ?? 'Unknown'}</span>}
+            </div>
+            <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+              £{formatCurrency(balance)} · {payingCount > 0 ? `pays ${payingCount} bill${payingCount === 1 ? '' : 's'}/loan${payingCount === 1 ? '' : 's'}` : 'not paying anything yet'}
+              {nextDeposit ? ` · next deposit ${nextDeposit.date}` : ''}
+            </p>
+          </div>
+          <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
+        </button>
+
+        {isOpen && (
+          <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
+            <Field label="Name">
+              <input
+                value={pot.name}
+                onChange={(e) => onSave({ name: e.target.value })}
+                className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+              />
+            </Field>
+
+            <LogPotTransactionButton onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
+            <RecurringTransferEditor
+              location={{ type: 'pot', potId: pot.id }}
+              defaultName={pot.name}
+              templates={templates}
+              onAdd={onAddRecurringTransfer}
+              onUpdate={onUpdateRecurringTemplate}
+              onRemove={onRemoveRecurringTemplate}
+            />
+            <PotBillsAndLoansControl pot={pot} templates={templates} loans={loans} onAssignTemplateLocation={onAssignTemplateLocation} onAssignLoanLocation={onAssignLoanLocation} />
+          </div>
+        )}
+      </div>
+    </SwipeToDelete>
+  )
+}
+
+/** People management — add (always visible)/rename/delete/Set-as-me, pulled off the Salary rows into its own surface per Adam's separation-of-concerns direction. */
+function PeopleModal({
+  people,
+  primaryPersonId,
+  onAdd,
+  onRename,
+  onRemove,
+  onSetPrimary,
+  onClose,
+}: {
+  people: Person[]
+  primaryPersonId: string
+  onAdd: (name: string) => void
+  onRename: (id: string, name: string) => void
+  onRemove: (id: string) => void
+  onSetPrimary: (id: string) => void
+  onClose: () => void
+}) {
+  const [newName, setNewName] = useState('')
+  // The single highest-consequence delete in the app (UI consistency
+  // review §2/§10 Phase 1) — reassigns everything they own to a fallback
+  // person and, for pensions/savings pots, leaves them unowned entirely.
+  // Given a plain "this can't be undone" undersells what actually
+  // happens, this names the real consequence rather than reusing
+  // SwipeToDelete's generic copy.
+  const [confirmingRemoveId, setConfirmingRemoveId] = useState<string | null>(null)
+  const confirmingPerson = people.find((p) => p.id === confirmingRemoveId)
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">People</h3>
+          <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Always visible — never gated behind any other flow (linking,
+            salary, etc.). See the household-ownership discussion this
+            follows from: person creation is independent of everything
+            else on this page and always has been. */}
+        <div className="rounded-2xl p-3 mb-4 flex gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="Add a person"
+            className="flex-1 bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          />
+          <button
+            onClick={() => {
+              if (!newName.trim()) return
+              onAdd(newName.trim())
+              setNewName('')
+            }}
+            className="px-3 rounded-lg font-medium text-sm"
+            style={{ background: 'var(--color-coral)', color: '#fff' }}
+          >
+            Add
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          {people.map((p) => {
+            const isPrimary = p.id === primaryPersonId
+            return (
+              <div key={p.id} className="flex items-center justify-between gap-2 rounded-2xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
+                <EditablePersonName name={p.name} onRename={(name) => onRename(p.id, name)} />
+                <div className="flex items-center gap-3 shrink-0">
+                  <button
+                    onClick={() => onSetPrimary(p.id)}
+                    disabled={isPrimary}
+                    className="px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wide transition-colors"
+                    style={{ background: isPrimary ? 'var(--color-coral)' : 'var(--color-surface)', color: isPrimary ? '#fff' : 'var(--color-ink-muted)' }}
+                    title={isPrimary ? 'This is your own dashboard view' : 'Make this your dashboard view'}
+                  >
+                    {isPrimary ? 'Me' : 'Set as me'}
+                  </button>
+                  {people.length > 1 && (
+                    <button onClick={() => setConfirmingRemoveId(p.id)} className="text-[var(--color-ink-faint)]">
+                      <Trash2 size={16} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+      {confirmingPerson && (
+        <ConfirmModal
+          title={`Remove ${confirmingPerson.name}?`}
+          description="Their bills, loans, credit cards, pensions, and savings pots will all be reassigned to whoever's left. Already-cleared transactions stay exactly as they are, as a historical record."
+          confirmLabel="Remove"
+          tone="danger"
+          onConfirm={() => {
+            onRemove(confirmingPerson.id)
+            setConfirmingRemoveId(null)
+          }}
+          onCancel={() => setConfirmingRemoveId(null)}
+        />
+      )}
+    </div>,
+    document.body,
+  )
+}
+
+/**
+ * The calendar-icon "Following" picker — one radio group per person with
+ * 2+ active income sources (people with just one are never shown here at
+ * all, since there's nothing to choose). Lives on whichever of Salary/
+ * Pensions' headers currently hosts the calendar icon; the picker's own
+ * content doesn't depend on which — it always covers the whole household.
+ */
+function FollowingPickerModal({
+  people,
+  pensions,
+  payCycles,
+  onChoose,
+  onClose,
+}: {
+  people: Person[]
+  pensions: Pension[]
+  payCycles: PayCycleConfig[]
+  onChoose: (personId: string, source: PayCycleConfig['followsIncomeSource']) => void
+  onClose: () => void
+}) {
+  const eligible = people.filter((p) => activeIncomeSourceCount(p, pensions) >= 2)
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">Which period to follow</h3>
+          <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+            <X size={20} />
+          </button>
+        </div>
+        <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+          Every income source still generates and shows in the ledger regardless — this only decides which one's cadence sets the budgeting-cycle boundary.
+        </p>
+        <div className="flex flex-col gap-5">
+          {eligible.map((person) => {
+            const payCycle = payCycles.find((pc) => pc.personId === person.id)
+            const current = payCycle?.followsIncomeSource ?? { type: 'salary' as const }
+            const personPensions = pensions.filter((p) => p.personId === person.id && p.active)
+            return (
+              <div key={person.id}>
+                {people.length > 1 && <p className="text-xs font-semibold text-[var(--color-ink-muted)] mb-2">{person.name}</p>}
+                <div className="flex flex-col gap-1.5">
+                  {hasSalaryConfigured(person) && (
+                    <label className="flex items-center gap-2 px-3 py-2 rounded-xl" style={{ background: 'var(--color-bg-elevated)' }}>
+                      <input type="radio" checked={current.type === 'salary'} onChange={() => onChoose(person.id, { type: 'salary' })} />
+                      <span className="text-sm text-[var(--color-ink)]">Salary</span>
+                    </label>
+                  )}
+                  {personPensions.map((pension) => (
+                    <label key={pension.id} className="flex items-center gap-2 px-3 py-2 rounded-xl" style={{ background: 'var(--color-bg-elevated)' }}>
+                      <input
+                        type="radio"
+                        checked={current.type === 'pension' && current.pensionId === pension.id}
+                        onChange={() => onChoose(person.id, { type: 'pension', pensionId: pension.id })}
+                      />
+                      <span className="text-sm text-[var(--color-ink)]">{pension.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+        <button onClick={onClose} className="w-full mt-5 py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
+          Done
+        </button>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+/** Collapsed-row summary line for a person's Salary block — mirrors LoanRow's collapsed summary. */
+function SalaryRowSummary({ person, payCycle, hasSalary }: { person: Person; payCycle: PayCycleConfig | undefined; hasSalary: boolean }) {
+  if (!hasSalary) {
+    return <span className="text-sm" style={{ color: 'var(--color-coral)' }}>Set up salary</span>
+  }
+  if (!payCycle) {
+    return <span className="text-sm text-[var(--color-ink-muted)]">Pay cycle not configured</span>
+  }
+  const today = new Date()
+  const [nextPayday] = upcomingPaydays(payCycle, today, 1)
+  if (!nextPayday) {
+    // hasSalary but no upcoming payday resolves — the governing snapshot
+    // has an end date in the past (or right at today) and nothing
+    // supersedes it. Distinct message from "not configured" so it's
+    // clear this was a deliberate end, not a missing setup.
+    const snapshot = latestSalarySnapshot(person)
+    return (
+      <span className="text-sm text-[var(--color-ink-muted)]">{snapshot?.endDate ? `Ended ${snapshot.endDate}` : 'No upcoming pay'}</span>
+    )
+  }
+  const dateIso = toLocalIsoDate(nextPayday)
+  const netPay = computeNetPayForPeriod(person, dateIso)
+  return (
+    <span className="text-sm text-[var(--color-ink-muted)]">
+      Next payday {dateIso}
+      {netPay !== null && <> · £{formatCurrency(netPay)}</>}
+    </span>
+  )
+}
+
+/**
+ * The "final salary payment" date-picker (backlog item b). Edits
+ * whichever snapshot latestSalarySnapshot resolves to — NOT
+ * findApplicableSnapshot(person, today), since that deliberately returns
+ * null once a snapshot's own end date has passed, which would make an
+ * already-ended salary's end date impossible to view or clear from this
+ * field. Clearing the field (the EditField's `v || undefined` pattern,
+ * same as Loans.tsx's own "End date" field) resumes indefinite
+ * generation, same as it never having been set.
+ */
+function SalaryEndDateField({ person, onChange }: { person: Person; onChange: (snapshotId: string, endDate: string | undefined) => void }) {
+  const snapshot = latestSalarySnapshot(person)
+  if (!snapshot) return null
+  return (
+    <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--color-track)' }}>
+      <EditField label="End date (optional)" type="date" value={snapshot.endDate ?? ''} onChange={(v) => onChange(snapshot.id, v || undefined)} />
+      <p className="text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
+        {snapshot.endDate
+          ? `No further salary payments generate after ${snapshot.endDate}. Anything already cleared isn't affected.`
+          : 'Set this when this salary is ending — e.g. a new job with different accounting periods, or retiring onto a pension.'}
+      </p>
+    </div>
+  )
+}
+
 export function Salary() {
   const {
     data,
@@ -63,135 +1767,610 @@ export function Salary() {
     setPrimaryPerson,
     updatePayCycle,
     addSalarySnapshot,
+    updateSalarySnapshot,
+    removeAllSalaryHistory,
     addSalaryOverride,
     updateSalaryOverride,
-    addSavingsEntry,
-    updateSavingsEntry,
-    removeSavingsEntry,
+    addSavingsPot,
+    updateSavingsPot,
+    removeSavingsPot,
+    overrideSavingsInterest,
+    logSavingsDeposit,
+    logSavingsWithdrawal,
+    addPension,
+    updatePension,
+    removePension,
+    setJointAccountOpening,
+    addPot,
+    updatePot,
+    removePot,
+    logPotDeposit,
+    logPotWithdrawal,
+    assignRecurringTemplateLocation,
+    assignLoanLocation,
+    addRecurringTransfer,
+    updateRecurringTemplate,
+    removeRecurringTemplate,
+    logTransfer,
+    saveSalarySort,
+    clearSalarySortTarget,
+    clearSalarySort,
   } = useLedgerData()
-  const [addingPerson, setAddingPerson] = useState(false)
+  const [editingJointAccount, setEditingJointAccount] = useState(false)
   const [editingDeduction, setEditingDeduction] = useState<{ personId: string; deductionId: string } | null>(null)
-  const [newName, setNewName] = useState('')
   const [settingsOpenFor, setSettingsOpenFor] = useState<string | null>(null)
+  // Which person's Salary row / which Pension's row is expanded — one at
+  // a time per section, same pattern as Borrowing's expandedLoan/
+  // expandedCard. Starts on the primary person (rather than fully
+  // collapsed) since salary is the main reason most visits happen.
+  const [expandedPersonId, setExpandedPersonId] = useState<string | null>(data.primaryPersonId ?? null)
+  const [expandedPensionId, setExpandedPensionId] = useState<string | null>(null)
+  const [addingPension, setAddingPension] = useState(false)
+  const [pickingPensionPerson, setPickingPensionPerson] = useState(false)
+  const [pensionDefaultPersonId, setPensionDefaultPersonId] = useState(data.primaryPersonId)
+  // Salary's "+" doesn't open a form of its own (salary setup is already
+  // inline on each person's row) — with 2+ candidates still needing
+  // setup it shows a quick picker; with exactly one, or with everyone
+  // already set up, it just expands the relevant row directly.
+  const [pickingSalaryPerson, setPickingSalaryPerson] = useState(false)
+  const [addingSavingsFor, setAddingSavingsFor] = useState<string | null>(null) // personId once chosen (or the sole person, immediately)
+  const [pickingSavingsPerson, setPickingSavingsPerson] = useState(false)
+  const [expandedPotId, setExpandedPotId] = useState<string | null>(null)
+  // "Pot" (the Pots backlog item's Wallet-page entity) vs SavingsPot,
+  // whose own state above already claimed the shorter names — "Bills
+  // pot" both disambiguates and matches Adam's own example name for one.
+  const [addingBillsPotFor, setAddingBillsPotFor] = useState<string | null>(null)
+  const [pickingBillsPotPerson, setPickingBillsPotPerson] = useState(false)
+  const [expandedBillsPotId, setExpandedBillsPotId] = useState<string | null>(null)
+  const [peopleModalOpen, setPeopleModalOpen] = useState(false)
+  const [followingPickerOpen, setFollowingPickerOpen] = useState(false)
+
+  // All three sections (Salary, Pensions, Savings) always render, each
+  // with its own "+", matching Borrowing's Loans/Credit Cards layout —
+  // per Adam's own instruction, superseding this page's earlier
+  // hide-when-empty treatment of Savings specifically.
+  //
+  // Eligible for a NEW salary: either nobody's set one up at all yet, OR
+  // their CURRENT/latest snapshot has an end date set — i.e. they've
+  // deliberately signalled "this salary is ending," which is exactly
+  // the job-change scenario the end-date field exists for. salaryHistory
+  // is already an array precisely because a person's salary changes over
+  // time — there's no real "one salary per person" limit in the data, so
+  // the gate isn't "already has salary," it's "has an OPEN-ENDED one,"
+  // where adding a second, disconnected snapshot wouldn't mean anything
+  // (a raise/change for an ongoing job goes through that snapshot's own
+  // "all future" edit instead, not a brand new one).
+  const peopleEligibleForNewSalary = data.people.filter((p) => {
+    const latest = latestSalarySnapshot(p)
+    return !latest || !!latest.endDate
+  })
+  const [showNoEligibleSalaryMessage, setShowNoEligibleSalaryMessage] = useState(false)
+  // People button flash — draws the eye to where "add a new person"
+  // actually lives, right as the "nobody eligible" message disappears,
+  // since that message now also covers the "I need a NEW person, not a
+  // new job" case.
+  const [flashPeopleButton, setFlashPeopleButton] = useState(false)
+
+  useEffect(() => {
+    if (!showNoEligibleSalaryMessage) return
+    const t = window.setTimeout(() => {
+      setShowNoEligibleSalaryMessage(false)
+      setFlashPeopleButton(true)
+    }, 6000)
+    return () => window.clearTimeout(t)
+  }, [showNoEligibleSalaryMessage])
+
+  useEffect(() => {
+    if (!flashPeopleButton) return
+    const t = window.setTimeout(() => setFlashPeopleButton(false), 1000)
+    return () => window.clearTimeout(t)
+  }, [flashPeopleButton])
+  // Which person's row should show the "start a new job" form — distinct
+  // from expandedPersonId's own SalarySetupForm/PayPeriodsSection choice,
+  // since this applies to someone who ALREADY has salary (their row
+  // already shows PayPeriodsSection) but is adding a genuinely new,
+  // disconnected snapshot rather than editing the existing one.
+  const [startingNewJobFor, setStartingNewJobFor] = useState<string | null>(null)
+  // Whether ANYONE in the household has 2+ active income sources — the
+  // calendar-icon "Following" picker is pointless (and stays fully
+  // hidden) until that's true for at least one person, same "invisible
+  // until it would do something" instinct as the rest of this page.
+  const anyoneHasMultipleIncomeSources = data.people.some((p) => activeIncomeSourceCount(p, data.pensions) >= 2)
+  // Fallback position for the calendar icon (Adam's own spec): lives on
+  // the Salary section's header normally, but once NOBODY in the
+  // household has any salary left at all, it moves to the Pensions
+  // section header instead — both sections always render regardless, so
+  // this only decides which header hosts the icon.
+  const anyoneHasSalary = data.people.some(hasSalaryConfigured)
 
   return (
     <div className="max-w-md mx-auto px-4 pt-6">
       <header className="mb-6 flex items-center justify-between">
-        <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Salary</h1>
+        <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Wallet</h1>
         <button
-          onClick={() => setAddingPerson(true)}
-          className="w-9 h-9 rounded-full flex items-center justify-center"
-          style={{ background: 'var(--color-surface)' }}
+          onClick={() => setPeopleModalOpen(true)}
+          className="w-9 h-9 rounded-full flex items-center justify-center transition-colors duration-300"
+          style={{ background: flashPeopleButton ? 'var(--color-coral)' : 'var(--color-surface)' }}
+          aria-label="Manage people"
         >
-          <Plus size={18} className="text-[var(--color-ink)]" />
+          <Users size={18} className={flashPeopleButton ? 'text-white' : 'text-[var(--color-ink)]'} />
         </button>
       </header>
 
       <BackupSection data={data} onRestore={setData} />
 
-      {addingPerson && (
-        <div className="rounded-2xl p-4 mb-6 flex gap-2" style={{ background: 'var(--color-surface)' }}>
-          <input
-            autoFocus
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="Name"
-            className="flex-1 bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-          />
-          <button
-            onClick={() => {
-              if (!newName.trim()) return
-              addPerson({ name: newName.trim(), color: '#7c6fe0' })
-              setNewName('')
-              setAddingPerson(false)
+      <CollapsibleSection
+        title="Salary"
+        className="mb-8"
+        headerExtra={
+          <div className="flex items-center gap-2">
+            {anyoneHasSalary && anyoneHasMultipleIncomeSources && <FollowingPickerButton onClick={() => setFollowingPickerOpen(true)} />}
+            <AddButton
+              onClick={() => {
+                if (peopleEligibleForNewSalary.length === 0) {
+                  setShowNoEligibleSalaryMessage(true)
+                  return
+                }
+                const person = peopleEligibleForNewSalary[0]
+                if (peopleEligibleForNewSalary.length === 1) {
+                  setExpandedPersonId(person.id)
+                  if (hasSalaryConfigured(person)) setStartingNewJobFor(person.id)
+                } else {
+                  setPickingSalaryPerson(true)
+                }
+              }}
+            />
+          </div>
+        }
+      >
+        {showNoEligibleSalaryMessage && (
+          <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+            <p className="text-xs text-[var(--color-ink-muted)] leading-relaxed">
+              Everyone already has an ongoing salary, and none has an end date set. Set an end date on an existing
+              salary first if you're changing jobs — that opens up adding the new one. Adding a salary for a NEW
+              person? Add them first, using the people icon top-right.
+            </p>
+          </div>
+        )}
+        {pickingSalaryPerson && (
+          <PersonPickerCard
+            people={peopleEligibleForNewSalary}
+            onPick={(id) => {
+              setExpandedPersonId(id)
+              const person = data.people.find((p) => p.id === id)
+              if (person && hasSalaryConfigured(person)) setStartingNewJobFor(id)
+              setPickingSalaryPerson(false)
             }}
-            className="px-3 rounded-lg font-medium text-sm"
-            style={{ background: 'var(--color-coral)', color: '#fff' }}
-          >
-            Add
-          </button>
-        </div>
-      )}
+            onCancel={() => setPickingSalaryPerson(false)}
+          />
+        )}
+        <div className="flex flex-col gap-3">
+          {data.people.map((person) => {
+            const payCycle = data.payCycles.find((pc) => pc.personId === person.id)
+            const hasSalary = hasSalaryConfigured(person)
+            const isOpen = expandedPersonId === person.id
+            const isFollowed = payCycle?.followsIncomeSource === undefined || payCycle.followsIncomeSource.type === 'salary'
+            const showFollowingTag = hasSalary && isFollowed && activeIncomeSourceCount(person, data.pensions) >= 2
 
-      <div className="flex flex-col gap-6">
-        {data.people.map((person) => {
-          const payCycle = data.payCycles.find((pc) => pc.personId === person.id)
-          const isPrimary = person.id === data.primaryPersonId
-          const hasSalary = person.salaryHistory.length > 0
-
-          return (
-            <div key={person.id} className="flex flex-col gap-6">
-              <div className="rounded-2xl p-5" style={{ background: 'var(--color-surface)' }}>
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2">
-                    <EditablePersonName name={person.name} onRename={(name) => updatePerson(person.id, { name })} />
-                    <button
-                      onClick={() => setPrimaryPerson(person.id)}
-                      disabled={isPrimary}
-                      className="px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wide transition-colors"
-                      style={{
-                        background: isPrimary ? 'var(--color-coral)' : 'var(--color-bg-elevated)',
-                        color: isPrimary ? '#fff' : 'var(--color-ink-muted)',
-                      }}
-                      title={isPrimary ? 'This is your own dashboard view' : 'Make this your dashboard view'}
-                    >
-                      {isPrimary ? 'Me' : 'Set as me'}
+            return (
+              <div key={person.id} className="rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="font-display text-base font-semibold text-[var(--color-ink)] truncate">{person.name}</span>
+                    {person.id === data.primaryPersonId && <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-coral)] shrink-0">Me</span>}
+                    {showFollowingTag && <FollowingTag />}
+                  </div>
+                  {hasSalary && (
+                    <button onClick={() => setSettingsOpenFor(person.id)} className="text-[var(--color-ink-muted)] shrink-0" aria-label="Pay cycle settings">
+                      <Settings size={16} />
                     </button>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    {hasSalary && (
-                      <button onClick={() => setSettingsOpenFor(person.id)} className="text-[var(--color-ink-muted)]" aria-label="Pay cycle settings">
-                        <Settings size={16} />
-                      </button>
-                    )}
-                    {data.people.length > 1 && (
-                      <button onClick={() => removePerson(person.id)} className="text-[var(--color-ink-faint)]">
-                        <Trash2 size={16} />
-                      </button>
-                    )}
-                  </div>
+                  )}
                 </div>
 
-                {!hasSalary ? (
-                  <SalarySetupForm
-                    payCycle={payCycle}
-                    onSave={(fields, payCycleFields) => {
-                      addSalarySnapshot(person.id, { ...fields, effectiveFrom: todayIso() })
-                      updatePayCycle(person.id, payCycleFields)
-                    }}
-                    editingDeduction={editingDeduction}
-                    setEditingDeduction={setEditingDeduction}
-                  />
-                ) : payCycle ? (
-                  <PayPeriodsSection
-                    person={person}
-                    payCycle={payCycle}
-                    onSaveJustThis={(dateIso, fields) => {
-                      const netPay = calculateNetSalary(fields).netPerPeriod
-                      const existing = person.salaryOverrides.find((o) => o.payPeriodDate === dateIso)
-                      const reason = 'Salary amended (this payment only)'
-                      if (existing) updateSalaryOverride(person.id, existing.id, { netPayOverride: netPay, reason })
-                      else addSalaryOverride(person.id, { payPeriodDate: dateIso, netPayOverride: netPay, reason })
-                    }}
-                    onSaveAllFuture={(dateIso, fields) => {
-                      addSalarySnapshot(person.id, { ...fields, effectiveFrom: dateIso })
-                    }}
-                    editingDeduction={editingDeduction}
-                    setEditingDeduction={setEditingDeduction}
-                  />
-                ) : null}
+                <button
+                  onClick={() => setExpandedPersonId(isOpen ? null : person.id)}
+                  className="w-full flex items-center justify-between text-left py-1"
+                >
+                  <SalaryRowSummary person={person} payCycle={payCycle} hasSalary={hasSalary} />
+                  <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
+                </button>
 
-                <SavingsSection
-                  entries={person.savingsEntries}
-                  onAdd={(entry) => addSavingsEntry(person.id, entry)}
-                  onUpdate={(entryId, updates) => updateSavingsEntry(person.id, entryId, updates)}
-                  onRemove={(entryId) => removeSavingsEntry(person.id, entryId)}
-                />
+                {isOpen && (
+                  <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
+                    {!hasSalary ? (
+                      <SalarySetupForm
+                        payCycle={payCycle}
+                        onSave={(fields, payCycleFields) => {
+                          addSalarySnapshot(person.id, { ...fields, effectiveFrom: todayIso() })
+                          updatePayCycle(person.id, payCycleFields)
+                        }}
+                        editingDeduction={editingDeduction}
+                        setEditingDeduction={setEditingDeduction}
+                      />
+                    ) : payCycle ? (
+                      <>
+                        <PayPeriodsSection
+                          person={person}
+                          payCycle={payCycle}
+                          data={data}
+                          saveSalarySort={saveSalarySort}
+                          clearSalarySortTarget={clearSalarySortTarget}
+                          clearSalarySort={clearSalarySort}
+                          onSaveJustThis={(dateIso, fields) => {
+                            const netPay = calculateNetSalary(fields).netPerPeriod
+                            const existing = person.salaryOverrides.find((o) => o.payPeriodDate === dateIso)
+                            const reason = 'Salary amended (this payment only)'
+                            if (existing) updateSalaryOverride(person.id, existing.id, { netPayOverride: netPay, reason })
+                            else addSalaryOverride(person.id, { payPeriodDate: dateIso, netPayOverride: netPay, reason })
+                          }}
+                          onSaveAllFuture={(dateIso, fields) => {
+                            addSalarySnapshot(person.id, { ...fields, effectiveFrom: dateIso })
+                          }}
+                          editingDeduction={editingDeduction}
+                          setEditingDeduction={setEditingDeduction}
+                        />
+                        <SalaryEndDateField
+                          person={person}
+                          onChange={(snapshotId, endDate) => updateSalarySnapshot(person.id, snapshotId, { endDate })}
+                        />
+                        {/* Only reachable once this person's current
+                            salary has an end date set — see
+                            peopleEligibleForNewSalary's own comment for
+                            why that's the gate. A raise/change for an
+                            ONGOING job goes through PayPeriodsSection's
+                            "all future" edit above instead, not this. */}
+                        {latestSalarySnapshot(person)?.endDate &&
+                          (startingNewJobFor === person.id ? (
+                            <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--color-track)' }}>
+                              <h4 className="text-xs font-semibold text-[var(--color-ink)] mb-2">New job details</h4>
+                              <SalarySetupForm
+                                payCycle={payCycle}
+                                onSave={(fields, payCycleFields) => {
+                                  const latest = latestSalarySnapshot(person)
+                                  const effectiveFrom = latest?.endDate ? toLocalIsoDate(addDays(new Date(latest.endDate), 1)) : todayIso()
+                                  addSalarySnapshot(person.id, { ...fields, effectiveFrom })
+                                  updatePayCycle(person.id, payCycleFields)
+                                  setStartingNewJobFor(null)
+                                }}
+                                editingDeduction={editingDeduction}
+                                setEditingDeduction={setEditingDeduction}
+                              />
+                              <button onClick={() => setStartingNewJobFor(null)} className="text-xs text-[var(--color-ink-muted)] mt-2">
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => setStartingNewJobFor(person.id)}
+                              className="mt-3 text-xs font-medium"
+                              style={{ color: 'var(--color-coral)' }}
+                            >
+                              + Start a new job
+                            </button>
+                          ))}
+                        {/* Savings now has its own section-level "+" below —
+                            no per-row stopgap needed here any more. */}
+                      </>
+                    ) : null}
+                  </div>
+                )}
               </div>
-            </div>
-          )
-        })}
-      </div>
+            )
+          })}
+        </div>
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Pensions"
+        className="mb-8"
+        headerExtra={
+          <div className="flex items-center gap-2">
+            {!anyoneHasSalary && anyoneHasMultipleIncomeSources && <FollowingPickerButton onClick={() => setFollowingPickerOpen(true)} />}
+            <AddButton
+              onClick={() => {
+                if (data.people.length === 1) {
+                  setPensionDefaultPersonId(data.people[0].id)
+                  setAddingPension(true)
+                } else {
+                  setPickingPensionPerson(true)
+                }
+              }}
+            />
+          </div>
+        }
+      >
+        {pickingPensionPerson && (
+          <PersonPickerCard
+            people={data.people}
+            onPick={(id) => {
+              setPensionDefaultPersonId(id)
+              setPickingPensionPerson(false)
+              setAddingPension(true)
+            }}
+            onCancel={() => setPickingPensionPerson(false)}
+          />
+        )}
+        {addingPension && (
+          <PensionForm
+            people={data.people}
+            defaultPersonId={pensionDefaultPersonId}
+            onCancel={() => setAddingPension(false)}
+            onSave={(personId, fields) => {
+              const id = addPension(personId, newPension({ personId, ...fields }))
+              setAddingPension(false)
+              setExpandedPensionId(id)
+            }}
+          />
+        )}
+        <div className="flex flex-col gap-3">
+          {data.pensions.map((pension) => {
+            const person = data.people.find((p) => p.id === pension.personId)
+            const payCycle = data.payCycles.find((pc) => pc.personId === pension.personId)
+            const isFollowed = payCycle?.followsIncomeSource?.type === 'pension' && payCycle.followsIncomeSource.pensionId === pension.id
+            const showFollowingTag = isFollowed && person && activeIncomeSourceCount(person, data.pensions) >= 2
+            return (
+              <PensionRow
+                key={pension.id}
+                pension={pension}
+                people={data.people}
+                showFollowingTag={!!showFollowingTag}
+                isOpen={expandedPensionId === pension.id}
+                onToggle={() => setExpandedPensionId(expandedPensionId === pension.id ? null : pension.id)}
+                onSave={(updates) => updatePension(pension.id, updates)}
+                onRemove={() => removePension(pension.id)}
+              />
+            )
+          })}
+          {data.pensions.length === 0 && !addingPension && <p className="text-sm text-[var(--color-ink-muted)] text-center py-8">No pensions yet.</p>}
+        </div>
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Savings"
+        className="mb-8"
+        headerExtra={
+          <AddButton
+            onClick={() => {
+              if (data.people.length === 1) setAddingSavingsFor(data.people[0].id)
+              else setPickingSavingsPerson(true)
+            }}
+          />
+        }
+      >
+        {pickingSavingsPerson && (
+          <PersonPickerCard
+            people={data.people}
+            onPick={(id) => {
+              setAddingSavingsFor(id)
+              setPickingSavingsPerson(false)
+            }}
+            onCancel={() => setPickingSavingsPerson(false)}
+          />
+        )}
+        {addingSavingsFor && (
+          <SavingsPotForm
+            people={data.people}
+            defaultPersonId={addingSavingsFor}
+            onCancel={() => setAddingSavingsFor(null)}
+            onSave={(personId, fields) => {
+              const id = addSavingsPot(
+                personId,
+                newSavingsPot({
+                  personId,
+                  name: fields.name,
+                  openingBalance: fields.openingBalance,
+                  openingDate: fields.openingDate,
+                  interestMethod: fields.interestMethod,
+                  targetAmount: fields.targetAmount,
+                  targetDate: fields.targetDate,
+                }),
+              )
+              if (fields.recurringDepositAmount) {
+                updateSavingsPot(id, {
+                  recurringDepositAmount: fields.recurringDepositAmount,
+                  recurringDepositDayOfMonth: fields.recurringDepositDayOfMonth,
+                  recurringDepositStartDate: fields.openingDate,
+                })
+              }
+              setAddingSavingsFor(null)
+              // BUGFIX (Adam-reported, 2026-09 session — "I have to click
+              // Looks good twice before the modal disappears and
+              // collapses the card"). Traced this thoroughly: there's
+              // only ever one SavingsPotForm instance mounted in each
+              // mode, and React 19's automatic batching means every
+              // state update in this one click (addSavingsPot,
+              // optionally updateSavingsPot, setAddingSavingsFor,
+              // and InterestExplanationModal's own setConfirming(false))
+              // commits together — I couldn't find a genuine double-
+              // render in the code. The one real difference from Pot's
+              // own (unreported) auto-expand-on-create is that Pot has no
+              // confirm-modal step to collide with — Savings Pot's
+              // InterestExplanationModal was closing on the exact same
+              // click that also immediately expanded the new pot's row
+              // into a second, freshly-mounted SavingsPotForm (in edit
+              // mode). Removing the auto-expand removes that collision
+              // entirely regardless of the precise mechanism — the new
+              // pot's row now opens the way every other newly-created
+              // item in this list already does (collapsed, one tap away),
+              // rather than reopening it mid-creation. Flagged as a
+              // best-diagnosed fix rather than a confirmed one — let me
+              // know if it doesn't fully resolve the flash.
+            }}
+          />
+        )}
+        <div className="flex flex-col gap-3">
+          {data.savingsPots.map((pot) => (
+            <SavingsPotRow
+              key={pot.id}
+              pot={pot}
+              people={data.people}
+              transactions={data.transactions}
+              isOpen={expandedPotId === pot.id}
+              onToggle={() => setExpandedPotId(expandedPotId === pot.id ? null : pot.id)}
+              onSave={(updates) => updateSavingsPot(pot.id, updates)}
+              onRemove={() => removeSavingsPot(pot.id)}
+              onOverrideInterest={(date, amount) => overrideSavingsInterest(pot.id, date, amount)}
+              onLogDeposit={(amount, date, note) => logSavingsDeposit(pot.id, amount, date, note)}
+              onLogWithdrawal={(amount, date, note) => logSavingsWithdrawal(pot.id, amount, date, note)}
+              recurringTemplates={data.recurringTemplates}
+              onAddRecurringTransfer={addRecurringTransfer}
+              onUpdateRecurringTemplate={updateRecurringTemplate}
+              onRemoveRecurringTemplate={removeRecurringTemplate}
+            />
+          ))}
+          {data.savingsPots.length === 0 && !addingSavingsFor && (
+            <p className="text-sm text-[var(--color-ink-muted)] text-center py-8">No savings pots yet.</p>
+          )}
+        </div>
+      </CollapsibleSection>
+
+      {/* Pots backlog item, Phase 4 (2026-09 session) — same "always
+          visible, its own +" layout as Salary/Pensions/Savings above,
+          per Adam's own instruction that these sections stay consistent.
+          Unlike those three, Pots doesn't need a "no pots yet" empty
+          state guard on the person-picker-skip logic below — a person
+          with zero eligible bills still gets a perfectly valid empty pot
+          (step 3's checklist is explicitly optional), so there's nothing
+          to block on. */}
+      <CollapsibleSection
+        title="Pots"
+        className="mb-8"
+        headerExtra={
+          <AddButton
+            onClick={() => {
+              if (data.people.length === 1) setAddingBillsPotFor(data.people[0].id)
+              else setPickingBillsPotPerson(true)
+            }}
+          />
+        }
+      >
+        {pickingBillsPotPerson && (
+          <PersonPickerCard
+            people={data.people}
+            onPick={(id) => {
+              setAddingBillsPotFor(id)
+              setPickingBillsPotPerson(false)
+            }}
+            onCancel={() => setPickingBillsPotPerson(false)}
+          />
+        )}
+        {addingBillsPotFor && (
+          <PotForm
+            eligibleBills={data.recurringTemplates.filter((t) => t.ownerId === addingBillsPotFor && t.location === 'personal')}
+            onCancel={() => setAddingBillsPotFor(null)}
+            onSave={({ name, billIdsToMoveIn, effectiveFrom }) => {
+              const personId = addingBillsPotFor
+              const id = addPot(personId, newPot({ personId, name, openingBalance: 0, openingDate: todayIso() }))
+              for (const billId of billIdsToMoveIn) assignRecurringTemplateLocation(billId, 'pot', effectiveFrom, { potId: id })
+              setAddingBillsPotFor(null)
+              setExpandedBillsPotId(id)
+            }}
+          />
+        )}
+        <div className="flex flex-col gap-3">
+          {data.pots.map((pot) => (
+            <PotRow
+              key={pot.id}
+              pot={pot}
+              people={data.people}
+              templates={data.recurringTemplates}
+              loans={data.loans}
+              transactions={data.transactions}
+              isOpen={expandedBillsPotId === pot.id}
+              onToggle={() => setExpandedBillsPotId(expandedBillsPotId === pot.id ? null : pot.id)}
+              onSave={(updates) => updatePot(pot.id, updates)}
+              onRemove={() => removePot(pot.id)}
+              onLogDeposit={(amount, date, note) => logPotDeposit(pot.id, amount, date, note)}
+              onLogWithdrawal={(amount, date, note) => logPotWithdrawal(pot.id, amount, date, note)}
+              onAssignTemplateLocation={(templateId, location, effectiveFrom, potId) => assignRecurringTemplateLocation(templateId, location, effectiveFrom, { potId })}
+              onAssignLoanLocation={(loanId, location, effectiveFrom, potId) => assignLoanLocation(loanId, location, effectiveFrom, { potId })}
+              onAddRecurringTransfer={addRecurringTransfer}
+              onUpdateRecurringTemplate={updateRecurringTemplate}
+              onRemoveRecurringTemplate={removeRecurringTemplate}
+            />
+          ))}
+          {data.pots.length === 0 && !addingBillsPotFor && <p className="text-sm text-[var(--color-ink-muted)] text-center py-8">No pots yet.</p>}
+        </div>
+      </CollapsibleSection>
+
+      {/* New section (Adam-specified, 2026-09-03): only appears once a
+          joint account actually exists — same "invisible until it would
+          do something" instinct every other section on this page already
+          follows. Adam left WHERE this should live up to us, with the
+          steer "keep the UI consistent" and a guess it'd be a new Wallet
+          section that appears once a joint account is detected — that's
+          exactly what this is. */}
+      {data.jointAccount && (
+        <CollapsibleSection title="Joint Account" className="mb-8">
+          <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
+            {/* BUGFIX (Adam-reported, 2026-09 session) — used to be a plain
+                info div with a separate text "Edit" button; every other
+                card in this list (Pots, Savings Pots, Pensions) opens its
+                edit surface by tapping the card itself, not a dedicated
+                Edit link. Matches that now — the whole balance/date row is
+                the tap target. */}
+            <button onClick={() => setEditingJointAccount(true)} className="w-full flex items-center justify-between text-left">
+              <div>
+                <p className="text-sm font-medium text-[var(--color-ink)]">£{formatCurrency(data.jointAccount.openingBalance)} opening balance</p>
+                <p className="text-xs text-[var(--color-ink-muted)]">as of {formatFullDate(data.jointAccount.openingBalanceDate)}</p>
+              </div>
+              <ChevronDown size={16} className="text-[var(--color-ink-muted)] shrink-0" />
+            </button>
+
+            {/* Transfer pill (2026-09-04 session, "joint account should be
+                treated the same, and get the same buttons in the wallet
+                page" — Adam-specified) — same log/recurring-deposit
+                pattern as the Savings/Pots cards above, writing through
+                the exact same logTransfer/RecurringTemplate mechanism the
+                Transactions page's Transfer pill uses. */}
+            <LogPotTransactionButton
+              onLogDeposit={(amount, date, note) => logTransfer({ type: 'personal' }, { type: 'joint' }, amount, date, note)}
+              onLogWithdrawal={(amount, date, note) => logTransfer({ type: 'joint' }, { type: 'personal' }, amount, date, note)}
+            />
+            <RecurringTransferEditor
+              location={{ type: 'joint' }}
+              defaultName="Joint Account"
+              templates={data.recurringTemplates}
+              onAdd={addRecurringTransfer}
+              onUpdate={updateRecurringTemplate}
+              onRemove={removeRecurringTemplate}
+            />
+          </div>
+        </CollapsibleSection>
+      )}
+      {editingJointAccount && data.jointAccount && (
+        <JointAccountSetupModal
+          initial={data.jointAccount}
+          dismissable
+          onSave={(openingBalance, openingBalanceDate) => {
+            setJointAccountOpening(openingBalance, openingBalanceDate)
+            setEditingJointAccount(false)
+          }}
+          onCancel={() => setEditingJointAccount(false)}
+        />
+      )}
+
+      {peopleModalOpen && (
+        <PeopleModal
+          people={data.people}
+          primaryPersonId={data.primaryPersonId}
+          onAdd={(name) => addPerson({ name, color: '#7c6fe0' })}
+          onRename={(id, name) => updatePerson(id, { name })}
+          onRemove={removePerson}
+          onSetPrimary={setPrimaryPerson}
+          onClose={() => setPeopleModalOpen(false)}
+        />
+      )}
+
+      {followingPickerOpen && (
+        <FollowingPickerModal
+          people={data.people}
+          pensions={data.pensions}
+          payCycles={data.payCycles}
+          onChoose={(personId, source) => updatePayCycle(personId, { followsIncomeSource: source })}
+          onClose={() => setFollowingPickerOpen(false)}
+        />
+      )}
 
       {settingsOpenFor &&
         (() => {
@@ -201,13 +2380,20 @@ export function Salary() {
           return (
             <PayCycleSettingsModal
               personName={person.name}
+              isPrimary={person.id === data.primaryPersonId}
               payday={payCycle?.paydayDayOfMonth ?? 28}
               adjustForNonWorkingDay={payCycle?.paydayAdjustForNonWorkingDay ?? true}
               cycleStartDay={payCycle?.cycleStartDayOfMonth ?? 1}
               cycleStartFollowsPayday={payCycle?.cycleStartFollowsPayday ?? false}
+              salarySortBasis={payCycle?.salarySortBasis ?? 'payday'}
               openingBalance={payCycle?.openingBalance ?? 0}
               openingBalanceDate={payCycle?.openingBalanceDate ?? todayIso()}
-              onChange={(updates) => updatePayCycle(person.id, updates)}
+              onSave={(updates) => updatePayCycle(person.id, updates)}
+              onDeleteSalary={() => {
+                removeAllSalaryHistory(person.id)
+                setSettingsOpenFor(null)
+                setExpandedPersonId(null)
+              }}
               onClose={() => setSettingsOpenFor(null)}
             />
           )
@@ -299,6 +2485,7 @@ function SalarySetupForm({
   const [payFrequency, setPayFrequency] = useState<PayFrequency>('monthly')
   const [employerPensionPercent, setEmployerPensionPercent] = useState('')
   const [deductions, setDeductions] = useState<SalaryDeduction[]>([])
+  const [confirmingDeductionId, setConfirmingDeductionId] = useState<string | null>(null)
 
   // Mandatory pay-cycle fields, loaded from the current model (created
   // automatically alongside the person) so there's always a sensible
@@ -425,7 +2612,7 @@ function SalarySetupForm({
                   role="button"
                   onClick={(e) => {
                     e.stopPropagation()
-                    removeDeduction(d.id)
+                    setConfirmingDeductionId(d.id)
                   }}
                   className="text-[var(--color-ink-faint)]"
                 >
@@ -435,6 +2622,19 @@ function SalarySetupForm({
             </button>
           ))}
         </div>
+        {confirmingDeductionId && (
+          <ConfirmModal
+            title="Remove this deduction?"
+            description="This can't be undone."
+            confirmLabel="Remove"
+            tone="danger"
+            onConfirm={() => {
+              removeDeduction(confirmingDeductionId)
+              setConfirmingDeductionId(null)
+            }}
+            onCancel={() => setConfirmingDeductionId(null)}
+          />
+        )}
         {editingDeduction?.personId === setupDeductionKey &&
           (() => {
             const idx = deductions.findIndex((d) => d.id === editingDeduction.deductionId)
@@ -548,35 +2748,75 @@ function SalarySetupForm({
 
 function PayCycleSettingsModal({
   personName,
+  isPrimary,
   payday,
   adjustForNonWorkingDay,
   cycleStartDay,
   cycleStartFollowsPayday,
+  salarySortBasis,
   openingBalance,
   openingBalanceDate,
-  onChange,
+  onSave,
+  onDeleteSalary,
   onClose,
 }: {
   personName: string
+  isPrimary: boolean
   payday: number
   adjustForNonWorkingDay: boolean
   cycleStartDay: number
   cycleStartFollowsPayday: boolean
+  salarySortBasis: 'payday' | 'budget_cycle'
   openingBalance: number
   openingBalanceDate: string
-  onChange: (updates: {
-    paydayDayOfMonth?: number
-    paydayAdjustForNonWorkingDay?: boolean
-    cycleStartDayOfMonth?: number
-    cycleStartFollowsPayday?: boolean
-    openingBalance?: number
-    openingBalanceDate?: string
+  onSave: (updates: {
+    paydayDayOfMonth: number
+    paydayAdjustForNonWorkingDay: boolean
+    cycleStartDayOfMonth: number
+    cycleStartFollowsPayday: boolean
+    salarySortBasis: 'payday' | 'budget_cycle'
+    openingBalance: number
+    openingBalanceDate: string
   }) => void
+  onDeleteSalary: () => void
   onClose: () => void
 }) {
+  // Staged draft — was previously live-applying every keystroke straight
+  // to updatePayCycle via an onChange prop, which meant "Done" was purely
+  // a dismiss button with nothing to cancel. Converted per Adam's
+  // explicit call (UI consistency review §1/§10 Phase 3) to match every
+  // other edit panel in the app: edits stay local until Save commits
+  // them; Cancel discards the draft and reverts to nothing having
+  // changed at all, not just to whatever the fields happened to read.
+  const [draftPayday, setDraftPayday] = useState(payday)
+  const [draftAdjust, setDraftAdjust] = useState(adjustForNonWorkingDay)
+  const [draftCycleStartDay, setDraftCycleStartDay] = useState(cycleStartDay)
+  const [draftCycleFollowsPayday, setDraftCycleFollowsPayday] = useState(cycleStartFollowsPayday)
+  const [draftSalarySortBasis, setDraftSalarySortBasis] = useState<'payday' | 'budget_cycle'>(salarySortBasis)
+  const [draftOpeningBalance, setDraftOpeningBalance] = useState(String(openingBalance))
+  const [draftOpeningBalanceDate, setDraftOpeningBalanceDate] = useState(openingBalanceDate)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+
+  function handleSave() {
+    onSave({
+      paydayDayOfMonth: draftPayday,
+      paydayAdjustForNonWorkingDay: draftAdjust,
+      cycleStartDayOfMonth: draftCycleStartDay,
+      cycleStartFollowsPayday: draftCycleFollowsPayday,
+      salarySortBasis: draftSalarySortBasis,
+      openingBalance: Number(draftOpeningBalance) || 0,
+      openingBalanceDate: draftOpeningBalanceDate,
+    })
+    onClose()
+  }
+
   return createPortal(
     <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
-      <div className="w-full max-w-md rounded-t-3xl p-5" style={{ background: 'var(--color-surface)' }} onClick={(e) => e.stopPropagation()}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between mb-1">
           <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">{personName}'s pay cycle</h3>
           <button onClick={onClose} className="text-[var(--color-ink-muted)]">
@@ -591,19 +2831,19 @@ function PayCycleSettingsModal({
               inputMode="numeric"
               min={1}
               max={31}
-              value={payday}
-              onChange={(v) => onChange({ paydayDayOfMonth: Math.max(1, Math.min(31, Number(v) || 1)) })}
+              value={draftPayday}
+              onChange={(v) => setDraftPayday(Math.max(1, Math.min(31, Number(v) || 1)))}
               className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
             />
           </Field>
-          <Field label={cycleStartFollowsPayday ? 'Budgeting cycle starts on (following payday)' : 'Budgeting cycle starts on'}>
+          <Field label={draftCycleFollowsPayday ? 'Budgeting cycle starts on (following payday)' : 'Budgeting cycle starts on'}>
             <NumberInput
               inputMode="numeric"
               min={1}
               max={31}
-              value={cycleStartDay}
-              disabled={cycleStartFollowsPayday}
-              onChange={(v) => onChange({ cycleStartDayOfMonth: Math.max(1, Math.min(31, Number(v) || 1)) })}
+              value={draftCycleStartDay}
+              disabled={draftCycleFollowsPayday}
+              onChange={(v) => setDraftCycleStartDay(Math.max(1, Math.min(31, Number(v) || 1)))}
               className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono disabled:opacity-40"
             />
           </Field>
@@ -611,34 +2851,34 @@ function PayCycleSettingsModal({
             <input
               type="number"
               inputMode="decimal"
-              value={openingBalance || ''}
-              onChange={(e) => onChange({ openingBalance: Number(e.target.value) })}
+              value={draftOpeningBalance}
+              onChange={(e) => setDraftOpeningBalance(e.target.value)}
               className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
             />
           </Field>
           <Field label="...as of">
             <input
               type="date"
-              value={openingBalanceDate}
-              onChange={(e) => onChange({ openingBalanceDate: e.target.value })}
+              value={draftOpeningBalanceDate}
+              onChange={(e) => setDraftOpeningBalanceDate(e.target.value)}
               className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
             />
           </Field>
         </div>
         <label className="flex items-center gap-2 mt-3">
-          <input type="checkbox" checked={adjustForNonWorkingDay} onChange={(e) => onChange({ paydayAdjustForNonWorkingDay: e.target.checked })} />
+          <input type="checkbox" checked={draftAdjust} onChange={(e) => setDraftAdjust(e.target.checked)} />
           <span className="text-xs text-[var(--color-ink-muted)]">
             If payday falls on a weekend or UK bank holiday, pay on the last working day before it
           </span>
         </label>
         <label className="flex items-center gap-2 mt-2.5">
-          <input type="checkbox" checked={cycleStartFollowsPayday} onChange={(e) => onChange({ cycleStartFollowsPayday: e.target.checked })} />
+          <input type="checkbox" checked={draftCycleFollowsPayday} onChange={(e) => setDraftCycleFollowsPayday(e.target.checked)} />
           <span className="text-xs text-[var(--color-ink-muted)]">
             Start the budgeting cycle on payday itself, weekend/bank-holiday adjustment included
           </span>
         </label>
         <p className="text-xs text-[var(--color-ink-faint)] mt-2">
-          {cycleStartFollowsPayday ? (
+          {draftCycleFollowsPayday ? (
             <>
               Each cycle now runs from one payday to the day before the next, so a payday that shifts earlier takes its
               cycle boundary with it. The day above is kept but unused — untick to go back to it.
@@ -649,9 +2889,42 @@ function PayCycleSettingsModal({
           Nothing dated before the opening balance date will appear anywhere in {personName}'s ledger.
         </p>
 
-        <button onClick={onClose} className="w-full mt-4 py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
-          Done
-        </button>
+        {isPrimary && (
+          <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--color-track)' }}>
+            <p className="text-xs font-semibold text-[var(--color-ink-muted)] mb-2">Salary Sort suggestions follow</p>
+            <div className="flex flex-col gap-1.5">
+              <label className="flex items-center gap-2 px-3 py-2 rounded-xl" style={{ background: 'var(--color-bg-elevated)' }}>
+                <input type="radio" checked={draftSalarySortBasis === 'payday'} onChange={() => setDraftSalarySortBasis('payday')} />
+                <span className="text-sm text-[var(--color-ink)]">Payday — the window is this payday up to the day before the next</span>
+              </label>
+              <label className="flex items-center gap-2 px-3 py-2 rounded-xl" style={{ background: 'var(--color-bg-elevated)' }}>
+                <input type="radio" checked={draftSalarySortBasis === 'budget_cycle'} onChange={() => setDraftSalarySortBasis('budget_cycle')} />
+                <span className="text-sm text-[var(--color-ink)]">My budgeting cycle — even if it doesn't track payday</span>
+              </label>
+            </div>
+          </div>
+        )}
+
+        <FormButtonRow onCancel={onClose} onSave={handleSave} />
+
+        <div className="mt-6 pt-4 border-t" style={{ borderColor: 'var(--color-track)' }}>
+          <button onClick={() => setConfirmingDelete(true)} className="w-full text-center py-2 text-xs font-medium text-[var(--color-ink-faint)]">
+            Delete {personName}'s salary
+          </button>
+          {confirmingDelete && (
+            <ConfirmModal
+              title={`Delete ${personName}'s salary?`}
+              description="Deletes every salary snapshot and override. Already-cleared payments stay in the ledger as plain income — only future ones stop."
+              confirmLabel="Delete"
+              tone="danger"
+              onConfirm={() => {
+                setConfirmingDelete(false)
+                onDeleteSalary()
+              }}
+              onCancel={() => setConfirmingDelete(false)}
+            />
+          )}
+        </div>
       </div>
     </div>,
     document.body,
@@ -663,6 +2936,10 @@ function PayCycleSettingsModal({
 function PayPeriodsSection({
   person,
   payCycle,
+  data,
+  saveSalarySort,
+  clearSalarySortTarget,
+  clearSalarySort,
   onSaveJustThis,
   onSaveAllFuture,
   editingDeduction,
@@ -670,6 +2947,10 @@ function PayPeriodsSection({
 }: {
   person: Person
   payCycle: PayCycleConfig
+  data: AppDataV2
+  saveSalarySort: (payDate: string, targets: { to: TransferLocation; amount: number }[]) => void
+  clearSalarySortTarget: (payDate: string, location: TransferLocation) => void
+  clearSalarySort: (payDate: string) => void
   onSaveJustThis: (dateIso: string, fields: ReturnType<typeof emptySalaryFields>) => void
   onSaveAllFuture: (dateIso: string, fields: ReturnType<typeof emptySalaryFields>) => void
   editingDeduction: { personId: string; deductionId: string } | null
@@ -691,8 +2972,26 @@ function PayPeriodsSection({
   // payday that Summary projects into its window but Salary doesn't list
   // reads as a missing period rather than a difference of horizon.
   // Sourced from the shared constant so the two can't drift apart.
-  const upcoming = upcomingPaydays(payCycle, today, 1 + THREE_CYCLES_AHEAD).map(toLocalIsoDate)
-  const closed = closedPaydays(payCycle, today, 6).map(toLocalIsoDate)
+  // Filtered through computeNetPayForPeriod !== null so a period past the
+  // person's salary end date (backlog item b) drops out of this editable
+  // list entirely, rather than showing as a hollow £0.00 row — this list
+  // is a synthetic calendar projection for editing, not the real
+  // Transaction ledger, so removing a date here never touches an
+  // already-materialized/cleared transaction elsewhere in the app.
+  const upcoming = upcomingPaydays(payCycle, today, 1 + THREE_CYCLES_AHEAD)
+    .map(toLocalIsoDate)
+    .filter((d) => computeNetPayForPeriod(person, d) !== null)
+  const closed = closedPaydays(payCycle, today, 6)
+    .map(toLocalIsoDate)
+    .filter((d) => computeNetPayForPeriod(person, d) !== null)
+  // REDESIGN (Adam-specified, 2026-09-02): History used to also include
+  // the most-recent payment — the same row shown twice, once prominently
+  // above Upcoming, once again inside History. Now History is
+  // everything BEFORE the most recent one only; "Most recent pay" is the
+  // sole place that row appears. historyOnly stays empty until there's a
+  // SECOND past payment.
+  const mostRecent = closed.length > 0 ? closed[closed.length - 1] : null
+  const historyOnly = mostRecent ? closed.slice(0, -1) : closed
 
   // Saving "just this" period only ever affects the one row being edited.
   function handleSaveJustThis(dateIso: string, fields: ReturnType<typeof emptySalaryFields>) {
@@ -712,6 +3011,32 @@ function PayPeriodsSection({
 
   return (
     <div className="mb-4">
+      {mostRecent && (
+        <>
+          <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Most recent pay</h3>
+          <div className="flex flex-col gap-2 mb-3">
+            <PayPeriodRow
+              person={person}
+              dateIso={mostRecent}
+              isClosed
+              canSort={data.primaryPersonId === person.id}
+              data={data}
+              payCycle={payCycle}
+              saveSalarySort={saveSalarySort}
+              clearSalarySortTarget={clearSalarySortTarget}
+              clearSalarySort={clearSalarySort}
+              isOpen={expandedDate === mostRecent}
+              flashing={flashDates.includes(mostRecent)}
+              onToggle={() => setExpandedDate(expandedDate === mostRecent ? null : mostRecent)}
+              onSaveJustThis={(fields) => handleSaveJustThis(mostRecent, fields)}
+              onSaveAllFuture={(fields) => handleSaveAllFuture(mostRecent, fields)}
+              editingDeduction={editingDeduction}
+              setEditingDeduction={setEditingDeduction}
+            />
+          </div>
+        </>
+      )}
+
       <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Upcoming pay</h3>
       <div className="flex flex-col gap-2 mb-3">
         {upcoming.map((dateIso) => (
@@ -720,6 +3045,12 @@ function PayPeriodsSection({
             person={person}
             dateIso={dateIso}
             isClosed={false}
+            canSort={data.primaryPersonId === person.id}
+            data={data}
+            payCycle={payCycle}
+            saveSalarySort={saveSalarySort}
+            clearSalarySortTarget={clearSalarySortTarget}
+            clearSalarySort={clearSalarySort}
             isOpen={expandedDate === dateIso}
             flashing={flashDates.includes(dateIso)}
             onToggle={() => setExpandedDate(expandedDate === dateIso ? null : dateIso)}
@@ -732,17 +3063,23 @@ function PayPeriodsSection({
       </div>
 
       <button onClick={() => setShowHistory(!showHistory)} className="flex items-center justify-between w-full py-1 text-xs font-medium text-[var(--color-ink-muted)]">
-        <span>History ({closed.length})</span>
+        <span>History ({historyOnly.length})</span>
         {showHistory ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
       </button>
       {showHistory && (
         <div className="flex flex-col gap-2 mt-2">
-          {closed.map((dateIso) => (
+          {historyOnly.map((dateIso) => (
             <PayPeriodRow
               key={dateIso}
               person={person}
               dateIso={dateIso}
               isClosed
+              canSort={false}
+              data={data}
+              payCycle={payCycle}
+              saveSalarySort={saveSalarySort}
+              clearSalarySortTarget={clearSalarySortTarget}
+              clearSalarySort={clearSalarySort}
               isOpen={expandedDate === dateIso}
               flashing={flashDates.includes(dateIso)}
               onToggle={() => setExpandedDate(expandedDate === dateIso ? null : dateIso)}
@@ -752,7 +3089,7 @@ function PayPeriodsSection({
               setEditingDeduction={setEditingDeduction}
             />
           ))}
-          {closed.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] px-1">No past pay periods yet.</p>}
+          {historyOnly.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] px-1">No earlier pay periods yet.</p>}
         </div>
       )}
     </div>
@@ -763,6 +3100,12 @@ function PayPeriodRow({
   person,
   dateIso,
   isClosed,
+  canSort,
+  data,
+  payCycle,
+  saveSalarySort,
+  clearSalarySortTarget,
+  clearSalarySort,
   isOpen,
   flashing,
   onToggle,
@@ -774,6 +3117,12 @@ function PayPeriodRow({
   person: Person
   dateIso: string
   isClosed: boolean
+  canSort: boolean
+  data: AppDataV2
+  payCycle: PayCycleConfig
+  saveSalarySort: (payDate: string, targets: { to: TransferLocation; amount: number }[]) => void
+  clearSalarySortTarget: (payDate: string, location: TransferLocation) => void
+  clearSalarySort: (payDate: string) => void
   isOpen: boolean
   flashing: boolean
   onToggle: () => void
@@ -784,17 +3133,36 @@ function PayPeriodRow({
 }) {
   const netPay = computeNetPayForPeriod(person, dateIso)
   const existingOverride = person.salaryOverrides.find((o) => o.payPeriodDate === dateIso)
+  const [sortOpen, setSortOpen] = useState(false)
+  // Hidden entirely with no pots/savings pots/joint account to sort into
+  // (Adam's explicit 2026-09 call) — canSort itself already restricts
+  // this to the primary person's Most-recent/Upcoming rows only, per the
+  // caller.
+  const showSortIcon = canSort && hasSalarySortDestinations(data)
+  const existingSort = data.salarySorts.find((s) => s.payDate === dateIso)
 
   return (
     <div className="relative rounded-xl overflow-hidden" style={{ background: 'var(--color-bg-elevated)' }}>
-      <button onClick={onToggle} className="w-full flex items-center justify-between px-3 py-2.5 text-left">
-        <span className="text-sm text-[var(--color-ink)]">
-          {dateIso}
-          {existingOverride?.bonusGrossAmount && <span className="text-xs text-[var(--color-coral)]"> · Bonus attached</span>}
-          {existingOverride && !existingOverride.bonusGrossAmount && <span className="text-xs text-[var(--color-coral)]"> · Adjusted</span>}
-        </span>
-        <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(netPay ?? 0)}</span>
-      </button>
+      <div className="w-full flex items-center gap-2 px-3 py-2.5">
+        {showSortIcon && (
+          <button
+            onClick={() => setSortOpen(true)}
+            aria-label="Sort this salary"
+            className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+            style={{ background: existingSort ? 'var(--color-coral)' : 'var(--color-surface)' }}
+          >
+            <ArrowUpDown size={13} className={existingSort ? 'text-white' : 'text-[var(--color-ink-muted)]'} />
+          </button>
+        )}
+        <button onClick={onToggle} className="flex-1 flex items-center justify-between text-left min-w-0">
+          <span className="text-sm text-[var(--color-ink)]">
+            {dateIso}
+            {existingOverride?.bonusGrossAmount && <span className="text-xs text-[var(--color-coral)]"> · Bonus attached</span>}
+            {existingOverride && !existingOverride.bonusGrossAmount && <span className="text-xs text-[var(--color-coral)]"> · Adjusted</span>}
+          </span>
+          <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(netPay ?? 0)}</span>
+        </button>
+      </div>
       {isOpen && (
         <PeriodEditor
           person={person}
@@ -807,8 +3175,220 @@ function PayPeriodRow({
           setEditingDeduction={setEditingDeduction}
         />
       )}
+      {sortOpen && (
+        <SalarySortModal
+          payDate={dateIso}
+          data={data}
+          payCycle={payCycle}
+          onSave={(targets) => {
+            saveSalarySort(dateIso, targets)
+            setSortOpen(false)
+          }}
+          onClearTarget={(location) => clearSalarySortTarget(dateIso, location)}
+          onClearAll={() => {
+            clearSalarySort(dateIso)
+            setSortOpen(false)
+          }}
+          onClose={() => setSortOpen(false)}
+        />
+      )}
       <SavedFlashOverlay active={flashing} />
     </div>
+  )
+}
+
+function locationKey(location: TransferLocation): string {
+  return location.type === 'pot' ? `pot:${location.potId}` : location.type === 'savings' ? `savings:${location.savingsPotId}` : location.type
+}
+
+/**
+ * The sort icon's modal (App_Dev.md "Salary Sorter & Transfer Pill",
+ * 2026-09 session). One row per available destination (savings
+ * pots/pots the primary person owns, plus joint if it exists —
+ * salarySortDestinations already applies that filter). Each row's
+ * PREFILL is the existing saved target's amount if this payDate already
+ * has a sort touching that destination, otherwise salarySortSuggestion's
+ * own prefill (last-sorted-if-any, else total due); the small label
+ * below always shows salarySortSuggestion's own reasonLabel regardless
+ * (total due always wins the label text — see that function's own
+ * comment). Save runs the reverse-of-the-usual conflict guard only
+ * against NEWLY-added targets (a location this payDate's sort didn't
+ * already cover) — re-saving an unchanged existing target isn't "sorting
+ * a salary" into it again, so it doesn't re-trigger the prompt.
+ */
+function SalarySortModal({
+  payDate,
+  data,
+  payCycle,
+  onSave,
+  onClearTarget,
+  onClearAll,
+  onClose,
+}: {
+  payDate: string
+  data: AppDataV2
+  payCycle: PayCycleConfig
+  onSave: (targets: { to: TransferLocation; amount: number }[]) => void
+  onClearTarget: (location: TransferLocation) => void
+  onClearAll: () => void
+  onClose: () => void
+}) {
+  const destinations = salarySortDestinations(data)
+  const existingSort = data.salarySorts.find((s) => s.payDate === payDate)
+
+  const [drafts, setDrafts] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {}
+    for (const d of destinations) {
+      const existingTarget = existingSort?.targets.find((t) => locationsEqual(t.to, d.location))
+      if (existingTarget) {
+        initial[locationKey(d.location)] = String(existingTarget.amount)
+      } else {
+        const suggestion = salarySortSuggestion(data, payCycle, payDate, d.location)
+        initial[locationKey(d.location)] = suggestion.prefillAmount > 0 ? String(suggestion.prefillAmount) : ''
+      }
+    }
+    return initial
+  })
+
+  const [confirmingClearLocation, setConfirmingClearLocation] = useState<TransferLocation | null>(null)
+  const [confirmingClearAll, setConfirmingClearAll] = useState(false)
+  const [conflictQueue, setConflictQueue] = useState<{ location: TransferLocation; label: string }[] | null>(null)
+  const [queuePos, setQueuePos] = useState(0)
+  const [pendingTargets, setPendingTargets] = useState<{ to: TransferLocation; amount: number }[]>([])
+  const [skipped, setSkipped] = useState<TransferLocation[]>([])
+
+  function handleSaveClick() {
+    const targets = destinations.map((d) => ({ to: d.location, amount: Number(drafts[locationKey(d.location)]) || 0 })).filter((t) => t.amount > 0)
+    const conflicts = targets
+      .filter((t) => !existingSort?.targets.some((et) => locationsEqual(et.to, t.to)))
+      .filter((t) => !!findOneOffTransferConflict(data, payDate, t.to) || !!findRecurringTransferConflict(data, payCycle, payDate, t.to))
+      .map((t) => ({ location: t.to, label: transferLocationLabel(t.to, data.savingsPots, data.pots) }))
+
+    if (conflicts.length === 0) {
+      onSave(targets)
+      return
+    }
+    setPendingTargets(targets)
+    setConflictQueue(conflicts)
+    setQueuePos(0)
+    setSkipped([])
+  }
+
+  function respondToConflict(goAhead: boolean) {
+    if (!conflictQueue) return
+    const current = conflictQueue[queuePos]
+    const nextSkipped = goAhead ? skipped : [...skipped, current.location]
+    const nextPos = queuePos + 1
+    if (nextPos >= conflictQueue.length) {
+      const final = pendingTargets.filter((t) => !nextSkipped.some((loc) => locationsEqual(loc, t.to)))
+      setConflictQueue(null)
+      setQueuePos(0)
+      setSkipped([])
+      onSave(final)
+    } else {
+      setSkipped(nextSkipped)
+      setQueuePos(nextPos)
+    }
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">Sort this salary</h3>
+          <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+            <X size={20} />
+          </button>
+        </div>
+        <p className="text-xs text-[var(--color-ink-faint)] mb-4">{payDate} — moves money out of your Current Account into wherever you choose below.</p>
+
+        <div className="flex flex-col gap-4">
+          {destinations.map((d) => {
+            const key = locationKey(d.location)
+            const suggestion = salarySortSuggestion(data, payCycle, payDate, d.location)
+            const hasSavedTarget = !!existingSort?.targets.some((t) => locationsEqual(t.to, d.location))
+            return (
+              <div key={key} className="flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium text-[var(--color-ink)]">{d.label}</span>
+                  <button
+                    onClick={() => {
+                      if (hasSavedTarget) setConfirmingClearLocation(d.location)
+                      else setDrafts((prev) => ({ ...prev, [key]: '' }))
+                    }}
+                    className="text-xs text-[var(--color-ink-faint)]"
+                  >
+                    Clear
+                  </button>
+                </div>
+                <NumberInput
+                  inputMode="decimal"
+                  value={drafts[key] ?? ''}
+                  onChange={(v) => setDrafts((prev) => ({ ...prev, [key]: v }))}
+                  className={`w-full bg-transparent border-b border-[var(--color-track)] py-1 outline-none font-mono ${
+                    hasSavedTarget ? 'text-[var(--color-ink)]' : 'text-[var(--color-ink-muted)]'
+                  }`}
+                />
+                <p className="text-xs text-[var(--color-ink-faint)]">{suggestion.reasonLabel}</p>
+              </div>
+            )
+          })}
+        </div>
+
+        <FormButtonRow onCancel={onClose} onSave={handleSaveClick} />
+
+        {existingSort && (
+          <button onClick={() => setConfirmingClearAll(true)} className="w-full text-center py-2 mt-3 text-xs font-medium" style={{ color: 'var(--color-negative)' }}>
+            Clear this sort
+          </button>
+        )}
+
+        {confirmingClearLocation && (
+          <ConfirmModal
+            title="Clear this transfer?"
+            description={`Removes the transfer to ${transferLocationLabel(confirmingClearLocation, data.savingsPots, data.pots)} entirely. This can't be undone.`}
+            confirmLabel="Clear"
+            tone="danger"
+            onConfirm={() => {
+              onClearTarget(confirmingClearLocation)
+              setDrafts((prev) => ({ ...prev, [locationKey(confirmingClearLocation)]: '' }))
+              setConfirmingClearLocation(null)
+            }}
+            onCancel={() => setConfirmingClearLocation(null)}
+          />
+        )}
+
+        {confirmingClearAll && (
+          <ConfirmModal
+            title="Clear this salary sort?"
+            description="Removes every transfer it created. This can't be undone."
+            confirmLabel="Clear"
+            tone="danger"
+            onConfirm={() => {
+              setConfirmingClearAll(false)
+              onClearAll()
+            }}
+            onCancel={() => setConfirmingClearAll(false)}
+          />
+        )}
+
+        {conflictQueue && queuePos < conflictQueue.length && (
+          <ConfirmModal
+            title="Already sorted"
+            description={`${conflictQueue[queuePos].label} already has a scheduled or recurring transfer on this date. Go ahead and add the sort's transfer too, or skip it.`}
+            confirmLabel="Go ahead"
+            cancelLabel="Skip"
+            onConfirm={() => respondToConflict(true)}
+            onCancel={() => respondToConflict(false)}
+          />
+        )}
+      </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -849,6 +3429,7 @@ function PeriodEditor({
       : emptySalaryFields(),
   )
   const [confirming, setConfirming] = useState(false)
+  const [confirmingDeductionId, setConfirmingDeductionId] = useState<string | null>(null)
 
   if (!applicableSnapshot) {
     return (
@@ -978,7 +3559,7 @@ function PeriodEditor({
                   role="button"
                   onClick={(e) => {
                     e.stopPropagation()
-                    removeDeduction(d.id)
+                    setConfirmingDeductionId(d.id)
                   }}
                   className="text-[var(--color-ink-faint)]"
                 >
@@ -988,6 +3569,19 @@ function PeriodEditor({
             </button>
           ))}
         </div>
+        {confirmingDeductionId && (
+          <ConfirmModal
+            title="Remove this deduction?"
+            description="This can't be undone."
+            confirmLabel="Remove"
+            tone="danger"
+            onConfirm={() => {
+              removeDeduction(confirmingDeductionId)
+              setConfirmingDeductionId(null)
+            }}
+            onCancel={() => setConfirmingDeductionId(null)}
+          />
+        )}
         {editingDeduction?.personId === person.id &&
           (() => {
             const idx = draft.deductions.findIndex((d) => d.id === editingDeduction.deductionId)
@@ -1204,7 +3798,7 @@ function ConfirmSalaryChangeModal({
   // within. On iOS that combination clips/misorders a "position: fixed"
   // descendant against the nav's own stacking context, so despite a
   // higher z-index the confirm buttons rendered underneath the nav bar
-  // (see the rest of the app's modals — DeductionModal, IconPickerModal,
+  // (see the rest of the app's modals — DeductionModal, CategoryIconPickerModal,
   // etc. — which all portal for exactly this reason). Bottom padding
   // matches those same modals so the buttons clear the nav bar itself,
   // not just the safe-area inset.
@@ -1243,249 +3837,6 @@ const DEDUCTION_TYPE_SHORT: Record<DeductionType, string> = {
   post_tax: 'post-tax',
 }
 
-function SavingsSection({
-  entries,
-  onAdd,
-  onUpdate,
-  onRemove,
-}: {
-  entries: SavingsEntry[]
-  onAdd: (entry: Omit<SavingsEntry, 'id'>) => void
-  onUpdate: (entryId: string, updates: Partial<Omit<SavingsEntry, 'id'>>) => void
-  onRemove: (entryId: string) => void
-}) {
-  function addEntry(type: 'goal' | 'plan') {
-    const base: Omit<SavingsEntry, 'id'> =
-      type === 'goal'
-        ? { type: 'goal', name: '', includeInSummary: false, targetAmount: 0, currentAmount: 0, targetDate: '' }
-        : { type: 'plan', name: '', includeInSummary: false, monthlyAmount: 0 }
-    onAdd(base)
-  }
-
-  return (
-    <div className="mt-4">
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="font-body text-sm font-semibold text-[var(--color-ink)]">Savings</h3>
-        <div className="flex gap-3">
-          <button onClick={() => addEntry('plan')} className="text-xs font-medium" style={{ color: 'var(--color-coral)' }}>
-            + Monthly plan
-          </button>
-          <button onClick={() => addEntry('goal')} className="text-xs font-medium" style={{ color: 'var(--color-coral)' }}>
-            + Goal
-          </button>
-        </div>
-      </div>
-
-      {entries.length === 0 && <p className="text-xs text-[var(--color-ink-faint)]">No savings tracked yet.</p>}
-
-      <div className="flex flex-col gap-3">
-        {entries.map((entry) => (
-          <SavingsEntryCard key={entry.id} entry={entry} onUpdate={(patch) => onUpdate(entry.id, patch)} onRemove={() => onRemove(entry.id)} />
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function SavingsEntryCard({
-  entry,
-  onUpdate,
-  onRemove,
-}: {
-  entry: SavingsEntry
-  onUpdate: (patch: Partial<SavingsEntry>) => void
-  onRemove: () => void
-}) {
-  const [editing, setEditing] = useState(!entry.name)
-  const monthly = monthlyAmountForEntry(entry)
-  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
-
-  const percent = entry.type === 'goal' && entry.targetAmount ? Math.min(100, ((entry.currentAmount ?? 0) / entry.targetAmount) * 100) : 0
-
-  return (
-    <SwipeToDelete onDelete={onRemove} confirmLabel={entry.name || 'this entry'}>
-      <div className="relative rounded-xl p-4" style={{ background: 'var(--color-bg-elevated)' }}>
-        <button className="w-full flex items-center justify-between mb-2 text-left" onClick={() => setEditing(!editing)}>
-          <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-ink-faint)' }}>
-            {entry.type === 'goal' ? 'Goal' : 'Monthly plan'}
-          </span>
-          {editing ? <ChevronUp size={14} className="text-[var(--color-ink-faint)]" /> : <ChevronDown size={14} className="text-[var(--color-ink-faint)]" />}
-        </button>
-
-        {editing ? (
-          <SavingsEntryEditForm
-            entry={entry}
-            onSave={(patch) => {
-              onUpdate(patch)
-              setEditing(false)
-              triggerFlash()
-            }}
-          />
-        ) : (
-          <>
-            <div className="flex items-baseline justify-between mb-1">
-              <span className="font-body text-sm text-[var(--color-ink)]">{entry.name || 'Unnamed'}</span>
-              {entry.type === 'goal' ? (
-                <span className="font-mono text-sm text-[var(--color-ink-muted)]">
-                  £{(entry.currentAmount ?? 0).toFixed(0)} / £{(entry.targetAmount ?? 0).toFixed(0)}
-                </span>
-              ) : (
-                <span className="font-mono text-sm text-[var(--color-ink-muted)]">£{formatCurrency(entry.monthlyAmount ?? 0)}/mo</span>
-              )}
-            </div>
-            {entry.type === 'goal' && (
-              <div className="h-1.5 rounded-full overflow-hidden mb-1" style={{ background: 'var(--color-track)' }}>
-                <div className="h-full rounded-full" style={{ width: `${percent}%`, background: 'var(--color-coral)' }} />
-              </div>
-            )}
-            <p className="text-xs" style={{ color: entry.includeInSummary ? 'var(--color-positive)' : 'var(--color-ink-faint)' }}>
-              {entry.pausedFrom
-                ? `Paused from ${entry.pausedFrom}`
-                : entry.includeInSummary
-                  ? monthly > 0
-                    ? `£${formatCurrency(monthly)}/month counted in your available balance`
-                    : 'Included, but no monthly amount yet'
-                  : 'Not counted in available balance'}
-            </p>
-          </>
-        )}
-
-        <SavedFlashOverlay active={flashActive} />
-      </div>
-    </SwipeToDelete>
-  )
-}
-
-// ── Draft-then-Save edit form for a savings entry, following the same
-// convention as the other panels: nothing persists until Save is pressed.
-// Mounted fresh (guarded by `editing` in the parent) each time the entry is
-// opened for editing, so the draft always starts from the current saved
-// values. Save feedback (collapse + green flash) is owned by the parent
-// SavingsEntryCard, matching Bills/Loans/pay-periods — see SavedFlash.tsx. ──
-
-function SavingsEntryEditForm({ entry, onSave }: { entry: SavingsEntry; onSave: (patch: Partial<SavingsEntry>) => void }) {
-  const [draft, setDraft] = useState<Omit<SavingsEntry, 'id'>>(() => {
-    const { id: _id, ...rest } = entry
-    return rest
-  })
-  // Held separately from `draft.pausedFrom` — committing straight to draft
-  // from the date input's onChange meant the moment iOS's native picker
-  // opened and defaulted its wheel to today, THAT counted as a change
-  // (fired even on a bare tap-to-dismiss, before any deliberate scroll),
-  // which flipped this whole block over to the "Paused from" view and
-  // yanked the input out from under the person mid-tap. Keeping the pick
-  // here until an explicit "Set" tap means opening/dismissing the picker
-  // no longer silently pauses anything.
-  const [pauseDatePick, setPauseDatePick] = useState('')
-
-  function update(patch: Partial<Omit<SavingsEntry, 'id'>>) {
-    setDraft((d) => ({ ...d, ...patch }))
-  }
-
-  return (
-    <div className="grid grid-cols-2 gap-3">
-      <Field label="Name">
-        <input
-          value={draft.name}
-          onChange={(e) => update({ name: e.target.value })}
-          placeholder={draft.type === 'goal' ? 'e.g. House deposit' : 'e.g. General savings'}
-          className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-        />
-      </Field>
-
-      {draft.type === 'goal' ? (
-        <>
-          <Field label="Target date (optional)">
-            <input
-              type="date"
-              value={draft.targetDate ?? ''}
-              onChange={(e) => update({ targetDate: e.target.value })}
-              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-            />
-          </Field>
-          <Field label="Target amount (£)">
-            <input
-              type="number"
-              inputMode="decimal"
-              value={draft.targetAmount || ''}
-              onChange={(e) => update({ targetAmount: Number(e.target.value) })}
-              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
-            />
-          </Field>
-          <Field label="Saved so far (£)">
-            <input
-              type="number"
-              inputMode="decimal"
-              value={draft.currentAmount || ''}
-              onChange={(e) => update({ currentAmount: Number(e.target.value) })}
-              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
-            />
-          </Field>
-        </>
-      ) : (
-        <Field label="Amount per month (£)">
-          <input
-            type="number"
-            inputMode="decimal"
-            value={draft.monthlyAmount || ''}
-            onChange={(e) => update({ monthlyAmount: Number(e.target.value) })}
-            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
-          />
-        </Field>
-      )}
-
-      <label className="flex items-center gap-2 col-span-2 mt-1">
-        <input type="checkbox" checked={draft.includeInSummary} onChange={(e) => update({ includeInSummary: e.target.checked })} />
-        <span className="text-xs text-[var(--color-ink-muted)]">Include in available balance</span>
-      </label>
-
-      <div className="col-span-2 mt-1">
-        {draft.pausedFrom ? (
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-[var(--color-ink-muted)]">Paused from {draft.pausedFrom}</span>
-            <button onClick={() => update({ pausedFrom: undefined })} className="text-xs font-medium" style={{ color: 'var(--color-coral)' }}>
-              Resume
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={() => update({ pausedFrom: todayIso() })} className="text-xs font-medium" style={{ color: 'var(--color-negative)' }}>
-              Pause now
-            </button>
-            <span className="text-xs text-[var(--color-ink-faint)]">or</span>
-            <input
-              type="date"
-              value={pauseDatePick}
-              onChange={(e) => setPauseDatePick(e.target.value)}
-              className="bg-transparent border-b border-[var(--color-track)] py-0.5 text-xs text-[var(--color-ink-muted)] outline-none"
-            />
-            <span className="text-xs text-[var(--color-ink-faint)]">pause from a date</span>
-            {pauseDatePick && (
-              <button
-                onClick={() => {
-                  update({ pausedFrom: pauseDatePick })
-                  setPauseDatePick('')
-                }}
-                className="text-xs font-semibold px-2 py-0.5 rounded-full text-white"
-                style={{ background: 'var(--color-coral)' }}
-              >
-                Set
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-
-      <button
-        onClick={() => onSave(draft)}
-        className="col-span-2 w-full py-2.5 rounded-full text-sm font-semibold text-white mt-1"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
-      </button>
-    </div>
-  )
-}
 
 function BackupSection({ data, onRestore }: { data: AppDataV2; onRestore: (data: AppDataV2) => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null)

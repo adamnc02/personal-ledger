@@ -4,9 +4,24 @@ import { formatCurrency, formatMonthYear } from '../lib/format'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Plus, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, X, Info, AlertTriangle } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
-import { summarizeLoan, summarizeLoanProgress, estimateSettlementFigure, findLenderCalibrationProfile, previewOverpaymentRecast, previewRecurringOverpaymentRecast, buildLoanLedgerRows, loanFinishInfo, isLoanConfidentlyCalibrated, MAX_CALIBRATION_LINES, type CalibrationResult, type LoanLedgerRowType } from '../lib/ledgerLoans'
+import {
+  summarizeLoan,
+  summarizeLoanProgress,
+  estimateSettlementFigure,
+  findLenderCalibrationProfile,
+  previewOverpaymentRecast,
+  previewRecurringOverpaymentRecast,
+  buildLoanLedgerRows,
+  loanFinishInfo,
+  isLoanConfidentlyCalibrated,
+  MAX_CALIBRATION_LINES,
+  scheduledLoanRecurringOverpaymentDates,
+  setPausedLoanRecurringOverpaymentDates,
+  type CalibrationResult,
+  type LoanLedgerRowType,
+} from '../lib/ledgerLoans'
 import { nextMinimumChargeAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
-import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type StatementCalibrationLine, type Transaction } from '../types/ledger'
+import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
 import { CategoryIcon } from '../components/CategoryIcon'
@@ -15,9 +30,14 @@ import { visibleCategoriesFor, seededCategoryIdForIcon } from '../lib/categories
 import { aprToMonthlyRate, standardPayment } from '../lib/interestConventions'
 import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
+import { ConfirmModal } from '../components/ConfirmModal'
+import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
+import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
-import { peopleWithSalaryCount } from '../lib/household'
+import { peopleWithIncomeCount } from '../lib/household'
+import { shouldOfferLocationPicker } from '../lib/pickerFirst'
+import { addMonths } from 'date-fns'
 
 import { todayIso } from '../lib/date'
 
@@ -50,6 +70,82 @@ function AddButton({ onClick }: { onClick: () => void }) {
   )
 }
 
+/** Same "who's this for?" picker as Salary.tsx's — own local copy per this codebase's per-page-file convention for small shared UI. */
+function PersonPickerCard({ people, onPick, onCancel }: { people: { id: string; name: string }[]; onPick: (personId: string) => void; onCancel: () => void }) {
+  return (
+    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Who's this for?</span>
+        <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {people.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => onPick(p.id)}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * "Where does this get paid from?" — Picker-First Flows (2026-09
+ * session). Own local copy per this codebase's per-page-file convention
+ * — see Bills.tsx's identical component for the full reasoning (single
+ * flat list, picking a pot sets both location and potId in one tap, not
+ * shown at all when Current Account is the only possible answer).
+ */
+function LocationPickerCard({
+  canBeJoint,
+  ownerPots,
+  onPick,
+  onCancel,
+}: {
+  canBeJoint: boolean
+  ownerPots: Pot[]
+  onPick: (pick: { location: BillLocation; potId?: string }) => void
+  onCancel: () => void
+}) {
+  return (
+    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Where does this get paid from?</span>
+        <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <button onClick={() => onPick({ location: 'personal' })} className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]" style={{ background: 'var(--color-surface)' }}>
+          Current Account
+        </button>
+        {canBeJoint && (
+          <button onClick={() => onPick({ location: 'joint' })} className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]" style={{ background: 'var(--color-surface)' }}>
+            Joint Account
+          </button>
+        )}
+        {ownerPots.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => onPick({ location: 'pot', potId: p.id })}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function Loans() {
   const {
     data,
@@ -69,9 +165,22 @@ export function Loans() {
     removeCreditCardLumpPayment,
     updateCreditCardLumpPayment,
     addCategory,
+    assignLoanLocation,
   } = useLedgerData()
   const [addingLoan, setAddingLoan] = useState(false)
+  // Same "if multiple people, person-selector first; otherwise straight
+  // to the form" flow now applied consistently across Salary/Pension/
+  // Savings/Loans/Credit Cards — see PersonPickerCard's own comment in
+  // Salary.tsx for the full reasoning. defaultOwnerId feeds LoanForm's
+  // existing ownerId field unchanged; this only decides what it starts
+  // pre-filled to.
+  const [pickingLoanOwner, setPickingLoanOwner] = useState(false)
+  const [pickingLoanLocation, setPickingLoanLocation] = useState(false)
+  const [loanDefaultOwnerId, setLoanDefaultOwnerId] = useState(data.primaryPersonId)
+  const [loanDefaultLocation, setLoanDefaultLocation] = useState<{ location: BillLocation; potId?: string }>({ location: 'personal' })
   const [addingCard, setAddingCard] = useState(false)
+  const [pickingCardOwner, setPickingCardOwner] = useState(false)
+  const [cardDefaultOwnerId, setCardDefaultOwnerId] = useState(data.primaryPersonId)
   const [expandedLoan, setExpandedLoan] = useState<string | null>(null)
   const [expandedCard, setExpandedCard] = useState<string | null>(null)
   const [overpaymentPrefill, setOverpaymentPrefill] = useState<OverpaymentPrefill | null>(null)
@@ -83,9 +192,25 @@ export function Loans() {
   // bill to make that split meaningful — see LoanEditPanel/LoanForm's
   // "hasJointBills" prop for the full reasoning.
   const hasJointBills = data.recurringTemplates.some((t) => t.location === 'joint')
-  // ...and, separately, only once 2+ people actually have a salary
-  // configured to split — see lib/household.ts's hasSalaryConfigured.
-  const canBeJoint = peopleWithSalaryCount(data.people) >= 2
+  // ...and, separately, only once 2+ people actually have real income
+  // (salary or an active pension) to split — see lib/household.ts's
+  // hasIncomeConfigured.
+  const canBeJoint = peopleWithIncomeCount(data.people, data.pensions) >= 2
+
+  // Shared by both the single-person-owner shortcut and PersonPickerCard's
+  // onPick (Picker-First Flows, 2026-09 session) — same skip logic as
+  // Bills.tsx's proceedPastOwner: only shows the Location step when
+  // there's a real choice besides Current Account for this owner.
+  function proceedPastLoanOwner(ownerId: string) {
+    setLoanDefaultOwnerId(ownerId)
+    const ownerHasPots = data.pots.some((p) => p.personId === ownerId && p.active)
+    if (shouldOfferLocationPicker(canBeJoint, ownerHasPots)) {
+      setPickingLoanLocation(true)
+    } else {
+      setLoanDefaultLocation({ location: 'personal' })
+      setAddingLoan(true)
+    }
+  }
 
   useEffect(() => {
     if (loanPrefill) setAddingLoan(true)
@@ -108,17 +233,58 @@ export function Loans() {
         <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Borrowing</h1>
       </header>
 
-      <CollapsibleSection title="Loans" className="mb-8" headerExtra={<AddButton onClick={() => setAddingLoan(true)} />}>
+      <CollapsibleSection
+        title="Loans"
+        className="mb-8"
+        headerExtra={
+          <AddButton
+            onClick={() => {
+              if (data.people.length === 1) {
+                proceedPastLoanOwner(data.people[0].id)
+              } else {
+                setPickingLoanOwner(true)
+              }
+            }}
+          />
+        }
+      >
         <p className="text-xs text-[var(--color-ink-faint)] mb-3 leading-relaxed">
           Monthly amount + term are the inputs now — the total payable is worked out from those, rather than the
           other way round. Log a real overpayment on any loan below and its remaining schedule shrinks for good.
         </p>
 
+        {pickingLoanOwner && (
+          <PersonPickerCard
+            people={data.people}
+            onPick={(id) => {
+              setPickingLoanOwner(false)
+              proceedPastLoanOwner(id)
+            }}
+            onCancel={() => setPickingLoanOwner(false)}
+          />
+        )}
+
+        {pickingLoanLocation && (
+          <LocationPickerCard
+            canBeJoint={canBeJoint}
+            ownerPots={data.pots.filter((p) => p.personId === loanDefaultOwnerId && p.active)}
+            onPick={(pick) => {
+              setLoanDefaultLocation(pick)
+              setPickingLoanLocation(false)
+              setAddingLoan(true)
+            }}
+            onCancel={() => setPickingLoanLocation(false)}
+          />
+        )}
+
         {addingLoan && (
           <LoanForm
             people={data.people}
+            pots={data.pots}
             categories={visibleCategoriesFor(data)}
-            defaultOwnerId={data.primaryPersonId}
+            defaultOwnerId={loanDefaultOwnerId}
+            defaultLocation={loanDefaultLocation.location}
+            defaultPotId={loanDefaultLocation.potId}
             initial={loanPrefill}
             hasJointBills={hasJointBills}
             canBeJoint={canBeJoint}
@@ -154,10 +320,12 @@ export function Loans() {
                 onRemove={() => removeLoan(loan.id)}
                 categories={visibleCategoriesFor(data, loan.categoryId)}
                 people={data.people}
+                pots={data.pots}
                 hasJointBills={hasJointBills}
                 canBeJoint={canBeJoint}
                 onAddCategory={addCategory}
                 onSave={(u) => updateLoan(loan.id, u)}
+                onAssignLocation={(location, effectiveFrom, potId) => assignLoanLocation(loan.id, location, effectiveFrom, { potId })}
                 onLogOverpayment={(amount, date, note, recastMode) => logLoanOverpayment(loan.id, amount, date, note, recastMode)}
                 onUpdateOverpayment={(overpaymentId, amount, date, note) => updateLoanOverpayment(loan.id, overpaymentId, amount, date, note)}
                 onRemoveOverpayment={(overpaymentId) => removeLoanOverpayment(loan.id, overpaymentId)}
@@ -172,17 +340,43 @@ export function Loans() {
         </div>
       </CollapsibleSection>
 
-      <CollapsibleSection title="Credit Cards" headerExtra={<AddButton onClick={() => setAddingCard(true)} />}>
+      <CollapsibleSection
+        title="Credit Cards"
+        headerExtra={
+          <AddButton
+            onClick={() => {
+              if (data.people.length === 1) {
+                setCardDefaultOwnerId(data.people[0].id)
+                setAddingCard(true)
+              } else {
+                setPickingCardOwner(true)
+              }
+            }}
+          />
+        }
+      >
         <p className="text-xs text-[var(--color-ink-faint)] mb-3 leading-relaxed">
           A card's minimum/monthly payment is treated like a bill. Spend charged to a card (logged from the Expenses
           page) never touches your cash balance — only actual payments toward the card do.
         </p>
 
+        {pickingCardOwner && (
+          <PersonPickerCard
+            people={data.people}
+            onPick={(id) => {
+              setCardDefaultOwnerId(id)
+              setPickingCardOwner(false)
+              setAddingCard(true)
+            }}
+            onCancel={() => setPickingCardOwner(false)}
+          />
+        )}
+
         {addingCard && (
           <CreditCardForm
             people={data.people}
             categories={visibleCategoriesFor(data, CREDIT_CARD_CATEGORY_ID)}
-            defaultOwnerId={data.primaryPersonId}
+            defaultOwnerId={cardDefaultOwnerId}
             nextColor={pickCreditCardColor(data.creditCards.length)}
             onAddCategory={addCategory}
             onCancel={() => setAddingCard(false)}
@@ -262,10 +456,12 @@ function LoanRow({
   onRemove,
   categories,
   people,
+  pots,
   hasJointBills,
   canBeJoint,
   onAddCategory,
   onSave,
+  onAssignLocation,
   onLogOverpayment,
   onUpdateOverpayment,
   onRemoveOverpayment,
@@ -283,10 +479,12 @@ function LoanRow({
   onRemove: () => void
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   people: { id: string; name: string }[]
+  pots: Pot[]
   hasJointBills: boolean
   canBeJoint: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
+  onAssignLocation: (location: BillLocation, effectiveFrom: string, potId?: string) => void
   onLogOverpayment: (amount: number, date: string, note?: string, recastMode?: 'reduce_term' | 'reduce_payment') => void
   onUpdateOverpayment: (overpaymentId: string, amount: number, date: string, note?: string) => void
   onRemoveOverpayment: (overpaymentId: string) => void
@@ -340,11 +538,17 @@ function LoanRow({
             loan={loan}
             categories={categories}
             people={people}
+            pots={pots}
             hasJointBills={hasJointBills}
             canBeJoint={canBeJoint}
             onAddCategory={onAddCategory}
             onSave={(u) => {
               onSave(u)
+              onToggle()
+              triggerFlash()
+            }}
+            onAssignLocation={(location, effectiveFrom, potId) => {
+              onAssignLocation(location, effectiveFrom, potId)
               onToggle()
               triggerFlash()
             }}
@@ -473,10 +677,12 @@ function LoanEditPanel({
   loan,
   categories,
   people,
+  pots,
   hasJointBills,
   canBeJoint,
   onAddCategory,
   onSave,
+  onAssignLocation,
   onLogOverpayment,
   onUpdateOverpayment,
   onRemoveOverpayment,
@@ -488,10 +694,12 @@ function LoanEditPanel({
   loan: Loan
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   people: { id: string; name: string }[]
+  pots: Pot[]
   hasJointBills: boolean
   canBeJoint: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
+  onAssignLocation: (location: BillLocation, effectiveFrom: string, potId?: string) => void
   onLogOverpayment: (amount: number, date: string, note?: string, recastMode?: 'reduce_term' | 'reduce_payment') => void
   onUpdateOverpayment: (overpaymentId: string, amount: number, date: string, note?: string) => void
   onRemoveOverpayment: (overpaymentId: string) => void
@@ -515,6 +723,16 @@ function LoanEditPanel({
   const [loggingOverpayment, setLoggingOverpayment] = useState(overpaymentPrefill?.mode === 'payoff')
   const [settlingLoan, setSettlingLoan] = useState(false)
   const [calibratingLoan, setCalibratingLoan] = useState(false)
+  // Pots backlog item (2026-09 session) — a location change needs its own
+  // effective date, same reasoning as Bills.tsx's BillEditPanel (see
+  // that component's own comment for the full picture; this mirrors it
+  // with a plain date field rather than a "pick a specific upcoming
+  // payment" list — Loans.tsx has no existing per-occurrence picker
+  // infrastructure the way Bills does, and Adam's own spec for the
+  // closely analogous pot-creation flow was itself just "date picker,
+  // default to today," so this stays proportionate rather than building
+  // a parallel picker UI for one field.
+  const [locationEffectiveFrom, setLocationEffectiveFrom] = useState(todayIso())
 
   // Prefill only needs to seed the initial draft/form state above — once
   // this panel has mounted with it, tell the parent to forget it so a
@@ -566,16 +784,25 @@ function LoanEditPanel({
 
       <CategoryPicker categories={categories} value={draft.categoryId} onChange={(categoryId) => update({ categoryId })} onAddCategory={onAddCategory} />
 
-      {(hasJointBills || draft.location === 'joint') && (
+      {(hasJointBills || draft.location === 'joint' || pots.some((p) => p.personId === draft.ownerId) || draft.location === 'pot') && (
         <LocationEditor
           people={people}
+          pots={pots}
           canBeJoint={canBeJoint}
           location={draft.location}
           ownerId={draft.ownerId}
+          potId={draft.potId}
           payee={draft.payee}
           payeeSharePercent={draft.payeeSharePercent}
           onChange={update}
         />
+      )}
+      {/* Pots backlog item (2026-09 session) — governs ONLY this loan's
+          own regular monthlyPayment; a recurring overpayment has its own,
+          independent location field further down in
+          RecurringOverpaymentEditor. */}
+      {(draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)) && (
+        <EditField label="Location change takes effect from" type="date" value={locationEffectiveFrom} onChange={setLocationEffectiveFrom} />
       )}
 
       {/* Editable, matching how a credit card's logged lump payments appear — each overpayment is its own row, tappable to edit or delete, not just a rolled-up summary line. */}
@@ -596,7 +823,7 @@ function LoanEditPanel({
         />
       )}
 
-      <RecurringOverpaymentEditor loan={{ ...loan, ...draft }} value={draft.recurringOverpayment} onChange={(recurringOverpayment) => update({ recurringOverpayment })} />
+      <RecurringOverpaymentEditor loan={{ ...loan, ...draft }} pots={pots} value={draft.recurringOverpayment} onChange={(recurringOverpayment) => update({ recurringOverpayment })} />
 
       {calibratingLoan && (
         <CalibrationModal loanName={loan.name} existingLinesCount={loan.statementCalibrationLines?.length ?? 0} onCalibrate={onCalibrate} onClose={() => setCalibratingLoan(false)} />
@@ -628,7 +855,16 @@ function LoanEditPanel({
       )}
 
       <button
-        onClick={() => onSave(draft)}
+        onClick={() => {
+          const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
+          if (locationChanged) {
+            onAssignLocation(draft.location, locationEffectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+            const { location: _l, potId: _p, ...rest } = draft
+            onSave(rest)
+          } else {
+            onSave(draft)
+          }
+        }}
         className="w-full py-2.5 rounded-full text-sm font-semibold text-white"
         style={{ background: 'var(--color-coral)' }}
       >
@@ -708,7 +944,31 @@ function CreditCardEditPanel({
           value={draft.paymentDayOfMonth}
           onChange={(v) => update({ paymentDayOfMonth: Math.max(1, Math.min(31, Number(v))) })}
         />
+        <EditField
+          label="Statement opens (day, optional)"
+          type="number"
+          value={draft.statementStartDay ?? ''}
+          onChange={(v) => update({ statementStartDay: v === '' ? undefined : Math.max(1, Math.min(31, Number(v))) })}
+        />
+        <EditField
+          label="Statement closes (day, optional)"
+          type="number"
+          value={draft.statementEndDay ?? ''}
+          onChange={(v) => update({ statementEndDay: v === '' ? undefined : Math.max(1, Math.min(31, Number(v))) })}
+        />
       </div>
+
+      {/* item e — a spend after this window's close doesn't count toward
+          the minimum due for the window that already closed; it rolls
+          into the NEXT one instead. Only shown once statementEndDay is
+          actually set, since the feature is otherwise entirely inert. */}
+      {draft.statementEndDay != null && (
+        <p className="text-xs text-[var(--color-ink-faint)] -mt-1">
+          Statement window{draft.statementStartDay != null ? ` ${ordinalSuffix(draft.statementStartDay)}–` : ' closing '}
+          {ordinalSuffix(draft.statementEndDay)} — spend after the {ordinalSuffix(draft.statementEndDay)} counts toward the
+          following window's minimum payment, not this one's, even though it still shows in the balance above straight away.
+        </p>
+      )}
 
       {/* Same statement-date idea as the Salary page's opening balance:
           the figure above is what the card owed on that date, and
@@ -1343,6 +1603,7 @@ function LoggedPaymentEditForm({
   const [amount, setAmount] = useState(String(payment.amount))
   const [date, setDate] = useState(payment.date)
   const [note, setNote] = useState(payment.note ?? '')
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
   const amountNumber = Number(amount)
 
   return (
@@ -1352,22 +1613,23 @@ function LoggedPaymentEditForm({
         <EditField label="Date" type="date" value={date} onChange={setDate} />
       </div>
       <EditField label="Note (optional)" value={note} onChange={setNote} />
-      <div className="flex items-center justify-between">
-        <button onClick={onDelete} className="text-xs" style={{ color: 'var(--color-negative)' }}>
-          Delete
-        </button>
-        <button onClick={onCancel} className="text-xs text-[var(--color-ink-muted)] px-2">
-          Cancel
-        </button>
-      </div>
-      <button
-        disabled={!(amountNumber > 0 && date)}
-        onClick={() => onSave(amountNumber, date, note || undefined)}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
+      <button onClick={() => setConfirmingDelete(true)} className="text-xs self-start" style={{ color: 'var(--color-negative)' }}>
+        Delete
       </button>
+      {confirmingDelete && (
+        <ConfirmModal
+          title="Delete this payment?"
+          description="This can't be undone."
+          confirmLabel="Delete"
+          tone="danger"
+          onConfirm={() => {
+            setConfirmingDelete(false)
+            onDelete()
+          }}
+          onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
+      <FormButtonRow onCancel={onCancel} onSave={() => onSave(amountNumber, date, note || undefined)} saveDisabled={!(amountNumber > 0 && date)} />
     </div>
   )
 }
@@ -1381,10 +1643,12 @@ function LoggedPaymentEditForm({
 
 function RecurringOverpaymentEditor({
   loan,
+  pots,
   value,
   onChange,
 }: {
   loan: Loan
+  pots: Pot[]
   value: LoanRecurringOverpayment | undefined
   onChange: (v: LoanRecurringOverpayment | undefined) => void
 }) {
@@ -1398,8 +1662,20 @@ function RecurringOverpaymentEditor({
   // overpayment" created `value` (with that £50 default baked in) AND
   // opened the recast screen in the very same click.
   const [draftAmount, setDraftAmount] = useState<LoanRecurringOverpayment['amount'] | null>(null)
+  // Picker-First Flows (2026-09 session) — the location step this field's
+  // own type comment already documented as intended ("Chosen via its own
+  // location-picker-first step when the recurring overpayment is
+  // created") but was never actually built; only ever reachable
+  // afterward, via the inline "Paid from" dropdown further down in the
+  // live editor. Held the same way pendingAmount is: nothing is written
+  // to `value` until the whole wizard (amount → location → recast)
+  // completes. Only ever shown when the owner actually has a pot to pick
+  // (see the render branch below) — with none, this step is skipped
+  // entirely and behaviour is unchanged from before this session.
+  const [pendingAmount, setPendingAmount] = useState<LoanRecurringOverpayment['amount'] | null>(null)
+  const ownerPots = pots.filter((p) => p.personId === loan.ownerId)
 
-  if (!value && !draftAmount) {
+  if (!value && !draftAmount && !pendingAmount) {
     return (
       <button onClick={() => setDraftAmount({ type: 'fixed', amount: 50 })} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
         + Add a recurring overpayment
@@ -1409,7 +1685,8 @@ function RecurringOverpaymentEditor({
 
   // The amount step now genuinely comes first — nothing is created or
   // saved yet at this point, it's purely local draft state until
-  // "Continue" commits it and moves on to the recast choice.
+  // "Continue" commits it and moves on to Location (if the owner has a
+  // pot to choose from) or straight to the recast choice.
   if (!value && draftAmount) {
     return (
       <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
@@ -1445,9 +1722,14 @@ function RecurringOverpaymentEditor({
           <button
             disabled={draftAmount.type === 'fixed' ? !(draftAmount.amount > 0) : !(draftAmount.percent > 0)}
             onClick={() => {
-              onChange({ startDate: todayIso(), amount: draftAmount })
-              setDraftAmount(null)
-              setChoosingRecast(true)
+              if (ownerPots.length > 0) {
+                setPendingAmount(draftAmount)
+                setDraftAmount(null)
+              } else {
+                onChange({ startDate: todayIso(), amount: draftAmount })
+                setDraftAmount(null)
+                setChoosingRecast(true)
+              }
             }}
             className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
             style={{ background: 'var(--color-coral)' }}
@@ -1455,6 +1737,54 @@ function RecurringOverpaymentEditor({
             Continue
           </button>
         </div>
+      </div>
+    )
+  }
+
+  // Picker-First Flows (2026-09 session) — only reachable when the owner
+  // has at least one pot (see ownerPots above); with none, the amount
+  // step's own Continue skips straight to recast, exactly as before this
+  // session. "Follows the loan" mirrors the field's own documented
+  // default (LoanRecurringOverpayment.location in types/ledger.ts) —
+  // explicitly offered here rather than just leaving it unset by
+  // omission, since a person choosing at set-up time deserves to see
+  // that as a real option, not a side effect of skipping the step.
+  if (!value && !draftAmount && pendingAmount) {
+    const commit = (patch: { location?: 'personal' | 'pot'; potId?: string }) => {
+      onChange({ startDate: todayIso(), amount: pendingAmount, ...patch })
+      setPendingAmount(null)
+      setChoosingRecast(true)
+    }
+    return (
+      <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+        <span className="text-xs font-medium text-[var(--color-ink)]">Where should this come from?</span>
+        <div className="flex flex-col gap-1.5">
+          <button onClick={() => commit({})} className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]" style={{ background: 'var(--color-surface)' }}>
+            Follows the loan's own location
+          </button>
+          <button onClick={() => commit({ location: 'personal' })} className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]" style={{ background: 'var(--color-surface)' }}>
+            Personal
+          </button>
+          {ownerPots.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => commit({ location: 'pot', potId: p.id })}
+              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+              style={{ background: 'var(--color-surface)' }}
+            >
+              {p.name}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => {
+            setDraftAmount(pendingAmount)
+            setPendingAmount(null)
+          }}
+          className="text-xs text-[var(--color-ink-muted)] self-start mt-1"
+        >
+          Back
+        </button>
       </div>
     )
   }
@@ -1556,6 +1886,44 @@ function RecurringOverpaymentEditor({
         />
       )}
 
+      {/* Pots backlog item (2026-09 session) — independent of the loan's
+          OWN location (Adam-specified: "if a loan is tagged to a pot,
+          that means ONLY the monthly payment is paid from the pot, not
+          necessarily recurring overpayments"). Absent/'Follows loan' is
+          the field's own documented default (see
+          LoanRecurringOverpayment.location in types/ledger.ts) — nothing
+          is lost by leaving this alone, it just means "same place as the
+          regular payment," exactly what already happened before this
+          field existed. A flat overwrite, not effective-dated — see that
+          same type comment for why. */}
+      {ownerPots.length > 0 && (
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-[var(--color-ink-muted)]">Paid from</span>
+          <select
+            value={value.location === 'pot' ? `pot:${value.potId ?? ''}` : (value.location ?? '')}
+            onChange={(e) => {
+              const raw = e.target.value
+              if (raw === '') onChange({ ...value, location: undefined, potId: undefined })
+              else if (raw === 'personal') onChange({ ...value, location: 'personal', potId: undefined })
+              else onChange({ ...value, location: 'pot', potId: raw.slice(4) })
+            }}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          >
+            <option value="" style={{ color: '#000' }}>
+              Follows the loan's own location
+            </option>
+            <option value="personal" style={{ color: '#000' }}>
+              Personal
+            </option>
+            {ownerPots.map((p) => (
+              <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
       <div className="grid grid-cols-2 gap-2">
         <EditField label="Payment date" type="date" value={value.startDate} onChange={(v) => onChange({ ...value, startDate: v })} />
         {showEndDate ? (
@@ -1577,6 +1945,33 @@ function RecurringOverpaymentEditor({
           Clear end date (run indefinitely)
         </button>
       )}
+
+      {/* Ad-hoc individual skips (Phase 4) — distinct from the end date
+          above: pausing one date doesn't mean the arrangement is over,
+          the next scheduled one still applies. */}
+      <PausedOccurrencesControl
+        windowDates={scheduledLoanRecurringOverpaymentDates(loan, addMonths(new Date(), -2), addMonths(new Date(), 12))}
+        currentlyPaused={new Set(value.pausedDates ?? [])}
+        amountForDate={(_date) => {
+          if (value.amount.type === 'fixed') return value.amount.amount
+          // Percent-of-balance has no single "amount" independent of the
+          // loan's balance at that date — showing the loan's CURRENT
+          // balance's share is a reasonable estimate for the picker, not
+          // a promise of the exact figure on the day.
+          return Math.round(((loan.principal * value.amount.percent) / 100) * 100) / 100
+        }}
+        itemLabel="overpayments"
+        nextPaymentPreview={(tentative) => {
+          const windowDates = scheduledLoanRecurringOverpaymentDates(loan, addMonths(new Date(), -2), addMonths(new Date(), 12))
+          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, tentative)
+          return windowDates.find((d) => !merged?.pausedDates?.includes(d)) ?? null
+        }}
+        onSave={(pausedDates) => {
+          const windowDates = scheduledLoanRecurringOverpaymentDates(loan, addMonths(new Date(), -2), addMonths(new Date(), 12))
+          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, pausedDates)
+          if (merged) onChange(merged)
+        }}
+      />
     </div>
   )
 }
@@ -1617,8 +2012,11 @@ function MinimumPaymentEditor({ value, onChange }: { value: CreditCardMinimumPay
 
 function LoanForm({
   people,
+  pots,
   categories,
   defaultOwnerId,
+  defaultLocation,
+  defaultPotId,
   initial,
   hasJointBills,
   canBeJoint,
@@ -1628,8 +2026,11 @@ function LoanForm({
   onCancel,
 }: {
   people: { id: string; name: string }[]
+  pots: Pot[]
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   defaultOwnerId: string
+  defaultLocation: BillLocation
+  defaultPotId?: string
   initial?: LoanPrefill
   hasJointBills: boolean
   canBeJoint: boolean
@@ -1661,8 +2062,9 @@ function LoanForm({
   const [advanceDate, setAdvanceDate] = useState(initial?.advanceDate ?? '')
   const [lender, setLender] = useState('')
   const [categoryId, setCategoryId] = useState(initial?.categoryId ?? (categories.some((c) => c.id === DEFAULT_LOAN_CATEGORY_ID) ? DEFAULT_LOAN_CATEGORY_ID : categories[0]?.id ?? ''))
-  const [location, setLocation] = useState<BillLocation>(initial?.location ?? 'personal')
+  const [location, setLocation] = useState<BillLocation>(initial?.location ?? defaultLocation)
   const [ownerId, setOwnerId] = useState(initial?.ownerId || defaultOwnerId)
+  const [potId, setPotId] = useState<string | undefined>(initial?.potId ?? defaultPotId)
   const [payee, setPayee] = useState(initial?.payee || (people[0]?.id ?? ''))
   const [payeeSharePercent, setPayeeSharePercent] = useState(initial?.payeeSharePercent ?? 50)
 
@@ -1729,27 +2131,28 @@ function LoanForm({
         </p>
       )}
       <CategoryPicker categories={categories} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
-      {(hasJointBills || location === 'joint') && (
+      {(hasJointBills || location === 'joint' || pots.some((p) => p.personId === ownerId) || location === 'pot') && (
         <LocationEditor
           people={people}
+          pots={pots}
           canBeJoint={canBeJoint}
           location={location}
           ownerId={ownerId}
+          potId={potId}
           payee={payee}
           payeeSharePercent={payeeSharePercent}
           onChange={(patch) => {
             setLocation(patch.location)
             if (patch.ownerId) setOwnerId(patch.ownerId)
+            setPotId(patch.potId)
             if (patch.payee) setPayee(patch.payee)
             if (patch.payeeSharePercent !== undefined) setPayeeSharePercent(patch.payeeSharePercent)
           }}
         />
       )}
-      <div className="flex gap-2 justify-end">
-        <button onClick={onCancel} className="px-3 py-1.5 rounded-lg text-sm text-[var(--color-ink-muted)]">
-          Cancel
-        </button>
-        <button
+      <div className="flex gap-2">
+        <CancelButton onClick={onCancel} />
+        <SaveButton
           disabled={!canSave}
           onClick={() =>
             onSave({
@@ -1763,18 +2166,16 @@ function LoanForm({
               lender: lender.trim() || undefined,
               categoryId,
               location,
-              ownerId: location === 'personal' ? ownerId : '',
+              ownerId: location === 'personal' || location === 'pot' ? ownerId : '',
+              potId: location === 'pot' ? potId : undefined,
               payee: location === 'joint' ? payee : '',
               payeeSharePercent: location === 'joint' ? payeeSharePercent : 100,
               active: true,
               ...(matchedProfile ?? {}),
             })
           }
-          className="px-3 py-1.5 rounded-lg text-sm font-medium text-white disabled:opacity-40"
-          style={{ background: 'var(--color-coral)' }}
-        >
-          Add loan
-        </button>
+          label="Add loan"
+        />
       </div>
     </div>
   )
@@ -1811,6 +2212,10 @@ function CreditCardForm({
   const [currentBalance, setCurrentBalance] = useState('')
   const [balanceAsOfDate, setBalanceAsOfDate] = useState(todayIso())
   const [paymentDayOfMonth, setPaymentDayOfMonth] = useState('1')
+  // item e — optional; a card left blank behaves exactly as before (no
+  // window gating on its minimum-payment generation).
+  const [statementStartDay, setStatementStartDay] = useState('')
+  const [statementEndDay, setStatementEndDay] = useState('')
   const [minimumPayment, setMinimumPayment] = useState<CreditCardMinimumPayment>({ type: 'percent_of_balance', percent: 5 })
   const [ownerId, setOwnerId] = useState(defaultOwnerId)
   const [categoryId, setCategoryId] = useState(CREDIT_CARD_CATEGORY_ID)
@@ -1831,6 +2236,10 @@ function CreditCardForm({
         <EditField label="...as of" type="date" value={balanceAsOfDate} onChange={setBalanceAsOfDate} />
       </div>
       <EditField label="Payment day of month" type="number" value={paymentDayOfMonth} onChange={setPaymentDayOfMonth} />
+      <div className="grid grid-cols-2 gap-3">
+        <EditField label="Statement opens (day, optional)" type="number" value={statementStartDay} onChange={setStatementStartDay} />
+        <EditField label="Statement closes (day, optional)" type="number" value={statementEndDay} onChange={setStatementEndDay} />
+      </div>
       <MinimumPaymentEditor value={minimumPayment} onChange={setMinimumPayment} />
       <CategoryPicker categories={categories} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
       {people.length > 1 && (
@@ -1849,11 +2258,9 @@ function CreditCardForm({
           </select>
         </label>
       )}
-      <div className="flex gap-2 justify-end">
-        <button onClick={onCancel} className="px-3 py-1.5 rounded-lg text-sm text-[var(--color-ink-muted)]">
-          Cancel
-        </button>
-        <button
+      <div className="flex gap-2">
+        <CancelButton onClick={onCancel} />
+        <SaveButton
           disabled={!canSave}
           onClick={() =>
             onSave({
@@ -1865,14 +2272,13 @@ function CreditCardForm({
               balanceAsOfDate,
               minimumPayment,
               paymentDayOfMonth: Number(paymentDayOfMonth),
+              statementStartDay: statementStartDay === '' ? undefined : Math.max(1, Math.min(31, Number(statementStartDay))),
+              statementEndDay: statementEndDay === '' ? undefined : Math.max(1, Math.min(31, Number(statementEndDay))),
               ownerId,
             })
           }
-          className="px-3 py-1.5 rounded-lg text-sm font-medium text-white disabled:opacity-40"
-          style={{ background: 'var(--color-coral)' }}
-        >
-          Add card
-        </button>
+          label="Add card"
+        />
       </div>
     </div>
   )

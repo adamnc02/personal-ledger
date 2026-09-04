@@ -23,7 +23,7 @@ export function CollapsibleSection({ title, defaultOpen = true, children, classN
             <ChevronDown size={16} className="text-[var(--color-ink-muted)]" />
           )}
         </button>
-        {open && headerExtra}
+        {headerExtra}
       </div>
       {open && children}
     </section>

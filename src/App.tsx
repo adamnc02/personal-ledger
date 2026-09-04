@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react'
 import { HashRouter, Routes, Route, useLocation } from 'react-router-dom'
-import { AppProvider } from './context/AppContext'
 import { LedgerProvider } from './context/LedgerContext'
 import { BottomNav } from './components/BottomNav'
+import { AppGuards } from './components/AppGuards'
 import { Home } from './pages/Home'
 import { Salary } from './pages/Salary'
 import { Loans } from './pages/Loans'
@@ -23,8 +23,8 @@ function App() {
   const contentRef = useRef<HTMLDivElement>(null)
 
   return (
-    <AppProvider>
-      <LedgerProvider>
+    <LedgerProvider>
+      <AppGuards>
         <HashRouter>
           {/* The app shell is sized from --app-height (JS-measured in index.html,
               see the script there for why) rather than 100dvh/100vh directly, and
@@ -60,8 +60,8 @@ function App() {
             <BottomNav />
           </div>
         </HashRouter>
-      </LedgerProvider>
-    </AppProvider>
+      </AppGuards>
+    </LedgerProvider>
   )
 }
 

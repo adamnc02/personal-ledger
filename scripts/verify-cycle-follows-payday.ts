@@ -185,6 +185,8 @@ function dataWith(payCycle: PayCycleConfig): AppDataV2 {
     creditCards: [],
     transactions: [] as Transaction[],
     payCycles: [payCycle],
+    pensions: [],
+    savingsPots: [],
     scenarios: [],
   } as unknown as AppDataV2
 }

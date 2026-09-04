@@ -80,7 +80,7 @@ const base = defaultLedgerData()
 const data: AppDataV2 = { ...base, people: [person], payCycles: [payCycle], primaryPersonId: 'adam', transactions: [] }
 
 const asOf = new Date('2026-06-15')
-const threeCycleEnd = horizonRangeEnd(payCycle, 'three_cycles', asOf)
+const threeCycleEnd = horizonRangeEnd(data, 'adam', 'three_cycles', asOf)
 const projection = computeProjection(data, 'adam', payCycle, 'three_cycles', asOf)
 
 const goalContributions = projection.transactions.filter((t) => t.type === 'savings_contribution' && t.sourceId === 'goal-1' && t.status === 'pending')

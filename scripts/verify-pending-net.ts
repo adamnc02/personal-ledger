@@ -121,6 +121,7 @@ const data: AppDataV2 = {
   creditCards: [],
   transactions: [familyTransfer],
   payCycles: [payCycle],
+  pensions: [],
   scenarios: [],
 }
 const asOf = new Date(2026, 7, 22)

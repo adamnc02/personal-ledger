@@ -133,15 +133,17 @@ const data: AppDataV2 = {
   creditCards: [],
   transactions: [existingClearedTxn, alreadyMaterializedRent],
   payCycles: [payCycle],
+  pensions: [],
+  savingsPots: [],
   scenarios: [],
   primaryPersonId: 'me',
 }
 
 const asOf = new Date(2026, 5, 15) // 15 June 2026
-const currentCycleEnd = horizonRangeEnd(payCycle, 'current_cycle', asOf)
+const currentCycleEnd = horizonRangeEnd(data, 'me', 'current_cycle', asOf)
 check('current_cycle horizon (cycleStartDayOfMonth=1) ends 30 June', fmt(currentCycleEnd), '2026-06-30')
 
-const threeCycleEnd = horizonRangeEnd(payCycle, 'three_cycles', asOf)
+const threeCycleEnd = horizonRangeEnd(data, 'me', 'three_cycles', asOf)
 // current + THREE_CYCLES_AHEAD, so from a 15 June reference: June
 // (current) + July + August + September, ending 30 Sept. Was 31 August
 // back when the horizon covered current + 2.
@@ -226,6 +228,8 @@ const jointData: AppDataV2 = {
   creditCards: [],
   transactions: [],
   payCycles: [],
+  pensions: [],
+  savingsPots: [],
   scenarios: [],
   primaryPersonId: 'alice',
 }

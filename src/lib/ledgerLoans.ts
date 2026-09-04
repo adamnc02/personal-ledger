@@ -19,6 +19,7 @@
 import { addMonths } from 'date-fns'
 import { nanoid } from 'nanoid'
 import type { Loan, LoanOverpayment, LoanRecurringOverpayment, StatementCalibrationLine, Transaction } from '../types/ledger'
+import type { BillLocation } from '../types/models'
 import { backSolveMonthlyRate, calibrateRateAndConvention, flatMonthlyConvention, interestConventions, standardPayment, type InterestConvention } from './interestConventions'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -98,14 +99,44 @@ export interface LoanScheduleEntry {
 
 const MAX_SCHEDULE_ENTRIES = 720 // 60 years — generous safety cap, not a real limit
 
-/** The recurring overpayment amount for this exact payment date, given the balance remaining AFTER the scheduled payment and any one-off overpayment for that month — 0 if the loan has no recurring overpayment configured, or this date falls outside its start/end window. Percent-of-balance is deliberately computed fresh each period, never cached, same reasoning as a credit card's minimum payment: a fixed % of a shrinking balance shrinks in turn. */
+/** The recurring overpayment amount for this exact payment date, given the balance remaining AFTER the scheduled payment and any one-off overpayment for that month — 0 if the loan has no recurring overpayment configured, this date falls outside its start/end window, or it's one of the individually paused dates (Phase 4). Percent-of-balance is deliberately computed fresh each period, never cached, same reasoning as a credit card's minimum payment: a fixed % of a shrinking balance shrinks in turn. */
 function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterScheduledAndOneOff: number): number {
   const r = loan.recurringOverpayment
   if (!r || balanceAfterScheduledAndOneOff <= 0) return 0
   if (dateIso < r.startDate) return 0
   if (r.endDate && dateIso > r.endDate) return 0
+  if (r.pausedDates?.includes(dateIso)) return 0
   if (r.amount.type === 'fixed') return round2(Math.min(r.amount.amount, balanceAfterScheduledAndOneOff))
   return round2((balanceAfterScheduledAndOneOff * r.amount.percent) / 100)
+}
+
+/**
+ * Every date the recurring overpayment WOULD land on within
+ * [rangeStart, rangeEnd] if nothing were paused — same purpose as
+ * schedule.ts's scheduledTemplateDates: the pause picker needs to see a
+ * currently-paused date too, so it can be unticked. Walks the loan's own
+ * payment schedule (same monthly cadence buildLoanSchedule uses) and
+ * keeps only the dates inside the recurring overpayment's start/end
+ * window — deliberately ignoring pausedDates itself, unlike
+ * recurringOverpaymentForDate above.
+ */
+export function scheduledLoanRecurringOverpaymentDates(loan: Loan, rangeStart: Date, rangeEnd: Date): string[] {
+  const r = loan.recurringOverpayment
+  if (!r) return []
+  const schedule = buildLoanSchedule(loan)
+  const rangeStartIso = toIso(rangeStart)
+  const rangeEndIso = toIso(rangeEnd)
+  return schedule
+    .map((e) => e.date)
+    .filter((date) => date >= rangeStartIso && date <= rangeEndIso && date >= r.startDate && (!r.endDate || date <= r.endDate))
+}
+
+/** Reconciles pausedDates against a full desired-pause-set from the picker — same reconcile-the-whole-window logic as schedule.ts's setPausedTemplateOccurrences, just against a plain date list instead of RecurringOccurrenceOverride objects (Phase 4). */
+export function setPausedLoanRecurringOverpaymentDates(loan: Loan, windowDates: string[], pausedDates: string[]): LoanRecurringOverpayment | undefined {
+  if (!loan.recurringOverpayment) return undefined
+  const windowSet = new Set(windowDates)
+  const untouched = (loan.recurringOverpayment.pausedDates ?? []).filter((d) => !windowSet.has(d))
+  return { ...loan.recurringOverpayment, pausedDates: [...untouched, ...pausedDates] }
 }
 
 /**
@@ -578,7 +609,16 @@ export function settleLoan(loan: Loan, actualAmountPaid: number, date: string, n
     paymentMethod: 'bank_transfer',
     status: 'cleared',
     type: 'loan_payment',
-    location: loan.location,
+    // A settlement is a one-off lump payoff, same as an overpayment
+    // (Adam-specified, 2026-09-03: "certainly not lump sums" — a pot
+    // never funds a one-off payment, only a loan's regular monthly
+    // payment or its recurring overpayment can be). Falls back to
+    // 'personal' when the loan's own location is 'pot'; a joint loan's
+    // own 'joint' location is unaffected (a real, splittable joint
+    // expense, unlike a pot-funded one which can't be split at all) —
+    // see applyLoanOverpayment's identical fallback just below for the
+    // full reasoning.
+    location: loan.location === 'pot' ? 'personal' : loan.location,
     ownerId: loan.ownerId,
     payee: loan.payee,
     payeeSharePercent: loan.payeeSharePercent,
@@ -817,6 +857,7 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
         ownerId: loan.ownerId,
         payee: loan.payee,
         payeeSharePercent: loan.payeeSharePercent,
+        potId: loan.location === 'pot' ? loan.potId : undefined,
         sourceType: 'loan',
         sourceId: loan.id,
         // The loan's own name — without it, a row falls back to its
@@ -834,6 +875,7 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
       // completely different day of the month.
       const realDate = recurringDates.get(e.date) ?? e.date
       if (realDate >= startIso && realDate <= endIso) {
+        const overpaymentSource = resolveRecurringOverpaymentSource(loan)
         results.push({
           date: realDate,
           amount: round2(e.recurringOverpaymentApplied),
@@ -842,10 +884,11 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
           paymentMethod: 'direct_debit',
           status: 'pending',
           type: 'loan_payment',
-          location: loan.location,
+          location: overpaymentSource.location,
           ownerId: loan.ownerId,
-          payee: loan.payee,
-          payeeSharePercent: loan.payeeSharePercent,
+          payee: overpaymentSource.location === 'joint' ? loan.payee : '',
+          payeeSharePercent: overpaymentSource.location === 'joint' ? loan.payeeSharePercent : 100,
+          potId: overpaymentSource.potId,
           sourceType: 'loan_recurring_overpayment',
           sourceId: loan.id,
           note: `${loan.name} — recurring overpayment`,
@@ -855,6 +898,34 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
   }
 
   return results
+}
+
+/**
+ * Where a loan's RECURRING overpayment is actually funded from —
+ * independent of the loan's own `location` (Adam-specified, 2026-09-03).
+ * See LoanRecurringOverpayment.location's own comment in types/ledger.ts
+ * for the full reasoning; this is purely the resolution step.
+ *
+ * Deliberately short-circuits to the loan's own location/potId whenever
+ * that location is 'joint' — a joint loan's recurring overpayment always
+ * follows the loan (never independently pot-funded), so
+ * generateJointContributionTransactions/computeJointSummary (which only
+ * ever call this generator for `location === 'joint'` loans, and split
+ * every returned row's amount by payee/payeeSharePercent) can keep
+ * assuming every row they get back is genuinely joint and genuinely
+ * splittable — a pot-funded amount can't be split between two people's
+ * personal ledgers, so letting `recurringOverpayment.location` override a
+ * JOINT loan would silently corrupt that split math. Confining the new
+ * independent choice to personal/pot-located loans (the only case Adam
+ * actually asked for) avoids that risk entirely rather than trying to
+ * solve "a joint loan's overpayment funded by one person's personal pot"
+ * as a real feature nobody's asked for yet.
+ */
+function resolveRecurringOverpaymentSource(loan: Loan): { location: BillLocation; potId?: string } {
+  if (loan.location === 'joint') return { location: 'joint' }
+  const explicit = loan.recurringOverpayment?.location
+  if (!explicit) return { location: loan.location, potId: loan.location === 'pot' ? loan.potId : undefined }
+  return { location: explicit, potId: explicit === 'pot' ? loan.recurringOverpayment?.potId : undefined }
 }
 
 /**
@@ -887,7 +958,14 @@ export function applyLoanOverpayment(
     // or past the transaction's own date.
     status: date <= todayIso() ? 'cleared' : 'pending',
     type: 'loan_payment',
-    location: loan.location,
+    // Same "never pot-funded, falls back to personal" rule as settleLoan
+    // above — a one-off lump overpayment is always real cash out of
+    // personal or a genuine joint expense, never internal-to-a-pot
+    // (Adam-specified, 2026-09-03). A joint loan's 'joint' location is
+    // preserved unchanged (still a real, splittable expense) — only the
+    // 'pot' case is redirected, since that's the one location a lump
+    // payment structurally can't come from.
+    location: loan.location === 'pot' ? 'personal' : loan.location,
     ownerId: loan.ownerId,
     payee: loan.payee,
     payeeSharePercent: loan.payeeSharePercent,

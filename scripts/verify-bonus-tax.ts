@@ -183,6 +183,7 @@ const baseData: AppDataV2 = {
   creditCards: [],
   transactions: [],
   payCycles: [payCycle],
+  pensions: [],
   scenarios: [],
 }
 const settled = autoClearDuePayments(baseData, asOf)

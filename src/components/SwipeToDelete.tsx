@@ -1,11 +1,14 @@
 import { useRef, useState, type ReactNode } from 'react'
 import { Trash2 } from 'lucide-react'
+import { ConfirmModal } from './ConfirmModal'
 
 interface SwipeToDeleteProps {
   children: ReactNode
   onDelete: () => void
-  /** Shown in a native confirm() before actually deleting — pass a short description, e.g. "Car loan". */
+  /** Shown in the centred confirmation modal before actually deleting — pass a short description, e.g. "Car loan". */
   confirmLabel?: string
+  /** Overrides the modal's body text — defaults to "This can't be undone." Use this for anything with a real cascading effect (e.g. Person deletion) so the confirmation actually names the consequence. */
+  confirmDescription?: string
 }
 
 const REVEAL_WIDTH = 84
@@ -39,11 +42,12 @@ function isInteractiveTarget(target: EventTarget | null): boolean {
   return target instanceof Element && !!target.closest('select, input, textarea, button, a, label, [role="button"]')
 }
 
-export function SwipeToDelete({ children, onDelete, confirmLabel }: SwipeToDeleteProps) {
+export function SwipeToDelete({ children, onDelete, confirmLabel, confirmDescription }: SwipeToDeleteProps) {
   const startX = useRef<number | null>(null)
   const startOffset = useRef(0)
   const [offset, setOffset] = useState(0)
   const [dragging, setDragging] = useState(false)
+  const [confirming, setConfirming] = useState(false)
 
   function handlePointerDown(e: React.PointerEvent) {
     if (isInteractiveTarget(e.target)) return
@@ -73,7 +77,10 @@ export function SwipeToDelete({ children, onDelete, confirmLabel }: SwipeToDelet
   }
 
   function handleDeleteTap() {
-    if (confirmLabel && !window.confirm(`Delete ${confirmLabel}? This can't be undone.`)) return
+    if (confirmLabel) {
+      setConfirming(true)
+      return
+    }
     onDelete()
   }
 
@@ -99,6 +106,18 @@ export function SwipeToDelete({ children, onDelete, confirmLabel }: SwipeToDelet
       >
         {children}
       </div>
+      {confirming && (
+        <ConfirmModal
+          title={`Delete ${confirmLabel}?`}
+          description={confirmDescription ?? "This can't be undone."}
+          tone="danger"
+          onConfirm={() => {
+            setConfirming(false)
+            onDelete()
+          }}
+          onCancel={() => setConfirming(false)}
+        />
+      )}
     </div>
   )
 }

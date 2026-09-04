@@ -1,16 +1,24 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
-import { formatCurrency, formatFullDate } from '../lib/format'
-import { Plus, Trash2, X, ChevronDown, ChevronUp } from 'lucide-react'
+import { formatCurrency, formatFullDate, formatMonthYear } from '../lib/format'
+import { Plus, Trash2, X, ChevronDown, ChevronUp, ArrowRight } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { EditField } from '../components/EditField'
 import { CategoryIcon } from '../components/CategoryIcon'
 import { CategoryPicker } from '../components/CategoryPicker'
 import { SwipeToDelete } from '../components/SwipeToDelete'
+import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
+import { schedulePreviewWindow, scheduledDepositDates, depositOccurrencePreviews, setPausedDeposits } from '../lib/savingsPotLedger'
+import { schedulePotPreviewWindow, scheduledPotDepositDates, potDepositOccurrencePreviews, setPausedPotDeposits } from '../lib/potLedger'
+import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { visibleCategoriesFor } from '../lib/categories'
-import { recentAndUpcomingOccurrences, applyTemplateAmountChange, templateOccurrencePreviews, type RawOccurrence } from '../lib/schedule'
-import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, Transaction } from '../types/ledger'
+import { recentAndUpcomingOccurrences, applyTemplateAmountChange, templateOccurrencePreviews, setPausedTemplateOccurrences, scheduledTemplateDates, generateTransactionsForTemplate, type RawOccurrence } from '../lib/schedule'
+import { transferLocationLabel } from '../lib/transferLedger'
+import { findSalarySortConflicts } from '../lib/salarySortLedger'
+import { ConfirmModal } from '../components/ConfirmModal'
+import { addYears } from 'date-fns'
+import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2 } from '../types/ledger'
 
 const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   cash: 'Cash',
@@ -47,7 +55,138 @@ type RecurringFrequency = keyof typeof RECURRING_FREQUENCY_LABELS
 
 import { todayIso } from '../lib/date'
 
-type PageMode = 'transactions' | 'recurring'
+type PageMode = 'transactions' | 'recurring' | 'transfer'
+
+// ── Cleared-month grouping (Adam-specified, 2026-09-03) ────────────────
+// Applies to every transaction-list pill (Transactions/Savings/Joint —
+// NOT Recurring, which shows RecurringTemplate rows with no cleared/
+// pending status at all): pending stays exactly as it already was, a
+// flat list; cleared collapses into one card per calendar month,
+// collapsed by default, so a long history doesn't dominate the page.
+// Generic over the row's own item type so all three pills — three
+// genuinely different row shapes — share one grouping/collapse
+// implementation rather than three near-identical copies of it.
+function MonthCollapsedTransactionList<T>({
+  items,
+  getDate,
+  isCleared,
+  renderRow,
+  keyOf,
+  emptyMessage,
+}: {
+  items: T[]
+  getDate: (item: T) => string
+  isCleared: (item: T) => boolean
+  renderRow: (item: T) => React.ReactNode
+  keyOf: (item: T) => string
+  emptyMessage: string
+}) {
+  const [expandedMonths, setExpandedMonths] = useState<Set<string>>(() => new Set())
+  const toggleMonth = (key: string) =>
+    setExpandedMonths((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
+  const pending = items.filter((i) => !isCleared(i))
+  const cleared = items.filter(isCleared)
+
+  // Grouped by calendar month (YYYY-MM) — items arrive already sorted by
+  // the caller (each pill's own list is sorted before this component ever
+  // sees it), so a month's own row order is preserved, only partitioned.
+  const monthGroups = new Map<string, T[]>()
+  for (const item of cleared) {
+    const key = getDate(item).slice(0, 7)
+    const list = monthGroups.get(key) ?? []
+    list.push(item)
+    monthGroups.set(key, list)
+  }
+  // Most recent month first — matches every pill's own existing
+  // most-recent-first sort.
+  const monthKeys = Array.from(monthGroups.keys()).sort((a, b) => b.localeCompare(a))
+
+  return (
+    <div className="flex flex-col gap-2">
+      {pending.map((item) => (
+        <div key={keyOf(item)}>{renderRow(item)}</div>
+      ))}
+
+      {monthKeys.map((monthKey) => {
+        const monthItems = monthGroups.get(monthKey)!
+        const expanded = expandedMonths.has(monthKey)
+        return (
+          <div key={monthKey} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
+            <button onClick={() => toggleMonth(monthKey)} className="w-full flex items-center justify-between px-3 py-2.5">
+              <span className="flex items-center gap-1.5">
+                {expanded ? <ChevronUp size={14} className="text-[var(--color-ink-muted)]" /> : <ChevronDown size={14} className="text-[var(--color-ink-muted)]" />}
+                <span className="text-xs font-semibold text-[var(--color-ink)]">{formatMonthYear(`${monthKey}-01`)}</span>
+                <span className="text-xs text-[var(--color-ink-faint)]">· {monthItems.length}</span>
+              </span>
+            </button>
+            {expanded && (
+              <div className="px-2 pb-2 flex flex-col gap-2">
+                {monthItems.map((item) => (
+                  <div key={keyOf(item)}>{renderRow(item)}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      {pending.length === 0 && cleared.length === 0 && <p className="text-sm text-[var(--color-ink-muted)] text-center py-10">{emptyMessage}</p>}
+    </div>
+  )
+}
+
+/**
+ * Shared amount/date/note editor for Savings and Joint entries — neither
+ * has a category picker or a real payment-method choice (both are always
+ * forced onto a fixed category, and always bank_transfer — see
+ * logSavingsDeposit/logJointDeposit's own comments in LedgerContext.tsx),
+ * so this is deliberately lighter than EditEntryForm below, which handles
+ * the full ad-hoc expense/income shape.
+ */
+function EditSimpleTransactionForm({
+  transaction,
+  extraFields,
+  onSave,
+  onCancel,
+}: {
+  transaction: Transaction
+  // Rendered above amount/date — e.g. the pot/person picker
+  // SavingsTransactionRowItem/JointTransactionRowItem pass in below.
+  // That picker's own selected value lives in the CALLER's state (not
+  // here), and gets folded into `onSave`'s closure there — this form
+  // stays scoped to amount/date/note either way.
+  extraFields?: React.ReactNode
+  onSave: (updates: Partial<Pick<Transaction, 'amount' | 'date' | 'note'>>) => void
+  onCancel: () => void
+}) {
+  const [amount, setAmount] = useState(String(transaction.amount))
+  const [date, setDate] = useState(transaction.date)
+  const [note, setNote] = useState(transaction.note ?? '')
+
+  const amountNumber = Number(amount)
+  const canSave = amountNumber > 0 && !!date
+
+  return (
+    <div className="p-3 pt-0 flex flex-col gap-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
+      {extraFields}
+      {transaction.sourceType === 'salary_sort' && (
+        <p className="text-xs text-[var(--color-ink-faint)] -mt-1">Changing the amount updates the salary sort too. Changing the date detaches this from the sort.</p>
+      )}
+      <div className="grid grid-cols-2 gap-3">
+        <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+        <EditField label="Date" type="date" value={date} onChange={setDate} />
+      </div>
+      <EditField label="Note (optional)" type="text" value={note} onChange={setNote} />
+      <FormButtonRow onCancel={onCancel} onSave={() => onSave({ amount: amountNumber, date, note: note.trim() || undefined })} saveDisabled={!canSave} />
+    </div>
+  )
+}
 
 export function Expenses() {
   const {
@@ -60,10 +199,13 @@ export function Expenses() {
     addRecurringTemplate,
     updateRecurringTemplate,
     removeRecurringTemplate,
+    updateSavingsPot,
+    updatePot,
+    logTransfer,
+    addRecurringTransfer,
   } = useLedgerData()
   const [mode, setMode] = useState<PageMode>('transactions')
   const [adding, setAdding] = useState(false)
-  const [editingId, setEditingId] = useState<string | null>(null)
 
   // Entries this page owns: things logged directly here, as opposed to
   // generated bill/loan/credit-card-payment/recurring-transaction
@@ -82,6 +224,34 @@ export function Expenses() {
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name))
 
+  // ── Transfer (2026-09-04 session) — replaces the Savings/Joint/Pots
+  // pills entirely (Adam-specified: "remove Savings/Joint/Pots pills
+  // entirely"). One-off hand-logged transfers only — same !sourceType
+  // convention as adHocTransactions above (a generated recurring
+  // occurrence carries sourceType: 'recurring_template'; this list is
+  // deliberately just what was typed in here).
+  const transferTransactions = data.transactions
+    .filter((t) => t.type === 'transfer' && !t.sourceType)
+    .slice()
+    .sort((a, b) => (a.date === b.date ? 0 : a.date < b.date ? 1 : -1))
+
+  // Recurring transfers — shown INSIDE the Transfer pill (not the generic
+  // Recurring pill), regardless of whether they were created here or
+  // from an entity's own Wallet-page card ("single clean consistent
+  // method to create them throughout", Adam-specified 2026-09-04) —
+  // both write the exact same RecurringTemplate.
+  const recurringTransfers = data.recurringTemplates
+    .filter((t) => t.kind === 'transfer')
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+
+  // The Transfer pill only appears once there's somewhere to transfer TO
+  // — a savings pot, the joint account, or a pot — same "invisible until
+  // it would do something" rule the old Savings/Joint/Pots pills used
+  // individually.
+  const pageModes: PageMode[] = ['transactions', 'recurring', ...(data.savingsPots.length > 0 || data.jointAccount || data.pots.length > 0 ? (['transfer'] as const) : [])]
+  const modeLabel: Record<PageMode, string> = { transactions: 'Transactions', recurring: 'Recurring', transfer: 'Transfer' }
+
   return (
     <div className="max-w-md mx-auto px-4 pt-6">
       <header className="mb-6 flex items-center justify-between">
@@ -96,7 +266,7 @@ export function Expenses() {
       </header>
 
       <div className="flex gap-2 mb-4">
-        {(['transactions', 'recurring'] as PageMode[]).map((m) => (
+        {pageModes.map((m) => (
           <button
             key={m}
             onClick={() => {
@@ -106,7 +276,7 @@ export function Expenses() {
             className="px-3 py-1.5 rounded-full text-xs font-medium transition-colors"
             style={{ background: mode === m ? 'var(--color-coral)' : 'var(--color-surface)', color: mode === m ? '#fff' : 'var(--color-ink-muted)' }}
           >
-            {m === 'transactions' ? 'Transactions' : 'Recurring'}
+            {modeLabel[m]}
           </button>
         ))}
       </div>
@@ -137,67 +307,27 @@ export function Expenses() {
             />
           )}
 
-          <div className="flex flex-col gap-2">
-            {adHocTransactions.map((t) => {
-              const category = data.categories.find((c) => c.id === t.categoryId)
-              const card = t.creditCardId ? data.creditCards.find((c) => c.id === t.creditCardId) : undefined
-              const isPositive = t.direction === 'in'
-              const isEditing = editingId === t.id
-              return (
-                <div key={t.id} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
-                  <button onClick={() => setEditingId(isEditing ? null : t.id)} className="w-full flex items-center gap-3 p-3 text-left">
-                    <CategoryIcon category={category} />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-[var(--color-ink)] truncate">
-                        {t.note || category?.name || (t.type === 'bonus' ? 'Bonus' : t.type === 'income' ? 'Income' : 'Expense')}
-                      </p>
-                      <p className="text-xs text-[var(--color-ink-muted)]">
-                        {t.date} · {PAYMENT_METHOD_LABELS[t.paymentMethod]}
-                        {card ? ` · ${card.name}` : ''}
-                        {t.status === 'pending' ? ' · Pending' : ''}
-                      </p>
-                    </div>
-                    <p className="text-sm font-mono font-semibold shrink-0" style={{ color: isPositive ? 'var(--color-positive)' : 'var(--color-negative)' }}>
-                      {isPositive ? '+' : '-'}£{formatCurrency(t.amount)}
-                    </p>
-                    <span
-                      role="button"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        removeTransaction(t.id)
-                      }}
-                      className="text-[var(--color-ink-faint)] shrink-0"
-                    >
-                      <Trash2 size={15} />
-                    </span>
-                  </button>
-                  {isEditing && (
-                    <EditEntryForm
-                      transaction={t}
-                      data={data}
-                      onAddCategory={addCategory}
-                      onCancel={() => setEditingId(null)}
-                      onSave={(updates) => {
-                        updateTransaction(t.id, updates)
-                        setEditingId(null)
-                      }}
-                    />
-                  )}
-                </div>
-              )
-            })}
-            {adHocTransactions.length === 0 && !adding && (
-              <p className="text-sm text-[var(--color-ink-muted)] text-center py-10">
-                No ad-hoc entries yet. Log an expense or some income to get started.
-              </p>
+          <MonthCollapsedTransactionList
+            items={adHocTransactions}
+            getDate={(t) => t.date}
+            isCleared={(t) => t.status === 'cleared'}
+            keyOf={(t) => t.id}
+            emptyMessage="No ad-hoc entries yet. Log an expense or some income to get started."
+            renderRow={(t) => (
+              <AdHocTransactionRow
+                t={t}
+                data={data}
+                onAddCategory={addCategory}
+                onUpdate={(updates) => updateTransaction(t.id, updates)}
+                onRemove={() => removeTransaction(t.id)}
+              />
             )}
-          </div>
+          />
         </>
-      ) : (
+      ) : mode === 'recurring' ? (
         <>
           {adding && (
             <RecurringTransactionForm
-              people={data.people}
               categories={visibleCategoriesFor(data)}
               defaultPersonId={data.primaryPersonId}
               onAddCategory={addCategory}
@@ -214,22 +344,150 @@ export function Expenses() {
               <RecurringTransactionRow
                 key={template.id}
                 template={template}
-                people={data.people}
                 categories={visibleCategoriesFor(data, template.categoryId)}
                 onAddCategory={addCategory}
                 onUpdate={(u) => updateRecurringTemplate(template.id, u)}
                 onRemove={() => removeRecurringTemplate(template.id)}
               />
             ))}
-            {recurringTransactions.length === 0 && !adding && (
+            {/* Phase 5 (2026-09 session) — a pot with a recurring deposit
+                configured shows here too, whether it was set up from THIS
+                pill or from the Wallet page's own "+ Add a recurring
+                deposit" button (same underlying SavingsPot fields either
+                way — see RecurringTransactionForm's onSaveSavingsRecurring
+                comment). */}
+            {data.savingsPots
+              .filter((p) => p.recurringDepositAmount)
+              .map((pot) => (
+                <SavingsRecurringDepositRow
+                  key={pot.id}
+                  pot={pot}
+                  onSave={(updates) => updateSavingsPot(pot.id, updates)}
+                />
+              ))}
+            {/* Pots backlog item (2026-09 session) — same treatment as
+                SavingsPot immediately above: a pot's recurring deposit
+                shows here regardless of whether it was set up from THIS
+                pill or the Wallet page's own "+ Add a recurring deposit"
+                button (same underlying Pot fields either way). */}
+            {data.pots
+              .filter((p) => p.recurringDepositAmount)
+              .map((pot) => (
+                <PotRecurringDepositRow key={pot.id} pot={pot} onSave={(updates) => updatePot(pot.id, updates)} />
+              ))}
+            {recurringTransactions.length === 0 && !data.savingsPots.some((p) => p.recurringDepositAmount) && !data.pots.some((p) => p.recurringDepositAmount) && !adding && (
               <p className="text-sm text-[var(--color-ink-muted)] text-center py-10">
                 No recurring transactions yet. Add a recurring income or expense to have it show up automatically in the Summary ledger.
               </p>
             )}
           </div>
         </>
+      ) : (
+        <>
+          {adding && (
+            <TransferForm
+              data={data}
+              onCancel={() => setAdding(false)}
+              onSaveOneOff={(from, to, amount, date, note) => {
+                logTransfer(from, to, amount, date, note)
+                setAdding(false)
+              }}
+              onSaveRecurring={(template) => {
+                addRecurringTransfer(template)
+                setAdding(false)
+              }}
+            />
+          )}
+
+          <div className="flex flex-col gap-2">
+            {recurringTransfers.map((template) => (
+              <TransferRecurringRow
+                key={template.id}
+                template={template}
+                savingsPots={data.savingsPots}
+                pots={data.pots}
+                onUpdate={(u) => updateRecurringTemplate(template.id, u)}
+                onRemove={() => removeRecurringTemplate(template.id)}
+              />
+            ))}
+
+            <MonthCollapsedTransactionList
+              items={transferTransactions}
+              getDate={(t) => t.date}
+              isCleared={(t) => t.status === 'cleared'}
+              keyOf={(t) => t.id}
+              emptyMessage={recurringTransfers.length === 0 ? 'No transfers logged yet.' : ''}
+              renderRow={(t) => (
+                <TransferRowItem
+                  t={t}
+                  savingsPots={data.savingsPots}
+                  pots={data.pots}
+                  onUpdate={(u) => updateTransaction(t.id, u)}
+                  onRemove={() => removeTransaction(t.id)}
+                />
+              )}
+            />
+          </div>
+        </>
       )}
     </div>
+  )
+}
+
+// ── Ad-hoc transaction row — swipe to delete, tap to expand/edit (same
+// interaction pattern RecurringTransactionRow already uses below, and now
+// Savings/Joint too — see SavingsTransactionRowItem/JointTransactionRowItem). ──
+function AdHocTransactionRow({
+  t,
+  data,
+  onAddCategory,
+  onUpdate,
+  onRemove,
+}: {
+  t: Transaction
+  data: ReturnType<typeof useLedgerData>['data']
+  onAddCategory: (name: string) => { id: string }
+  onUpdate: (updates: Partial<Omit<Transaction, 'id'>>) => void
+  onRemove: () => void
+}) {
+  const [isEditing, setIsEditing] = useState(false)
+  const category = data.categories.find((c) => c.id === t.categoryId)
+  const card = t.creditCardId ? data.creditCards.find((c) => c.id === t.creditCardId) : undefined
+  const isPositive = t.direction === 'in'
+
+  return (
+    <SwipeToDelete onDelete={onRemove} confirmLabel={t.note || category?.name || 'this entry'}>
+      <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
+        <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center gap-3 p-3 text-left">
+          <CategoryIcon category={category} />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-[var(--color-ink)] truncate">
+              {t.note || category?.name || (t.type === 'bonus' ? 'Bonus' : t.type === 'income' ? 'Income' : 'Expense')}
+            </p>
+            <p className="text-xs text-[var(--color-ink-muted)]">
+              {t.date} · {PAYMENT_METHOD_LABELS[t.paymentMethod]}
+              {card ? ` · ${card.name}` : ''}
+              {t.status === 'pending' ? ' · Pending' : ''}
+            </p>
+          </div>
+          <p className="text-sm font-mono font-semibold shrink-0" style={{ color: isPositive ? 'var(--color-positive)' : 'var(--color-negative)' }}>
+            {isPositive ? '+' : '-'}£{formatCurrency(t.amount)}
+          </p>
+        </button>
+        {isEditing && (
+          <EditEntryForm
+            transaction={t}
+            data={data}
+            onAddCategory={onAddCategory}
+            onCancel={() => setIsEditing(false)}
+            onSave={(updates) => {
+              onUpdate(updates)
+              setIsEditing(false)
+            }}
+          />
+        )}
+      </div>
+    </SwipeToDelete>
   )
 }
 
@@ -289,14 +547,9 @@ function EditEntryForm({
           </div>
         </label>
       )}
-      <div className="flex items-center justify-end">
-        <button onClick={onCancel} className="text-xs text-[var(--color-ink-muted)] px-2">
-          Cancel
-        </button>
-      </div>
-      <button
-        disabled={!canSave}
-        onClick={() =>
+      <FormButtonRow
+        onCancel={onCancel}
+        onSave={() =>
           onSave({
             amount: amountNumber,
             date,
@@ -305,11 +558,8 @@ function EditEntryForm({
             note: name.trim(),
           })
         }
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
-      </button>
+        saveDisabled={!canSave}
+      />
     </div>
   )
 }
@@ -344,7 +594,6 @@ function ExpenseForm({
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('card')
   const [chargeToCreditCard, setChargeToCreditCard] = useState(false)
   const [creditCardId, setCreditCardId] = useState<string>('')
-  const [personId, setPersonId] = useState(data.primaryPersonId)
 
   const isChargeableToCard = type === 'expense' && paymentMethod === 'card' && chargeToCreditCard && data.creditCards.length > 0
   const amountNumber = Number(amount)
@@ -440,26 +689,13 @@ function ExpenseForm({
         </label>
       )}
 
-      {data.people.length > 1 && type === 'income' && (
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-[var(--color-ink-muted)]">Whose income</span>
-          <select
-            value={personId}
-            onChange={(e) => setPersonId(e.target.value)}
-            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-          >
-            {data.people.map((p) => (
-              <option key={p.id} value={p.id} style={{ color: '#000' }}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-
-      <button
-        disabled={!canSave}
-        onClick={() =>
+      {/* Picker-First Flows (2026-09 session) — "Whose income" removed
+          entirely (Adam-specified: "I cannot log transactions on behalf
+          of another person"). Income logged here is always yours —
+          data.primaryPersonId, hardcoded below. */}
+      <FormButtonRow
+        onCancel={onCancel}
+        onSave={() =>
           onSave({
             type,
             amount: amountNumber,
@@ -467,18 +703,483 @@ function ExpenseForm({
             categoryId,
             paymentMethod,
             creditCardId: creditCardId || undefined,
-            personId,
+            personId: data.primaryPersonId,
             note: name.trim(),
           })
         }
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
-      </button>
+        saveDisabled={!canSave}
+      />
     </div>
   )
 }
+
+// ── Transfer (2026-09-04 session, "Salary Sorter & Transfer Pill") ──────
+// Replaces the old Savings/Joint/Pots pills entirely (Adam-specified:
+// "remove Savings/Joint/Pots pills entirely"). One form covers every
+// combination of Current Account <-> Savings pot / Joint account / Pot,
+// one-off or recurring — the "current account" side is always the
+// primary person, never a picker (Adam-specified 2026-09-04: "always
+// assume current account is me, no option to change"), so the form only
+// ever asks for the OTHER side plus a direction toggle.
+
+/** One pickable "other side" of a transfer — a specific savings pot, a specific pot, or the (singleton) joint account. */
+interface TransferOtherOption {
+  key: string
+  label: string
+  location: TransferLocation
+}
+
+function buildOtherOptions(savingsPots: SavingsPot[], pots: Pot[], hasJoint: boolean, primaryPersonId: string): TransferOtherOption[] {
+  // Own pots first, same "silently scope to me, fall back to everyone
+  // if I own none" rule SavingsTransactionForm used to apply — see this
+  // file's git history for that reasoning; unchanged here.
+  const ownSavingsPots = savingsPots.filter((p) => p.personId === primaryPersonId)
+  const pickableSavingsPots = ownSavingsPots.length > 0 ? ownSavingsPots : savingsPots
+  const ownPots = pots.filter((p) => p.personId === primaryPersonId)
+  const pickablePots = ownPots.length > 0 ? ownPots : pots
+
+  return [
+    ...(hasJoint ? [{ key: 'joint', label: 'Joint Account', location: { type: 'joint' as const } }] : []),
+    ...pickableSavingsPots.map((p) => ({ key: `savings:${p.id}`, label: p.name, location: { type: 'savings' as const, savingsPotId: p.id } })),
+    ...pickablePots.map((p) => ({ key: `pot:${p.id}`, label: p.name, location: { type: 'pot' as const, potId: p.id } })),
+  ]
+}
+
+const TRANSFER_MODES = [
+  { value: 'one_off', label: 'One-Off' },
+  { value: 'recurring', label: 'Recurring' },
+] as const
+type TransferMode = (typeof TRANSFER_MODES)[number]['value']
+
+function TransferForm({
+  data,
+  onCancel,
+  onSaveOneOff,
+  onSaveRecurring,
+}: {
+  data: AppDataV2
+  onCancel: () => void
+  onSaveOneOff: (from: TransferLocation, to: TransferLocation, amount: number, date: string, note?: string) => void
+  onSaveRecurring: (
+    template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>,
+  ) => void
+}) {
+  const { savingsPots, pots, jointAccount, primaryPersonId } = data
+  const otherOptions = buildOtherOptions(savingsPots, pots, !!jointAccount, primaryPersonId)
+  const payCycle = data.payCycles.find((pc) => pc.personId === primaryPersonId)
+
+  const [mode, setMode] = useState<TransferMode>('one_off')
+  // 'out' = Current Account → other (a deposit); 'in' = other → Current
+  // Account (a withdrawal) — same DEPOSIT/WITHDRAWAL vocabulary the old
+  // per-entity pills used, just generalised across all three entity
+  // kinds instead of one form per kind.
+  const [direction, setDirection] = useState<'out' | 'in'>('out')
+  const [otherKey, setOtherKey] = useState(otherOptions[0]?.key ?? '')
+  const [amount, setAmount] = useState('')
+  const [date, setDate] = useState(todayIso())
+  const [note, setNote] = useState('')
+  const [followsPayday, setFollowsPayday] = useState(false)
+  const [followsCycleStart, setFollowsCycleStart] = useState(false)
+  const [frequency, setFrequency] = useState<RecurringFrequency>('monthly')
+  const [intervalWeeks, setIntervalWeeks] = useState(4)
+  const [name, setName] = useState('')
+  // Reverse Salary Sort guard (2026-09 session) — set when Save finds this
+  // new transfer would land on the same destination as one or more
+  // already-saved salary sorts. Deferred here rather than acted on
+  // immediately so the actual save only happens once the person picks
+  // Go ahead / Skip (one-off) or Go ahead / Cancel (recurring, per
+  // Adam's "rename to cancel — no recurring transfer gets created at
+  // all" call).
+  const [pendingConflicts, setPendingConflicts] = useState<{ conflicts: { payDate: string; amount: number }[]; isRecurring: boolean } | null>(null)
+
+  const other = otherOptions.find((o) => o.key === otherKey)
+  const amountNumber = Number(amount)
+  const canSave = !!other && amountNumber > 0 && date && (mode === 'one_off' || name.trim())
+
+  if (otherOptions.length === 0) {
+    return (
+      <div className="mb-6 p-4 rounded-2xl flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-[var(--color-ink)]">New transfer</h2>
+          <button onClick={onCancel} className="text-[var(--color-ink-muted)]">
+            <X size={18} />
+          </button>
+        </div>
+        <p className="text-xs text-[var(--color-ink-faint)]">Add a savings pot, a pot, or a joint account first — there's nowhere to transfer to yet.</p>
+      </div>
+    )
+  }
+
+  function commitSave() {
+    if (!other) return
+    const from: TransferLocation = direction === 'out' ? { type: 'personal' } : other.location
+    const to: TransferLocation = direction === 'out' ? other.location : { type: 'personal' }
+    if (mode === 'one_off') {
+      onSaveOneOff(from, to, amountNumber, date, note.trim() || undefined)
+    } else {
+      onSaveRecurring({
+        name: name.trim(),
+        amount: amountNumber,
+        frequency,
+        intervalWeeks: frequency === 'every_n_weeks' ? intervalWeeks : undefined,
+        anchorDate: date,
+        transferFrom: from,
+        transferTo: to,
+        followsPayday,
+        followsCycleStart,
+      })
+    }
+  }
+
+  function handleSave() {
+    if (!other) return
+    // The reverse Salary Sort guard only makes sense for a deposit
+    // (Current Account → destination) — a withdrawal never competes
+    // with a sort, which only ever moves money the other way. Same
+    // exact-location-match rule as the sort's own guard (locationsEqual,
+    // no amount check).
+    if (direction !== 'out') {
+      commitSave()
+      return
+    }
+    if (mode === 'one_off') {
+      const conflicts = findSalarySortConflicts(data, other.location, [date])
+      if (conflicts.length > 0) {
+        setPendingConflicts({ conflicts, isRecurring: false })
+        return
+      }
+    } else {
+      // Scan this payday-like date plus the next 3 resolved occurrences
+      // (Adam's explicit 2026-09 call) — resolved via the exact same
+      // generation path the recurring template will actually use once
+      // saved, so followsPayday/followsCycleStart/frequency are all
+      // honoured rather than guessed at.
+      const draftTemplate: RecurringTemplate = {
+        id: 'draft',
+        name: name.trim() || 'Transfer',
+        amount: amountNumber,
+        categoryId: '',
+        paymentMethod: 'bank_transfer',
+        frequency,
+        intervalWeeks: frequency === 'every_n_weeks' ? intervalWeeks : undefined,
+        anchorDate: date,
+        location: 'personal',
+        ownerId: primaryPersonId,
+        payee: '',
+        payeeSharePercent: 100,
+        active: true,
+        kind: 'transfer',
+        transferFrom: { type: 'personal' },
+        transferTo: other.location,
+        followsPayday,
+        followsCycleStart,
+      }
+      const occurrenceDates = generateTransactionsForTemplate(draftTemplate, new Date(), addYears(new Date(), 2), payCycle)
+        .map((o) => o.date)
+        .slice(0, 4)
+      const conflicts = findSalarySortConflicts(data, other.location, occurrenceDates)
+      if (conflicts.length > 0) {
+        setPendingConflicts({ conflicts, isRecurring: true })
+        return
+      }
+    }
+    commitSave()
+  }
+
+  return (
+    <div className="mb-6 p-4 rounded-2xl flex flex-col gap-4" style={{ background: 'var(--color-surface)' }}>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-[var(--color-ink)]">New transfer</h2>
+        <button onClick={onCancel} className="text-[var(--color-ink-muted)]">
+          <X size={18} />
+        </button>
+      </div>
+
+      <div className="flex gap-2">
+        {TRANSFER_MODES.map((tm) => (
+          <button
+            key={tm.value}
+            onClick={() => setMode(tm.value)}
+            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+            style={{ background: mode === tm.value ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: mode === tm.value ? '#fff' : 'var(--color-ink-muted)' }}
+          >
+            {tm.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-2 text-sm text-[var(--color-ink)]">
+        <span className="font-medium">{direction === 'out' ? 'Current Account' : (other?.label ?? 'Other')}</span>
+        <button
+          onClick={() => setDirection((d) => (d === 'out' ? 'in' : 'out'))}
+          className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+          style={{ background: 'var(--color-bg-elevated)' }}
+          aria-label="Swap direction"
+        >
+          <ArrowRight size={14} className="text-[var(--color-ink-muted)]" />
+        </button>
+        <span className="font-medium truncate">{direction === 'out' ? (other?.label ?? 'Other') : 'Current Account'}</span>
+      </div>
+
+      {otherOptions.length > 1 && (
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-[var(--color-ink-muted)]">{direction === 'out' ? 'To' : 'From'}</span>
+          <select value={otherKey} onChange={(e) => setOtherKey(e.target.value)} className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none">
+            {otherOptions.map((o) => (
+              <option key={o.key} value={o.key} style={{ color: '#000' }}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      {mode === 'recurring' && <EditField key="transfer-name" label="Name" type="text" value={name} onChange={setName} />}
+
+      <EditField key="transfer-amount" label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+
+      {mode === 'one_off' ? (
+        <EditField key="transfer-date" label="Date" type="date" value={date} onChange={setDate} />
+      ) : (
+        <RecurringFrequencyEditor
+          frequency={frequency}
+          intervalWeeks={intervalWeeks}
+          anchorDate={date}
+          onChange={(patch) => {
+            if (patch.frequency) setFrequency(patch.frequency as RecurringFrequency)
+            if (patch.intervalWeeks !== undefined) setIntervalWeeks(patch.intervalWeeks)
+            if (patch.anchorDate) setDate(patch.anchorDate)
+          }}
+        />
+      )}
+
+      {mode === 'recurring' && (
+        <div className="flex flex-col gap-1.5">
+          <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+            <input
+              type="checkbox"
+              checked={followsPayday}
+              onChange={(e) => {
+                setFollowsPayday(e.target.checked)
+                if (e.target.checked) setFollowsCycleStart(false)
+              }}
+            />
+            Land on payday, even if it moves
+          </label>
+          <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+            <input
+              type="checkbox"
+              checked={followsCycleStart}
+              onChange={(e) => {
+                setFollowsCycleStart(e.target.checked)
+                if (e.target.checked) setFollowsPayday(false)
+              }}
+            />
+            Land on the start of my budgeting cycle instead
+          </label>
+        </div>
+      )}
+
+      <EditField key="transfer-note" label="Note (optional)" type="text" value={note} onChange={setNote} />
+
+      <p className="text-xs text-[var(--color-ink-faint)]">
+        {direction === 'out'
+          ? `Moves money OUT of your personal balance and INTO ${other?.label ?? 'the other account'}.`
+          : `Moves money OUT of ${other?.label ?? 'the other account'} and INTO your personal balance, shown as income.`}
+      </p>
+
+      <FormButtonRow onCancel={onCancel} onSave={handleSave} saveDisabled={!canSave} />
+
+      {pendingConflicts && (
+        <ConfirmModal
+          title="Already sorted"
+          description={
+            `${other?.label ?? 'This destination'} already has a salary sort covering ` +
+            pendingConflicts.conflicts.map((c) => `${c.payDate} (£${c.amount.toFixed(2)})`).join(', ') +
+            (pendingConflicts.isRecurring
+              ? '. Go ahead and create this recurring transfer alongside it, or cancel — no transfer will be created.'
+              : '. Go ahead and create this transfer alongside it, or skip — nothing will be created.')
+          }
+          confirmLabel="Go ahead"
+          cancelLabel={pendingConflicts.isRecurring ? 'Cancel' : 'Skip'}
+          onConfirm={() => {
+            setPendingConflicts(null)
+            commitSave()
+          }}
+          onCancel={() => setPendingConflicts(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+/** Transfer row — swipe to delete, tap to expand/edit. Mirrors the old SavingsTransactionRowItem/JointTransactionRowItem/PotTransactionRowItem shape, generalised across all three "other side" kinds. */
+function TransferRowItem({
+  t,
+  savingsPots,
+  pots,
+  onUpdate,
+  onRemove,
+}: {
+  t: Transaction
+  savingsPots: SavingsPot[]
+  pots: Pot[]
+  onUpdate: (updates: Partial<Pick<Transaction, 'amount' | 'date' | 'note'>>) => void
+  onRemove: () => void
+}) {
+  const [isEditing, setIsEditing] = useState(false)
+  const isWithdrawal = t.toLocation?.type === 'personal'
+  const otherLocation = isWithdrawal ? t.fromLocation : t.toLocation
+  const otherLabel = transferLocationLabel(otherLocation, savingsPots, pots)
+
+  return (
+    <SwipeToDelete onDelete={onRemove} confirmLabel={otherLabel}>
+      <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
+        <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center justify-between p-3 text-left">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-[var(--color-ink)] truncate flex items-center gap-1">
+              {t.sourceType === 'salary_sort' ? (
+                <>
+                  <ArrowRight size={13} className="text-[var(--color-coral)] shrink-0" />
+                  Salary Sort · {otherLabel}
+                </>
+              ) : (
+                <>
+                  {isWithdrawal ? 'Withdrawal' : 'Deposit'} · {otherLabel}
+                </>
+              )}
+            </p>
+            <p className="text-xs text-[var(--color-ink-muted)]">
+              {t.date}
+              {t.status === 'pending' ? ' · Pending' : ''}
+            </p>
+          </div>
+          <p className="text-sm font-mono font-semibold shrink-0" style={{ color: isWithdrawal ? 'var(--color-positive)' : 'var(--color-ink)' }}>
+            {isWithdrawal ? '+' : '-'}£{formatCurrency(t.amount)}
+          </p>
+        </button>
+        {isEditing && (
+          <EditSimpleTransactionForm
+            transaction={t}
+            onCancel={() => setIsEditing(false)}
+            onSave={(updates) => {
+              onUpdate(updates)
+              setIsEditing(false)
+            }}
+          />
+        )}
+      </div>
+    </SwipeToDelete>
+  )
+}
+
+/**
+ * A recurring transfer's row in the Transfer pill — same tap-to-expand/
+ * pause pattern as SavingsRecurringDepositRow below, simplified since a
+ * transfer has no category/payee/split fields to edit, just amount,
+ * frequency, follows-payday, and the pause checklist (reusing schedule.ts's
+ * setPausedTemplateOccurrences/scheduledTemplateDates/templateOccurrencePreviews
+ * — the exact same mechanism a bill/recurring-transaction template
+ * already uses, via the shared PausedOccurrencesControl widget).
+ */
+function TransferRecurringRow({
+  template,
+  savingsPots,
+  pots,
+  onUpdate,
+  onRemove,
+}: {
+  template: RecurringTemplate
+  savingsPots: SavingsPot[]
+  pots: Pot[]
+  onUpdate: (updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
+  onRemove: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [amount, setAmount] = useState(String(template.amount))
+
+  const isWithdrawal = template.transferTo?.type === 'personal'
+  const fromLabel = transferLocationLabel(template.transferFrom, savingsPots, pots)
+  const toLabel = transferLocationLabel(template.transferTo, savingsPots, pots)
+
+  const windowDates = scheduledTemplateDates(template, new Date(), addYearsLocal(new Date(), 1))
+  const currentlyPaused = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && windowDates.includes(o.originalDate)).map((o) => o.originalDate))
+  const nextOccurrence = templateOccurrencePreviews(template, new Date(), 1)[0]
+
+  return (
+    <SwipeToDelete onDelete={onRemove} confirmLabel={template.name}>
+      <div className="relative rounded-2xl px-4 py-3" style={{ background: 'var(--color-surface)' }}>
+        <button className="w-full flex items-start justify-between gap-2 text-left" onClick={() => setOpen(!open)}>
+          <div className="min-w-0">
+            <p className="font-body text-sm text-[var(--color-ink)] truncate">
+              {fromLabel} · {isWithdrawal ? 'Withdrawal' : 'Deposit'} · {toLabel}
+            </p>
+            <p className="text-xs text-[var(--color-ink-faint)]">
+              {RECURRING_FREQUENCY_LABELS[template.frequency as RecurringFrequency] ?? template.frequency}
+              {template.followsPayday ? ' · Follows payday' : ''}
+              {template.followsCycleStart ? ' · Follows cycle start' : ''}
+              {nextOccurrence ? ` · Next ${nextOccurrence.date}` : ''}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 pt-0.5">
+            <span className="font-mono text-sm text-[var(--color-ink)]">{isWithdrawal ? '+' : '-'}£{formatCurrency(template.amount)}</span>
+            {open ? <ChevronUp size={14} className="text-[var(--color-ink-faint)]" /> : <ChevronDown size={14} className="text-[var(--color-ink-faint)]" />}
+          </div>
+        </button>
+        {open && (
+          <div className="mt-3 pt-3 border-t flex flex-col gap-2" style={{ borderColor: 'var(--color-track)' }}>
+            <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+            <button
+              onClick={() => {
+                const amountNumber = Number(amount)
+                if (amountNumber > 0) onUpdate({ amount: amountNumber })
+              }}
+              className="text-xs self-start"
+              style={{ color: 'var(--color-coral)' }}
+              disabled={!(Number(amount) > 0)}
+            >
+              Save amount
+            </button>
+            <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+              <input
+                type="checkbox"
+                checked={!!template.followsPayday}
+                onChange={(e) => onUpdate({ followsPayday: e.target.checked, followsCycleStart: e.target.checked ? false : template.followsCycleStart })}
+              />
+              Land on payday, even if it moves
+            </label>
+            <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
+              <input
+                type="checkbox"
+                checked={!!template.followsCycleStart}
+                onChange={(e) => onUpdate({ followsCycleStart: e.target.checked, followsPayday: e.target.checked ? false : template.followsPayday })}
+              />
+              Land on the start of my budgeting cycle instead
+            </label>
+            <PausedOccurrencesControl
+              windowDates={windowDates}
+              currentlyPaused={currentlyPaused}
+              amountForDate={() => template.amount}
+              itemLabel="transfers"
+              nextPaymentPreview={(tentative) => {
+                const previewTemplate: RecurringTemplate = { ...template, ...setPausedTemplateOccurrences(template, windowDates, tentative) }
+                return templateOccurrencePreviews(previewTemplate, new Date(), 1)[0]?.date ?? null
+              }}
+              onSave={(pausedDates) => onUpdate(setPausedTemplateOccurrences(template, windowDates, pausedDates))}
+            />
+          </div>
+        )}
+      </div>
+    </SwipeToDelete>
+  )
+}
+
+function addYearsLocal(date: Date, years: number): Date {
+  const d = new Date(date)
+  d.setFullYear(d.getFullYear() + years)
+  return d
+}
+
 
 // ── Recurring transactions — same schedule engine as Bills (RecurringTemplate with kind: 'transaction'), but generating plain expense/income occurrences, personal-only, with per-occurrence edit/delete on top of the standing "apply from" amount-change flow Bills already has. ──
 
@@ -545,14 +1246,12 @@ function RecurringFrequencyEditor({
 }
 
 function RecurringTransactionForm({
-  people,
   categories,
   defaultPersonId,
   onAddCategory,
   onSave,
   onCancel,
 }: {
-  people: { id: string; name: string }[]
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   defaultPersonId: string
   onAddCategory: (name: string) => { id: string }
@@ -567,7 +1266,6 @@ function RecurringTransactionForm({
   const [anchorDate, setAnchorDate] = useState(todayIso())
   const [categoryId, setCategoryId] = useState(categories[0]?.id ?? '')
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('card')
-  const [personId, setPersonId] = useState(defaultPersonId)
 
   const canSave = name.trim() && Number(amount) > 0 && anchorDate && categoryId
 
@@ -618,28 +1316,13 @@ function RecurringTransactionForm({
 
       <RecurringPaymentMethodEditor value={paymentMethod} onChange={setPaymentMethod} />
 
-      {people.length > 1 && type === 'income' && (
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-[var(--color-ink-muted)]">Whose income</span>
-          <select
-            value={personId}
-            onChange={(e) => setPersonId(e.target.value)}
-            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-          >
-            {people.map((p) => (
-              <option key={p.id} value={p.id} style={{ color: '#000' }}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
+      {/* Picker-First Flows (2026-09 session) — "Whose income"
+          removed entirely; ownerId/personId below are always
+          defaultPersonId (your primary person), never chosen here. */}
 
-      <div className="flex gap-2 justify-end mt-1">
-        <button onClick={onCancel} className="px-3 py-1.5 rounded-lg text-sm text-[var(--color-ink-muted)]">
-          Cancel
-        </button>
-        <button
+      <div className="flex gap-2 mt-1">
+        <CancelButton onClick={onCancel} />
+        <SaveButton
           disabled={!canSave}
           onClick={() =>
             onSave({
@@ -653,17 +1336,14 @@ function RecurringTransactionForm({
               location: 'personal',
               payee: '',
               payeeSharePercent: 100,
-              ownerId: personId,
+              ownerId: defaultPersonId,
               kind: 'transaction',
               recurringTransactionType: type,
-              personId: type === 'income' ? personId : undefined,
+              personId: type === 'income' ? defaultPersonId : undefined,
             })
           }
-          className="px-3 py-1.5 rounded-lg text-sm font-medium text-white disabled:opacity-40"
-          style={{ background: 'var(--color-coral)' }}
-        >
-          Add recurring
-        </button>
+          label="Add recurring"
+        />
       </div>
     </div>
   )
@@ -734,14 +1414,12 @@ function draftFromRecurringTemplate(template: RecurringTemplate): RecurringTxDra
 
 function RecurringTransactionEditPanel({
   template,
-  people,
   categories,
   onAddCategory,
   onSave,
   onDelete,
 }: {
   template: RecurringTemplate
-  people: { id: string; name: string }[]
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<RecurringTemplate, 'id'>>) => void
@@ -779,8 +1457,6 @@ function RecurringTransactionEditPanel({
     )
   }
 
-  const isIncome = draft.recurringTransactionType === 'income'
-
   return (
     <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
       <div className="col-span-2 flex gap-2">
@@ -807,22 +1483,7 @@ function RecurringTransactionEditPanel({
       </div>
       <RecurringPaymentMethodEditor value={draft.paymentMethod} onChange={(paymentMethod) => update({ paymentMethod })} />
 
-      {isIncome && people.length > 1 && (
-        <label className="flex flex-col gap-1 col-span-2">
-          <span className="text-xs text-[var(--color-ink-muted)]">Whose income</span>
-          <select
-            value={draft.personId ?? people[0]?.id ?? ''}
-            onChange={(e) => update({ personId: e.target.value, ownerId: e.target.value })}
-            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-          >
-            {people.map((p) => (
-              <option key={p.id} value={p.id} style={{ color: '#000' }}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
+      {/* Picker-First Flows (2026-09 session) — "Whose income" removed entirely; personId/ownerId stay whatever draftFromRecurringTemplate already carried (always your primary person, set once at creation and never re-chosen here). */}
 
       <label className="flex items-center gap-2 col-span-2 mt-1">
         <input type="checkbox" checked={draft.active} onChange={(e) => update({ active: e.target.checked })} />
@@ -903,14 +1564,12 @@ function OccurrenceRow({
 
 function RecurringTransactionRow({
   template,
-  people,
   categories,
   onAddCategory,
   onUpdate,
   onRemove,
 }: {
   template: RecurringTemplate
-  people: { id: string; name: string }[]
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
   onUpdate: (u: Partial<Omit<RecurringTemplate, 'id'>>) => void
@@ -967,7 +1626,6 @@ function RecurringTransactionRow({
           <>
             <RecurringTransactionEditPanel
               template={template}
-              people={people}
               categories={categories}
               onAddCategory={onAddCategory}
               onSave={(patch) => {
@@ -1001,5 +1659,134 @@ function RecurringTransactionRow({
         <SavedFlashOverlay active={flashActive} />
       </div>
     </SwipeToDelete>
+  )
+}
+
+/**
+ * Phase 5 (2026-09 session) — the SavingsPot counterpart to
+ * RecurringTransactionRow above, shown in the same Recurring pill list.
+ * Edits/removes/pauses write straight to SavingsPot.recurringDepositAmount/
+ * DayOfMonth/recurringDepositOverrides — the same fields the Wallet
+ * page's own RecurringDepositEditor/PausedDepositsControl write to, so a
+ * pot set up from either page is fully editable from the other. This row
+ * only ever REMOVES the recurring deposit config, never the pot itself —
+ * deleting the whole pot stays a Wallet-page-only action, matching how a
+ * loan itself can't be deleted from Transactions either.
+ */
+function SavingsRecurringDepositRow({ pot, onSave }: { pot: SavingsPot; onSave: (updates: Partial<Omit<SavingsPot, 'id' | 'personId'>>) => void }) {
+  const [open, setOpen] = useState(false)
+  const { start, end } = schedulePreviewWindow(pot, new Date())
+  const windowDates = scheduledDepositDates(pot, start, end)
+  const currentlyPaused = new Set((pot.recurringDepositOverrides ?? []).filter((o) => o.deleted && windowDates.includes(o.originalDate)).map((o) => o.originalDate))
+  const nextDeposit = depositOccurrencePreviews(pot, new Date(), 1)[0]
+
+  return (
+    <div className="relative rounded-xl px-4 py-3" style={{ background: 'var(--color-surface)' }}>
+      <button className="w-full flex items-start justify-between gap-2 text-left" onClick={() => setOpen(!open)}>
+        <div className="min-w-0">
+          <p className="font-body text-sm text-[var(--color-ink)]">{pot.name}</p>
+          <p className="text-xs text-[var(--color-ink-faint)]">Savings deposit · monthly, on the {pot.recurringDepositDayOfMonth}{ordinalSuffixLocal(pot.recurringDepositDayOfMonth ?? 1)}</p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0 pt-0.5">
+          <span className="font-mono text-sm text-[var(--color-ink)]">-£{formatCurrency(pot.recurringDepositAmount ?? 0)}</span>
+          {open ? <ChevronUp size={14} className="text-[var(--color-ink-faint)]" /> : <ChevronDown size={14} className="text-[var(--color-ink-faint)]" />}
+        </div>
+      </button>
+      {open && (
+        <div className="mt-3 pt-3 border-t flex flex-col gap-2" style={{ borderColor: 'var(--color-track)' }}>
+          <p className="text-xs text-[var(--color-ink-muted)]">{nextDeposit ? `Next deposit ${nextDeposit.date}` : 'No upcoming deposit'}</p>
+          <div className="grid grid-cols-2 gap-2">
+            <EditField label="Amount (£)" type="number" value={pot.recurringDepositAmount ?? 0} onChange={(v) => onSave({ recurringDepositAmount: Number(v) || 0 })} />
+            <EditField
+              label="On day of month"
+              type="number"
+              value={pot.recurringDepositDayOfMonth ?? 28}
+              onChange={(v) => onSave({ recurringDepositDayOfMonth: Math.min(31, Math.max(1, Number(v) || 1)) })}
+            />
+          </div>
+          <button
+            onClick={() => onSave({ recurringDepositAmount: undefined, recurringDepositDayOfMonth: undefined, recurringDepositStartDate: undefined })}
+            className="text-xs self-start"
+            style={{ color: 'var(--color-negative)' }}
+          >
+            Remove recurring deposit
+          </button>
+          <PausedOccurrencesControl
+            windowDates={windowDates}
+            currentlyPaused={currentlyPaused}
+            amountForDate={() => pot.recurringDepositAmount ?? 0}
+            itemLabel="deposits"
+            nextPaymentPreview={(tentative) => {
+              const previewPot: SavingsPot = { ...pot, ...setPausedDeposits(pot, windowDates, tentative) }
+              return depositOccurrencePreviews(previewPot, new Date(), 1)[0]?.date ?? null
+            }}
+            onSave={(pausedDates) => onSave(setPausedDeposits(pot, windowDates, pausedDates))}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ordinalSuffixLocal(day: number): string {
+  if (day % 10 === 1 && day !== 11) return 'st'
+  if (day % 10 === 2 && day !== 12) return 'nd'
+  if (day % 10 === 3 && day !== 13) return 'rd'
+  return 'th'
+}
+
+/** Pots backlog item (2026-09 session) — identical shape to SavingsRecurringDepositRow above, against potLedger.ts's equivalents. */
+function PotRecurringDepositRow({ pot, onSave }: { pot: Pot; onSave: (updates: Partial<Omit<Pot, 'id' | 'personId'>>) => void }) {
+  const [open, setOpen] = useState(false)
+  const { start, end } = schedulePotPreviewWindow(pot, new Date())
+  const windowDates = scheduledPotDepositDates(pot, start, end)
+  const currentlyPaused = new Set((pot.recurringDepositOverrides ?? []).filter((o) => o.deleted && windowDates.includes(o.originalDate)).map((o) => o.originalDate))
+  const nextDeposit = potDepositOccurrencePreviews(pot, new Date(), 1)[0]
+
+  return (
+    <div className="relative rounded-xl px-4 py-3" style={{ background: 'var(--color-surface)' }}>
+      <button className="w-full flex items-start justify-between gap-2 text-left" onClick={() => setOpen(!open)}>
+        <div className="min-w-0">
+          <p className="font-body text-sm text-[var(--color-ink)]">{pot.name}</p>
+          <p className="text-xs text-[var(--color-ink-faint)]">Pot deposit · monthly, on the {pot.recurringDepositDayOfMonth}{ordinalSuffixLocal(pot.recurringDepositDayOfMonth ?? 1)}</p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0 pt-0.5">
+          <span className="font-mono text-sm text-[var(--color-ink)]">-£{formatCurrency(pot.recurringDepositAmount ?? 0)}</span>
+          {open ? <ChevronUp size={14} className="text-[var(--color-ink-faint)]" /> : <ChevronDown size={14} className="text-[var(--color-ink-faint)]" />}
+        </div>
+      </button>
+      {open && (
+        <div className="mt-3 pt-3 border-t flex flex-col gap-2" style={{ borderColor: 'var(--color-track)' }}>
+          <p className="text-xs text-[var(--color-ink-muted)]">{nextDeposit ? `Next deposit ${nextDeposit.date}` : 'No upcoming deposit'}</p>
+          <div className="grid grid-cols-2 gap-2">
+            <EditField label="Amount (£)" type="number" value={pot.recurringDepositAmount ?? 0} onChange={(v) => onSave({ recurringDepositAmount: Number(v) || 0 })} />
+            <EditField
+              label="On day of month"
+              type="number"
+              value={pot.recurringDepositDayOfMonth ?? 28}
+              onChange={(v) => onSave({ recurringDepositDayOfMonth: Math.min(31, Math.max(1, Number(v) || 1)) })}
+            />
+          </div>
+          <button
+            onClick={() => onSave({ recurringDepositAmount: undefined, recurringDepositDayOfMonth: undefined, recurringDepositStartDate: undefined })}
+            className="text-xs self-start"
+            style={{ color: 'var(--color-negative)' }}
+          >
+            Remove recurring deposit
+          </button>
+          <PausedOccurrencesControl
+            windowDates={windowDates}
+            currentlyPaused={currentlyPaused}
+            amountForDate={() => pot.recurringDepositAmount ?? 0}
+            itemLabel="deposits"
+            nextPaymentPreview={(tentative) => {
+              const previewPot: Pot = { ...pot, ...setPausedPotDeposits(pot, windowDates, tentative) }
+              return potDepositOccurrencePreviews(previewPot, new Date(), 1)[0]?.date ?? null
+            }}
+            onSave={(pausedDates) => onSave(setPausedPotDeposits(pot, windowDates, pausedDates))}
+          />
+        </div>
+      )}
+    </div>
   )
 }

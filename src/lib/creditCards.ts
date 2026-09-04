@@ -184,6 +184,30 @@ function billingDatesBetween(paymentDayOfMonth: number, afterIso: string, throug
 }
 
 /**
+ * Which statement window's close a given payment date belongs to (item
+ * e) — the most recent occurrence of `statementEndDay` before
+ * `paymentDate`. Both days recur once a month, and Adam confirmed
+ * exactly one close happens between a window's close and its own due
+ * date, so this is a plain day-number comparison rather than a real walk:
+ * if the close day is numerically EARLIER in the month than the payment
+ * day, the relevant close already happened THIS month; otherwise (equal
+ * or later) it happened the month before — matches the worked example
+ * (close 18th, due 14th: 18 >= 14, so the close is the 18th of the
+ * PRECEDING month). Only called once `card.statementEndDay` is set.
+ */
+function statementCloseDateForPaymentDate(card: CreditCard, paymentDate: Date): Date {
+  const endDay = card.statementEndDay!
+  const year = paymentDate.getFullYear()
+  const month = paymentDate.getMonth()
+  if (endDay < card.paymentDayOfMonth) {
+    const daysInMonth = new Date(year, month + 1, 0).getDate()
+    return new Date(year, month, Math.min(endDay, daysInMonth))
+  }
+  const daysInPrevMonth = new Date(year, month, 0).getDate()
+  return new Date(year, month - 1, Math.min(endDay, daysInPrevMonth))
+}
+
+/**
  * The card with its stored anchor swapped for the live derived balance —
  * the one thing READ sites should use. Everything downstream
  * (computeMinimumPaymentAmount, simulateCardPayoffMonths, the What-if
@@ -216,6 +240,21 @@ export function withLiveBalance(card: CreditCard, transactions: Transaction[], a
  * simulation — anything already cleared is already reflected in
  * card.currentBalance, the simulation's starting point, and re-applying
  * it here would double-count it.
+ *
+ * ITEM E — statement windows: once `card.statementEndDay` is set, each
+ * due date's minimum is computed off a SEPARATE `statementBalance` that
+ * only picks up real `credit_card_spend` transactions dated on/before
+ * that window's own close (statementCloseDateForPaymentDate) — a
+ * purchase posted after the close still shows in the card's live balance
+ * immediately (via `workingBalance`/`cardBalanceAsOf` elsewhere) but
+ * doesn't count toward THIS minimum, rolling into the next window's
+ * instead, matching real statement mechanics. Lump payments are NOT
+ * window-gated (confirmed against real UK card practice) — they reduce
+ * both balances immediately, same as today. Whenever `statementEndDay`
+ * is absent, `statementBalance` is kept in lockstep with `workingBalance`
+ * the whole way through and never diverges, so the minimum is always
+ * read from `workingBalance` as before — byte-identical output to the
+ * pre-item-e behaviour for every existing card.
  */
 export function generateMinimumPaymentTransactions(
   card: CreditCard,
@@ -248,6 +287,10 @@ export function generateMinimumPaymentTransactions(
   // below drift as real time passed.
   const rangeStartIso = toIso(rangeStart)
   let workingBalance = cardBalanceAsOf(card, transactions, rangeStart)
+  // The statement-window figure (item e) — starts equal to workingBalance
+  // and only ever diverges from it when real spend lands after a
+  // window's close but before that window's own due date.
+  let statementBalance = workingBalance
   // Same cut, applied to logged lump payments: one dated on or before
   // rangeStart is already inside workingBalance above (its transaction
   // was replayed into it), so folding it in again here would
@@ -255,12 +298,54 @@ export function generateMinimumPaymentTransactions(
   // applied by the loop below.
   const pendingLumpPayments = card.lumpPayments.filter((lp) => lp.date > rangeStartIso).sort((a, b) => a.date.localeCompare(b.date))
   let lumpIndex = 0
+  // item e — real spend dated after rangeStart, needed to know how much
+  // of a window's own activity should count toward ITS minimum (spend on
+  // or before the close) versus roll into the next one (spend after).
+  // Same "already-anchored vs still-to-simulate" cut as lump payments
+  // above; spend already inside `workingBalance`/`rangeStart` needs no
+  // separate handling here.
+  const pendingSpend = transactions
+    .filter((t) => t.creditCardId === card.id && t.type === 'credit_card_spend' && t.date > rangeStartIso)
+    .sort((a, b) => a.date.localeCompare(b.date))
+  // Two INDEPENDENT pointers into the same sorted list — a spend hits
+  // workingBalance (the true running balance) as soon as its own date
+  // has passed, but may need to wait for a LATER iteration's window to
+  // close before it's added to statementBalance (the figure minimums are
+  // computed against). A single shared pointer would consume an entry
+  // the moment it passed `paymentDateIso` regardless of whether it also
+  // cleared `closeDateIso` that same iteration, silently losing it for
+  // the later window it actually belongs to.
+  let workingSpendIndex = 0
+  let statementSpendIndex = 0
 
   let cursor = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), 1)
   while (cursor <= rangeEnd) {
     const daysInMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate()
     const paymentDate = new Date(cursor.getFullYear(), cursor.getMonth(), Math.min(card.paymentDayOfMonth, daysInMonth))
     const paymentDateIso = toIso(paymentDate)
+    const closeDateIso = card.statementEndDay != null ? toIso(statementCloseDateForPaymentDate(card, paymentDate)) : null
+
+    // Fold in any real spend dated up to this payment date into the true
+    // running balance — always, regardless of window.
+    while (workingSpendIndex < pendingSpend.length && pendingSpend[workingSpendIndex].date <= paymentDateIso) {
+      workingBalance = round2(workingBalance + pendingSpend[workingSpendIndex].amount)
+      workingSpendIndex++
+    }
+    // Fold spend into the statement-window balance only once ITS OWN
+    // window has actually closed — `closeDateIso` here is THIS
+    // iteration's close, so a spend dated after it waits for a later
+    // iteration (whichever one's close finally clears it). No window
+    // tracking configured at all (`closeDateIso` null) means every
+    // pending spend qualifies immediately, matching workingBalance
+    // exactly — the pre-item-e behaviour.
+    // No window tracking configured (`closeDateIso` null) falls back to
+    // paymentDateIso as the cutoff — identical pacing to workingBalance
+    // above, so the two stay byte-identical the whole way through.
+    const statementCutoffIso = closeDateIso ?? paymentDateIso
+    while (statementSpendIndex < pendingSpend.length && pendingSpend[statementSpendIndex].date <= statementCutoffIso) {
+      statementBalance = round2(statementBalance + pendingSpend[statementSpendIndex].amount)
+      statementSpendIndex++
+    }
 
     // Interest for this cycle posts first, against the balance as it
     // stood going into the cycle — THEN any lump payments logged within
@@ -268,15 +353,21 @@ export function generateMinimumPaymentTransactions(
     // what's left. This slightly overstates interest if a lump payment
     // landed early in the cycle (no daily precision here), which is a
     // deliberate, conservative simplification rather than an attempt at
-    // exact accrual.
+    // exact accrual. Applied to BOTH balances identically — item e adds
+    // no new interest-timing modelling of its own, deliberately, since
+    // Adam didn't ask for daily/grace-period accrual and the app's
+    // existing simplification already doesn't model that.
     workingBalance = applyMonthlyInterest(workingBalance, card.interestRatePercent)
+    statementBalance = applyMonthlyInterest(statementBalance, card.interestRatePercent)
 
     // Apply any still-pending lump payments dated on/before this
     // payment date, in date order, BEFORE computing this month's
     // minimum — this is what makes a repayment logged ahead of the next
-    // charge date actually count toward it.
+    // charge date actually count toward it. NOT window-gated (item e,
+    // confirmed against real practice) — applies to both balances.
     while (lumpIndex < pendingLumpPayments.length && pendingLumpPayments[lumpIndex].date <= paymentDateIso) {
       workingBalance = round2(Math.max(0, workingBalance - pendingLumpPayments[lumpIndex].amount))
+      statementBalance = round2(Math.max(0, statementBalance - pendingLumpPayments[lumpIndex].amount))
       lumpIndex++
     }
 
@@ -291,7 +382,7 @@ export function generateMinimumPaymentTransactions(
       // than silently reverting to the un-overridden trajectory next
       // month.
       const override = card.minimumPaymentOverrides?.find((o) => o.date === paymentDateIso)
-      const amount = override ? override.amount : minimumPaymentForBalance(card.minimumPayment, workingBalance)
+      const amount = override ? override.amount : minimumPaymentForBalance(card.minimumPayment, statementBalance)
       if (amount > 0) {
         results.push({
           date: paymentDateIso,
@@ -318,6 +409,7 @@ export function generateMinimumPaymentTransactions(
           note: `${card.name} - Minimum Charge`,
         })
         workingBalance = round2(Math.max(0, workingBalance - amount))
+        statementBalance = round2(Math.max(0, statementBalance - amount))
       }
     }
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)

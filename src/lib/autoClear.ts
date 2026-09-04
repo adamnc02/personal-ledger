@@ -29,7 +29,10 @@ import { generateTransactionsForTemplate } from './schedule'
 import { generateLoanPaymentTransactions } from './ledgerLoans'
 import { generateMinimumPaymentTransactions } from './creditCards'
 import { computeNetPayForPeriod, generateSalaryTransactions } from './salaryLedger'
+import { resolvePensionAmount, generatePensionTransactions } from './pensionLedger'
 import { generateSavingsContributions } from './savingsLedger'
+import { generateSavingsDepositTransactions, generateSavingsInterestTransactions, generateSavingsWithdrawalTransactions } from './savingsPotLedger'
+import { generatePotDepositTransactions, generatePotOutgoingTransactions } from './potLedger'
 import { generateJointContributionTransactions } from './jointLedger'
 import { dedupeKey } from './projection'
 import { applyClearSideEffects } from './clearTransaction'
@@ -70,15 +73,39 @@ function reconcileSalaryTransactions(data: AppDataV2): AppDataV2 {
   return changed ? { ...data, transactions } : data
 }
 
+/**
+ * Same reconciliation as reconcileSalaryTransactions above, for
+ * 'pension_income' — a materialized transaction's amount can drift from
+ * what pensionLedger.ts's resolvePensionAmount now computes for that
+ * date, the same way a salary transaction can: editing a pension's
+ * standing amount (with a real effective-from date, per
+ * applyPensionAmountChange) or a single occurrence's override after that
+ * date has already cleared. Keyed on sourceId (the specific Pension),
+ * not just personId, since one person can own several pensions.
+ */
+function reconcilePensionTransactions(data: AppDataV2): AppDataV2 {
+  let changed = false
+  const transactions = data.transactions.map((t) => {
+    if (t.type !== 'pension_income' || !t.sourceId) return t
+    const pension = data.pensions.find((p) => p.id === t.sourceId)
+    if (!pension) return t
+    const amount = resolvePensionAmount(pension, t.date)
+    if (amount <= 0 || amount === t.amount) return t
+    changed = true
+    return { ...t, amount }
+  })
+  return changed ? { ...data, transactions } : data
+}
+
 export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): AppDataV2 {
   const asOfIso = toLocalIsoDate(asOf)
   let result = data
   let changed = false
 
-  // Runs FIRST, before anything is settled: a stored salary row that's
-  // drifted from its computed value should be corrected whether or not
-  // there's also something new coming due this pass.
-  const reconciled = reconcileSalaryTransactions(data)
+  // Runs FIRST, before anything is settled: a stored salary/pension row
+  // that's drifted from its computed value should be corrected whether
+  // or not there's also something new coming due this pass.
+  const reconciled = reconcilePensionTransactions(reconcileSalaryTransactions(data))
   if (reconciled !== data) {
     result = reconciled
     changed = true
@@ -109,16 +136,67 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
 
     const candidates: Omit<Transaction, 'id'>[] = []
     for (const template of result.recurringTemplates.filter((t) => t.location === 'personal' && t.ownerId === person.id)) {
-      candidates.push(...generateTransactionsForTemplate(template, rangeStart, asOf))
+      candidates.push(...generateTransactionsForTemplate(template, rangeStart, asOf, payCycle))
     }
     for (const loan of result.loans.filter((l) => l.location === 'personal' && l.ownerId === person.id)) {
-      candidates.push(...generateLoanPaymentTransactions(loan, rangeStart, asOf))
+      // Same 'personal'-only filter as projection.ts's identical loop, and
+      // for the same reason — see that file's comment on this exact spot.
+      candidates.push(...generateLoanPaymentTransactions(loan, rangeStart, asOf).filter((t) => t.location === 'personal'))
     }
     for (const card of result.creditCards.filter((c) => c.ownerId === person.id)) {
       candidates.push(...generateMinimumPaymentTransactions(card, rangeStart, asOf, result.transactions))
     }
     candidates.push(...generateSalaryTransactions(person, payCycle, rangeStart, asOf))
+    for (const pension of result.pensions.filter((p) => p.personId === person.id)) {
+      candidates.push(...generatePensionTransactions(pension, rangeStart, asOf))
+    }
     candidates.push(...generateSavingsContributions(person, payCycle, rangeStart, asOf))
+    // BUGFIX (2026-09-02, reported by Adam — "monthly deposit rate
+    // changing to a number I didn't select"): recurring savings-pot
+    // deposits (and their interest) were never wired into THIS
+    // materialization loop at all — every other generator here (bills,
+    // loans, cards, salary, pension, joint) gets promoted from a
+    // synthetic preview into a real, permanent, cleared Transaction the
+    // moment its date arrives; savings pot deposits never did. Since
+    // nothing ever locked one in, EVERY past occurrence kept being
+    // recomputed fresh, on every render, straight off the pot's CURRENT
+    // standing recurringDepositAmount — so editing the amount later
+    // silently repainted every already-due past deposit to the new
+    // figure too, which is almost certainly what looked like "saving
+    // changed a number I didn't select." Same generate-then-merge order
+    // as computeProjection's equivalent fix: deposits first, then
+    // interest against the combined real+just-generated activity, so
+    // compounding still resolves correctly the first time a pot is
+    // settled after being untouched for a while.
+    for (const pot of (result.savingsPots ?? []).filter((p) => p.personId === person.id && p.active)) {
+      // Same "don't double-materialize what the top-level loop above
+      // already generates" reasoning as projection.ts's identical fix
+      // (2026-09-04 session) — transfer-sourced deposits/withdrawals
+      // feed realActivity for interest only, never pushed into
+      // `candidates` a second time.
+      const potDeposits = generateSavingsDepositTransactions(pot, rangeStart, asOf)
+      candidates.push(...potDeposits)
+      const transferDeposits = generateSavingsDepositTransactions(pot, rangeStart, asOf, result.recurringTemplates, payCycle).filter((t) => t.type === 'transfer')
+      const transferWithdrawals = generateSavingsWithdrawalTransactions(pot, rangeStart, asOf, result.recurringTemplates, payCycle)
+      const potRealActivity = [
+        ...result.transactions,
+        ...potDeposits.map((d, i) => ({ ...d, id: `generated:dep-preview:${i}` })),
+        ...transferDeposits.map((d, i) => ({ ...d, id: `generated:xfer-dep-preview:${i}` })),
+        ...transferWithdrawals.map((d, i) => ({ ...d, id: `generated:xfer-wd-preview:${i}` })),
+      ]
+      candidates.push(...generateSavingsInterestTransactions(pot, potRealActivity, rangeStart, asOf))
+    }
+    // Pots backlog item (2026-09-03) — a pot DEPOSIT touches personal
+    // cash (see potLedger.ts's file header), so it materializes through
+    // this SAME per-person candidates list/existingKeys, same as a
+    // savings-pot deposit just above. A pot-funded bill/loan PAYMENT does
+    // NOT belong here (it's purely internal to the pot, never touches
+    // personal cash) — those are settled by their own pot-scoped pass
+    // right below instead, exactly mirroring why generateSavingsInterestTransactions
+    // never appears in computeProjection's personal list either.
+    for (const pot of (result.pots ?? []).filter((p) => p.personId === person.id && p.active)) {
+      candidates.push(...generatePotDepositTransactions(pot, rangeStart, asOf))
+    }
     candidates.push(...generateJointContributionTransactions(result, person.id, rangeStart, asOf))
 
     for (const candidate of candidates) {
@@ -130,6 +208,35 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
       result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
       if (key) existingKeys.add(key)
       changed = true
+    }
+
+    // Step 3 — settle this person's own due pot-funded bill/loan
+    // payments. Entirely separate from the candidates pass above: these
+    // carry location: 'pot', not 'personal', so they're never part of
+    // `stored`/`existingKeys` there (deliberately — see potLedger.ts's
+    // file header, "purely internal to the pot"). Scoped by potId rather
+    // than folded into the personal existingKeys set, for the same
+    // reason the savings-pot/joint loops above are scoped by their own
+    // entity rather than one global pass. Nested inside this person's own
+    // iteration (rather than a separate top-level loop over every pot)
+    // simply so it can reuse this person's own rangeStart/payCycle — a
+    // pot always belongs to exactly one person, so there's no case where
+    // it needs a different one.
+    for (const pot of (result.pots ?? []).filter((p) => p.personId === person.id)) {
+      const potStored = result.transactions.filter((t) => t.potId === pot.id)
+      const potExistingKeys = new Set(potStored.map(dedupeKey).filter((k): k is string => k !== null))
+      const potCandidates = generatePotOutgoingTransactions(result, pot, rangeStart, asOf)
+
+      for (const candidate of potCandidates) {
+        if (candidate.date > asOfIso) continue
+        const key = dedupeKey(candidate)
+        if (key && potExistingKeys.has(key)) continue
+
+        const real: Transaction = { ...candidate, id: nanoid(8), status: 'cleared' }
+        result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
+        if (key) potExistingKeys.add(key)
+        changed = true
+      }
     }
   }
 

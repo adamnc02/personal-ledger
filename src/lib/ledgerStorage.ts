@@ -88,9 +88,24 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
     // runs exactly once per card and re-running migration on
     // already-migrated data is a no-op.
     creditCards: (data.creditCards ?? []).map((card) => (card.balanceAsOfDate ? card : anchorLegacyCardBalance(card, data.transactions ?? []))),
+    pensions: data.pensions ?? [],
+    savingsPots: data.savingsPots ?? [],
+    pots: data.pots ?? [],
     transactions: data.transactions ?? [],
     payCycles: data.payCycles ?? [],
+    // Absent on any backup persisted before the Salary Sorter session
+    // (2026-09) — defaults to no sorts ever having been done, same as a
+    // brand-new household. See SalarySort's own comment in
+    // types/ledger.ts.
+    salarySorts: data.salarySorts ?? [],
     scenarios: data.scenarios ?? [],
+    // Absent on any backup persisted before the joint-account feature —
+    // defaults to null (not yet set up), same as a brand-new household.
+    // If a joint-location bill/loan already exists in this data,
+    // needsJointAccountSetup (lib/jointAccountLedger.ts) picks that up on
+    // next render and prompts for it, same as it would for a newly
+    // created one — nothing here guesses an opening balance/date.
+    jointAccount: data.jointAccount ?? null,
   }
 
   // Self-heals any bill/loan/card left pointing at a person who no longer
@@ -158,9 +173,14 @@ export function defaultLedgerData(): AppDataV2 {
     recurringTemplates: [],
     loans: [],
     creditCards: [],
+    pensions: [],
+    savingsPots: [],
+    pots: [],
     transactions: [],
     payCycles: [defaultPayCycleConfig(meId)],
+    salarySorts: [],
     scenarios: [],
+    jointAccount: null,
   }
 }
 

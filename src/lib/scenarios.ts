@@ -1,10 +1,12 @@
+import { addMonths } from 'date-fns'
 import type { AppData, Bill, Loan, Scenario, ScenarioTargetKind } from '../types/models'
 import type { CreditCard } from '../types/ledger'
-import { summarizeLoan, currentLoanMonthlyCost, estimateSettlementFigure } from './loans'
+import { summarizeLoan, currentLoanMonthlyCost, estimateSettlementFigure, simulateScenarioLoan, scheduleEntryAsOf, type ScenarioLoanEvent } from './loans'
 import { computeMinimumPaymentAmount, simulateCardPayoffMonths } from './creditCards'
 import { costForPerson } from './bills'
 import { calculateNetSalary } from './tax'
 import { monthlyAmountForEntry, monthsUntil } from './savings'
+import { todayIso, toLocalIsoDate } from './date'
 
 export interface LoanImpact {
   // Despite the name (kept for minimal disruption to existing call sites),
@@ -24,6 +26,13 @@ export interface LoanImpact {
   fullyPaidOff: boolean
   originalMonthlyCostForPerson: number
   newMonthlyCostForPerson: number
+  // Loan targets only (item d) — the projected date the loan finishes
+  // once every dated action against it (across the whole combined
+  // scenario, not just this one) has landed, read straight off the real
+  // amortisation engine. null for credit-card targets, for a loan with no
+  // calibratedMonthlyRate to project from, and whenever this record's own
+  // action didn't move the date at all.
+  newEndDate: string | null
 }
 
 export interface SalaryChangeImpact {
@@ -87,6 +96,47 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
   const workingRemainingMap = new Map<string, number>()
   const lumpSumsApplied = new Map<string, number>()
 
+  // Loan targets ONLY (item d — credit cards keep today's dateless flat
+  // math, per Adam's own call on scope). Every dated pay_off_loan/
+  // loan_overpayment action against a given loan lands in this ONE list,
+  // keyed by loan id, so simulateScenarioLoan can run the real engine
+  // once per loan with everything that hits it, in true date order — the
+  // same list a second scenario specifying the same dates would build
+  // regardless of which action was created first or which scenario it
+  // lives in (mergeScenarios already flattens before this function ever
+  // runs, so "different scenarios" and "same scenario" are already
+  // indistinguishable by the time we're here).
+  const loanEventsMap = new Map<string, ScenarioLoanEvent[]>()
+  function addLoanEvent(loanId: string, event: ScenarioLoanEvent) {
+    const list = loanEventsMap.get(loanId) ?? []
+    list.push(event)
+    loanEventsMap.set(loanId, list)
+  }
+  // The latest pay_off_loan (genuine lump-sum, not a materialized
+  // recurring-overpayment occurrence) date seen per loan — kept separate
+  // from loanEventsMap because "does this fully close the loan" has to be
+  // judged against the real early-settlement PREMIUM as of that date
+  // (estimateSettlementFigure — scope §13/handoff step 6), which the
+  // schedule's own balanceAfter alone doesn't capture: a lump sum landing
+  // on the loan's very first synthetic period accrues ~0 period interest
+  // (zero elapsed days since the loan's own start), so relying on the
+  // schedule alone would silently drop the settlement-premium check this
+  // scope already fixed once.
+  const lastLumpDateByLoan = new Map<string, string>()
+  // BUGFIX (Adam-reported, 2026-09 session) — same idea as
+  // lastLumpDateByLoan above, but for the recurring-overpayment action's
+  // own start date, so its "new monthly payment"/"remaining" figures
+  // below can be read off the schedule at THIS action's own date too,
+  // rather than off simulateScenarioLoan's outcome-level
+  // remainingAfterEvents/effectiveMonthlyPayment (anchored to the
+  // chronologically LAST event across every action sharing this loan —
+  // for a recurring overpayment that's always its own ~50-year-out
+  // materialized tail, see loan_overpayment's own comment below). Tracks
+  // the EARLIEST start date if more than one recurring-overpayment action
+  // targets the same loan, since that's the date its combined effect
+  // first actually changes anything.
+  const firstOverpaymentDateByLoan = new Map<string, string>()
+
   function targetKey(kind: ScenarioTargetKind, id: string): string {
     return `${kind}:${id}`
   }
@@ -141,6 +191,18 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         const key = targetKey(kind, id)
         lumpSumsApplied.set(key, round2((lumpSumsApplied.get(key) ?? 0) + applied))
         pool = round2(pool - applied)
+
+        // Loan targets ALSO get a real, dated event for the engine below
+        // — the pool-cascade split itself still uses today's balance to
+        // decide HOW MUCH goes where (unchanged), but what happens to the
+        // loan afterward is now genuinely simulated from action.date, not
+        // assumed to happen today.
+        if (kind === 'loan' && applied > 0) {
+          const eventDate = action.date || todayIso()
+          addLoanEvent(id, { date: eventDate, amount: applied, recastMode: action.recastMode ?? 'reduce_term' })
+          const existing = lastLumpDateByLoan.get(id)
+          if (!existing || eventDate > existing) lastLumpDateByLoan.set(id, eventDate)
+        }
       }
       oneOffCashImpact += pool
     } else if (action.type === 'purchase') {
@@ -185,6 +247,30 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
       if (target) {
         const key = targetKey(target.kind, target.id)
         overpayments.set(key, (overpayments.get(key) ?? 0) + action.value)
+
+        // Loan targets: also materialize this as a monthly SERIES of real
+        // dated events (recastMode always 'reduce_term' — a recurring
+        // overpayment never gets the reduce-monthly choice, see the
+        // field's own doc comment in types/models.ts) rather than trying
+        // to fit it into the real ledger Loan's single recurringOverpayment
+        // slot — that slot can't represent two independent recurring
+        // actions landing on the same loan with different start dates, and
+        // a combined scenario can genuinely produce that. A materialized
+        // series has no such limit: any number of them combine correctly
+        // through the exact same one-off-overpayment mechanism the lump
+        // sums above already use. Generated out to the synthetic loan's
+        // own 600-month safety cap (toSyntheticLedgerLoan) — harmless
+        // either way, since buildLoanSchedule's own loop stops consuming
+        // events the moment the balance actually reaches zero.
+        if (target.kind === 'loan' && action.value > 0) {
+          const startDate = action.date || todayIso()
+          const existingStart = firstOverpaymentDateByLoan.get(target.id)
+          if (!existingStart || startDate < existingStart) firstOverpaymentDateByLoan.set(target.id, startDate)
+          const start = new Date(startDate)
+          for (let i = 0; i < 600; i++) {
+            addLoanEvent(target.id, { date: toLocalIsoDate(addMonths(start, i)), amount: action.value, recastMode: 'reduce_term' })
+          }
+        }
       }
     } else if (action.type === 'salary_change') {
       const targetPersonId = action.personId || personId
@@ -209,24 +295,59 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
       if (!loan) continue
 
       const original = summarizeLoan(loan)
-      // Whether this lump sum genuinely CLOSES the loan depends on the
-      // real settlement figure (which includes any early-settlement
-      // premium once real interest is involved), not on whether it
-      // merely covers the raw remaining balance — scope §13 / handoff
-      // step 6. A lump sum that covers the balance but not the full
-      // settlement premium is treated as a (large) partial payment
-      // below, same as any other partial overpayment.
-      const settlementNeeded = estimateSettlementFigure(loan)
-      const fullyPaidOff = lumpSum >= settlementNeeded
-      const newRemaining = fullyPaidOff ? 0 : round2(Math.max(0, original.remaining - lumpSum))
+      // Every dated event that landed on THIS loan — from this action and
+      // any other pay_off_loan/loan_overpayment action(s) sharing it —
+      // run through the real engine ONCE, in true date order (item d's
+      // whole point: two scenarios/actions specifying the same dates must
+      // agree, regardless of creation order or which action this
+      // particular loanImpact record is "for").
+      const outcome = simulateScenarioLoan(loan, loanEventsMap.get(id) ?? [])
 
-      // If not fully cleared, spread the reduced balance over the same
-      // remaining term — a genuinely reduced monthly payment, not a shorter one.
+      // "Fully paid off" is still judged against the real early-
+      // settlement PREMIUM (scope §13/handoff step 6), evaluated as of
+      // THIS lump sum's own date — not the schedule's raw balanceAfter,
+      // and not today's premium if the lump sum is dated in the future.
+      const settlementAsOfLump = estimateSettlementFigure(loan, new Date(lastLumpDateByLoan.get(id) ?? todayIso()))
+      const fullyPaidOff = lumpSum >= settlementAsOfLump
+      // BUGFIX (Adam-reported, 2026-09 session — "lump sum was 2000,
+      // remaining after shows 0", and no positive monthly-cash impact
+      // showing for a reduce_payment lump sum) — outcome.remainingAfterEvents/
+      // effectiveMonthlyPayment are anchored to the LAST event across
+      // EVERY action sharing this loan, not this lump sum's own date. In
+      // a combined scenario with a recurring overpayment also on this
+      // loan, that "last event" is a materialized occurrence ~50 years
+      // out (loan_overpayment's own 600-month tail below) — by which
+      // point the loan is obviously long paid off, collapsing both
+      // figures to (near) zero regardless of what THIS lump sum alone
+      // actually did. Reading the schedule at the lump sum's OWN landing
+      // date (scheduleEntryAsOf) instead gives the balance/payment right
+      // after just this event, which is what "Remaining after"/the
+      // monthly-cost comparison are actually supposed to show.
+      const asOfLump = outcome.hasSchedule ? scheduleEntryAsOf(outcome.schedule, lastLumpDateByLoan.get(id) ?? todayIso()) : undefined
+      const newRemaining = fullyPaidOff
+        ? 0
+        : asOfLump
+          ? round2(Math.max(0, asOfLump.balanceAfter))
+          : round2(Math.max(0, original.remaining - lumpSum))
+      // scheduledPayment ONLY, deliberately not + overpaymentApplied —
+      // at the lump sum's OWN landing period, overpaymentApplied is the
+      // lump sum itself (a one-off, not an ongoing monthly cost); adding
+      // it here would double-count the £2,000 as if it were a recurring
+      // charge. See the overpayment loop below for the case where that
+      // field DOES need adding — a genuinely recurring event.
       const newMonthlyPayment = fullyPaidOff
         ? 0
-        : original.monthsRemaining > 0
-          ? round2(newRemaining / original.monthsRemaining)
-          : loan.monthlyPayment
+        : asOfLump
+          ? asOfLump.scheduledPayment
+          : original.monthsRemaining > 0
+            ? round2(newRemaining / original.monthsRemaining)
+            : loan.monthlyPayment
+      const newMonthsRemaining = fullyPaidOff ? 0 : outcome.hasSchedule ? outcome.monthsRemaining : original.monthsRemaining
+      const newEndDate = fullyPaidOff
+        ? null
+        : outcome.hasSchedule && outcome.finalPaymentDate !== original.finalPaymentDate
+          ? outcome.finalPaymentDate
+          : null
 
       const originalMonthlyCostForPerson = costForPerson(virtualLoanBill(loan, currentLoanMonthlyCost(loan)), personId, data.people)
       const newMonthlyCostForPerson = costForPerson(virtualLoanBill(loan, newMonthlyPayment), personId, data.people)
@@ -242,11 +363,12 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         lumpSumApplied: lumpSum,
         overpaymentPerMonth: 0,
         originalMonthsRemaining: original.monthsRemaining,
-        newMonthsRemaining: fullyPaidOff ? 0 : original.monthsRemaining,
-        monthsSaved: fullyPaidOff ? original.monthsRemaining : 0,
+        newMonthsRemaining,
+        monthsSaved: Math.max(0, original.monthsRemaining - newMonthsRemaining),
         fullyPaidOff,
         originalMonthlyCostForPerson,
         newMonthlyCostForPerson,
+        newEndDate,
       })
     } else {
       const card = data.creditCards.find((c) => c.id === id)
@@ -279,6 +401,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         fullyPaidOff,
         originalMonthlyCostForPerson,
         newMonthlyCostForPerson,
+        newEndDate: null,
       })
     }
   }
@@ -310,6 +433,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         fullyPaidOff: false,
         originalMonthlyCostForPerson,
         newMonthlyCostForPerson: 0,
+        newEndDate: null,
       })
     } else {
       const card = data.creditCards.find((c) => c.id === id)
@@ -335,6 +459,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         fullyPaidOff: false,
         originalMonthlyCostForPerson,
         newMonthlyCostForPerson: 0,
+        newEndDate: null,
       })
     }
   }
@@ -349,16 +474,49 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
       if (!loan) continue
 
       const original = summarizeLoan(loan)
-      const newMonthlyPayment = loan.monthlyPayment + extraPerMonth
-      // Genuinely re-simulate with the higher monthly payment through the
-      // same delegated engine (loan-amortisation-engine scope §1/§13,
-      // handoff step 6: "loan_overpayment scenario actions route through
-      // the same engine") rather than a linear division of
-      // remaining/newMonthlyPayment — that shortcut ignores how a bigger
-      // payment also means less interest accrues each period, so it
-      // understates how many months a real overpayment actually saves
-      // once the loan carries real interest.
-      const newMonthsRemaining = summarizeLoan({ ...loan, monthlyPayment: newMonthlyPayment }).monthsRemaining
+      // Same shared per-loan outcome the lump-sum loop above computes —
+      // loanEventsMap already has this action's materialized monthly
+      // series (and anything else dated against this loan) folded in, so
+      // this reads the real, combined result rather than re-deriving a
+      // second, isolated one just for this record. A recurring
+      // overpayment is always reduce_term (see the field's own doc
+      // comment), so unlike a lump sum it never lowers the payment or
+      // leaves the principal instantly unchanged — the loan really is
+      // being paid down faster from here, which the new figures reflect.
+      const outcome = simulateScenarioLoan(loan, loanEventsMap.get(id) ?? [])
+
+      // BUGFIX (Adam-reported, 2026-09 session — no negative monthly-cash
+      // impact showing for a £100/month recurring overpayment) — same
+      // root cause as the lump-sum loop above: effectiveMonthlyPayment is
+      // anchored to this loan's chronologically LAST event (this
+      // overpayment's own ~50-year-out materialized tail, in a scenario
+      // with nothing else on this loan), not to when this arrangement
+      // actually starts. Read off the schedule at the overpayment's own
+      // start date instead.
+      // BUGFIX (Adam-reported, 2026-09 session — "the Extra Per month
+      // label is wrong"/no negative monthly-cash impact showing at all
+      // for the recurring overpayment) — asOfStart.scheduledPayment is
+      // only the loan's REGULAR contractual payment; for a reduce_term
+      // recast (always used for a recurring overpayment — see this
+      // field's own doc comment) that figure is UNCHANGED from before,
+      // by design. The extra money paid each period shows up in
+      // asOfStart.overpaymentApplied instead — NOT recurringOverpaymentApplied
+      // (that field is reserved for the loan's own native
+      // Loan.recurringOverpayment; a scenario's recurring overpayment is
+      // materialized as 600 individual dated events — see the
+      // loan_overpayment action above — so the real engine has no way to
+      // tell those apart from a genuine one-off lump, and folds them all
+      // into overpaymentApplied). Reading scheduledPayment alone made
+      // "new monthly payment" look identical to the original, silently
+      // erasing the very cost this card exists to show.
+      const asOfStart = outcome.hasSchedule ? scheduleEntryAsOf(outcome.schedule, firstOverpaymentDateByLoan.get(id) ?? todayIso()) : undefined
+      const fullyPaidOff = outcome.hasSchedule ? outcome.fullyPaidOff : false
+      const newMonthlyPayment = asOfStart ? asOfStart.scheduledPayment + asOfStart.overpaymentApplied : loan.monthlyPayment + extraPerMonth
+      const newMonthsRemaining = outcome.hasSchedule
+        ? outcome.monthsRemaining
+        : summarizeLoan({ ...loan, monthlyPayment: newMonthlyPayment }).monthsRemaining
+      const newRemaining = asOfStart ? round2(Math.max(0, asOfStart.balanceAfter)) : original.remaining
+      const newEndDate = outcome.hasSchedule && outcome.finalPaymentDate !== original.finalPaymentDate ? outcome.finalPaymentDate : null
 
       const originalMonthlyCostForPerson = costForPerson(virtualLoanBill(loan, currentLoanMonthlyCost(loan)), personId, data.people)
       const newMonthlyCostForPerson = costForPerson(virtualLoanBill(loan, Math.min(newMonthlyPayment, original.remaining)), personId, data.people)
@@ -371,15 +529,16 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         targetKind: 'loan',
         kind: 'overpayment',
         originalRemaining: original.remaining,
-        newRemaining: original.remaining, // principal isn't reduced instantly, just paid down faster over time
+        newRemaining,
         lumpSumApplied: 0,
         overpaymentPerMonth: extraPerMonth,
         originalMonthsRemaining: original.monthsRemaining,
         newMonthsRemaining,
         monthsSaved: Math.max(0, original.monthsRemaining - newMonthsRemaining),
-        fullyPaidOff: false,
+        fullyPaidOff,
         originalMonthlyCostForPerson,
         newMonthlyCostForPerson,
+        newEndDate,
       })
     } else {
       const card = data.creditCards.find((c) => c.id === id)
@@ -410,6 +569,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         fullyPaidOff: false,
         originalMonthlyCostForPerson,
         newMonthlyCostForPerson,
+        newEndDate: null,
       })
     }
   }

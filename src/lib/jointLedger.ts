@@ -93,3 +93,16 @@ export function jointSharesReconcile(summary: JointSummary): boolean {
   const summed = round2(summary.perPerson.reduce((sum, p) => sum + p.amount, 0))
   return Math.abs(summed - summary.totalOutgoings) <= 0.05
 }
+
+// SUPERSEDED (Adam-specified, 2026-09-03): householdRealActivity used to
+// live here, feeding BOTH the Joint and Household cards with a mixed
+// "joint bills + everyone's income" list. Split into two, each scoped to
+// what its card actually shows now:
+//  - The joint account's own real activity (joint bills paid, deposits/
+//    withdrawals) — jointAccountLedger.ts's computeJointAccountProjection.
+//  - Each person's personal-only activity for the Household card
+//    (joint bills deliberately excluded) — householdLedger.ts's
+//    computeHouseholdPersonProjection/computeHouseholdProjections.
+// Nothing in this file reads or produces a mixed joint+income list any
+// more.
+

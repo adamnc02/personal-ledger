@@ -1,5 +1,6 @@
 import { SplitEditor } from './SplitEditor'
 import type { BillLocation } from '../types/models'
+import type { Pot } from '../types/ledger'
 
 /**
  * The "Joint" option is only shown once a second person exists AND that
@@ -26,29 +27,51 @@ import type { BillLocation } from '../types/models'
  * placeholder: a field with a single, unchangeable, unexplained value is
  * not useful information, it's just noise on a form for something that
  * hasn't happened yet.
+ *
+ * "Pot" (Pots backlog item, 2026-09 session) follows the same instinct —
+ * only offered once the CURRENT owner actually has at least one pot,
+ * recomputed live off `pots`/`ownerId` rather than a static flag, since
+ * unlike joint-ness it can change mid-edit as the owner picker itself is
+ * touched. IMPORTANT: this component only ever hands back a plain patch —
+ * for a bill/loan that's being EDITED (as opposed to freshly created,
+ * where there's nothing to retroactively touch), the caller must NOT feed
+ * a location/potId change straight into a plain field-merge the way every
+ * other field here works. Adam's own spec requires an effective-date step
+ * and a retroactive rewrite of existing transactions (lib/locationChange.ts)
+ * — see BillEditPanel/LoanEditPanel's own handling of this patch for the
+ * real flow; this component stays a dumb, uncommitted draft editor
+ * exactly like every field around it, on purpose.
  */
 export function LocationEditor({
   people,
+  pots,
   canBeJoint,
   location,
   ownerId,
+  potId,
   payee,
   payeeSharePercent,
   onChange,
 }: {
   people: { id: string; name: string }[]
+  pots: Pot[]
   canBeJoint: boolean
   location: BillLocation
   ownerId: string
+  potId?: string
   payee: string
   payeeSharePercent: number
-  onChange: (patch: { location: BillLocation; ownerId?: string; payee?: string; payeeSharePercent?: number }) => void
+  onChange: (patch: { location: BillLocation; ownerId?: string; potId?: string; payee?: string; payeeSharePercent?: number }) => void
 }) {
-  const showLocationField = canBeJoint
-  const showOwnerField = location === 'personal' && people.length > 1
-  const showSplitEditor = location === 'joint' && canBeJoint
+  const ownerPots = pots.filter((p) => p.personId === ownerId)
+  const canBePot = ownerPots.length > 0
 
-  if (!showLocationField && !showOwnerField && !showSplitEditor) return null
+  const showLocationField = canBeJoint || canBePot
+  const showOwnerField = (location === 'personal' || location === 'pot') && people.length > 1
+  const showSplitEditor = location === 'joint' && canBeJoint
+  const showPotField = location === 'pot' && canBePot
+
+  if (!showLocationField && !showOwnerField && !showSplitEditor && !showPotField) return null
 
   return (
     <div className="grid grid-cols-2 gap-3">
@@ -59,20 +82,25 @@ export function LocationEditor({
             value={location}
             onChange={(e) => {
               const next = e.target.value as BillLocation
-              onChange(
-                next === 'joint'
-                  ? { location: next, payee: payee || people[0]?.id || '' }
-                  : { location: next, ownerId: ownerId || people[0]?.id || '' },
-              )
+              if (next === 'joint') onChange({ location: next, payee: payee || people[0]?.id || '', potId: undefined })
+              else if (next === 'pot') onChange({ location: next, ownerId: ownerId || people[0]?.id || '', potId: potId && ownerPots.some((p) => p.id === potId) ? potId : ownerPots[0]?.id || '' })
+              else onChange({ location: next, ownerId: ownerId || people[0]?.id || '', potId: undefined })
             }}
             className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
           >
             <option value="personal" style={{ color: '#000' }}>
               Personal
             </option>
-            <option value="joint" style={{ color: '#000' }}>
-              Joint
-            </option>
+            {canBeJoint && (
+              <option value="joint" style={{ color: '#000' }}>
+                Joint
+              </option>
+            )}
+            {canBePot && (
+              <option value="pot" style={{ color: '#000' }}>
+                Pot
+              </option>
+            )}
           </select>
         </label>
       )}
@@ -81,10 +109,42 @@ export function LocationEditor({
           <span className="text-xs text-[var(--color-ink-muted)]">Owner</span>
           <select
             value={ownerId}
-            onChange={(e) => onChange({ location, ownerId: e.target.value })}
+            onChange={(e) => {
+              const nextOwner = e.target.value
+              // Changing the owner while location: 'pot' can strand
+              // potId pointing at a pot that belongs to the OLD owner —
+              // pots are single-person by construction, so re-point at
+              // the new owner's first pot (if they have one) rather than
+              // leaving a cross-owner reference dangling. If the new
+              // owner has no pots at all, LocationEditor's own re-render
+              // will naturally stop showing the Pot field at all next
+              // paint (canBePot recomputes off the new ownerId) — the
+              // caller's next real save should route through the same
+              // location-reassignment flow as any other location change,
+              // since this is genuinely changing where the bill is paid
+              // from, not just relabelling who it belongs to.
+              const nextOwnerPots = pots.filter((p) => p.personId === nextOwner)
+              onChange({ location, ownerId: nextOwner, potId: location === 'pot' ? nextOwnerPots[0]?.id : potId })
+            }}
             className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
           >
             {people.map((p) => (
+              <option key={p.id} value={p.id} style={{ color: '#000' }}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {showPotField && (
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-[var(--color-ink-muted)]">Pot</span>
+          <select
+            value={potId && ownerPots.some((p) => p.id === potId) ? potId : ownerPots[0]?.id ?? ''}
+            onChange={(e) => onChange({ location, potId: e.target.value })}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          >
+            {ownerPots.map((p) => (
               <option key={p.id} value={p.id} style={{ color: '#000' }}>
                 {p.name}
               </option>

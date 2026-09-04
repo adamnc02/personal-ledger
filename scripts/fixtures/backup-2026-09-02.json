@@ -1,5 +1,5 @@
 {
-  "primaryPersonId": "vh5IbJbo",
+  "primaryPersonId": "tue8sV-d",
   "people": [
     {
       "id": "vh5IbJbo",
@@ -43,10 +43,69 @@
       "salaryOverrides": [
         {
           "payPeriodDate": "2026-10-14",
-          "netPayOverride": 2938.1763666666666,
+          "netPayOverride": 2938.89,
           "reason": "Salary amended (this payment only)",
-          "id": "7pPLub5M",
+          "bonusGrossAmount": 1699.5,
+          "id": "POgSLXpy",
           "personId": "vh5IbJbo"
+        }
+      ],
+      "savingsEntries": []
+    },
+    {
+      "id": "tue8sV-d",
+      "name": "Adam",
+      "color": "#7c6fe0",
+      "salaryHistory": [
+        {
+          "grossAnnual": 62400,
+          "taxCode": "1106L",
+          "studentLoanPlan": "none",
+          "payFrequency": "monthly",
+          "deductions": [
+            {
+              "id": "NiA9DO",
+              "name": "Pension",
+              "type": "relief_at_source",
+              "amountType": "percent",
+              "amount": 3.5,
+              "percentBasis": "qualifying_earnings"
+            }
+          ],
+          "employerPensionPercent": 5,
+          "effectiveFrom": "2026-08-28",
+          "id": "Hvy2vu3y",
+          "personId": "tue8sV-d"
+        },
+        {
+          "grossAnnual": 62400,
+          "taxCode": "1106L",
+          "studentLoanPlan": "none",
+          "payFrequency": "monthly",
+          "deductions": [
+            {
+              "id": "NiA9DO",
+              "name": "Pension",
+              "type": "relief_at_source",
+              "amountType": "percent",
+              "amount": 4,
+              "percentBasis": "qualifying_earnings"
+            }
+          ],
+          "employerPensionPercent": 5,
+          "effectiveFrom": "2026-09-30",
+          "id": "-RRakbgZ",
+          "personId": "tue8sV-d"
+        }
+      ],
+      "salaryOverrides": [
+        {
+          "payPeriodDate": "2026-09-30",
+          "netPayOverride": 3717.63,
+          "reason": "Salary amended (this payment only)",
+          "bonusGrossAmount": 3062.4,
+          "id": "T5WZSVSq",
+          "personId": "tue8sV-d"
         }
       ],
       "savingsEntries": []
@@ -639,6 +698,62 @@
       "ownerId": "vh5IbJbo",
       "id": "jDYHP1eO",
       "active": true
+    },
+    {
+      "name": "Gym",
+      "amount": 37,
+      "categoryId": "category-seed-fitness",
+      "paymentMethod": "direct_debit",
+      "frequency": "monthly",
+      "anchorDate": "2026-09-01",
+      "location": "personal",
+      "payee": "",
+      "payeeSharePercent": 100,
+      "ownerId": "tue8sV-d",
+      "id": "MXVm7EDk",
+      "active": true
+    },
+    {
+      "name": "GiffGaff",
+      "amount": 10,
+      "categoryId": "category-seed-phone",
+      "paymentMethod": "direct_debit",
+      "frequency": "monthly",
+      "anchorDate": "2026-09-07",
+      "location": "personal",
+      "payee": "",
+      "payeeSharePercent": 100,
+      "ownerId": "tue8sV-d",
+      "id": "tXjLilK6",
+      "active": true
+    },
+    {
+      "name": "Monzo Perks",
+      "amount": 7,
+      "categoryId": "hiwNGK2z",
+      "paymentMethod": "direct_debit",
+      "frequency": "monthly",
+      "anchorDate": "2026-09-16",
+      "location": "personal",
+      "payee": "",
+      "payeeSharePercent": 100,
+      "ownerId": "tue8sV-d",
+      "id": "xIHusKKt",
+      "active": true
+    },
+    {
+      "name": "Windscribe",
+      "amount": 7,
+      "categoryId": "category-seed-internet",
+      "paymentMethod": "direct_debit",
+      "frequency": "monthly",
+      "anchorDate": "2026-09-19",
+      "location": "personal",
+      "payee": "",
+      "payeeSharePercent": 100,
+      "ownerId": "tue8sV-d",
+      "id": "CZR6jPiy",
+      "active": true
     }
   ],
   "loans": [
@@ -661,46 +776,48 @@
     },
     {
       "name": "Home Improvements",
-      "principal": 17412,
+      "principal": 15000,
       "monthlyPayment": 290.2,
       "termMonths": 60,
-      "startDate": "2025-03-14",
+      "apr": 6.2,
+      "startDate": "2025-03-12",
+      "advanceDate": "2025-02-07",
       "lender": "Santander",
-      "categoryId": "category-seed-loan",
+      "categoryId": "category-seed-home",
       "location": "personal",
       "ownerId": "vh5IbJbo",
       "payee": "",
       "payeeSharePercent": 100,
       "active": true,
-      "id": "1kpHZZM1",
-      "overpayments": [],
+      "id": "Pnhr__HF",
+      "overpayments": [
+        {
+          "id": "2-Ue7gX7",
+          "date": "2025-02-12",
+          "amount": 40,
+          "note": "Overpayment",
+          "recastMode": "reduce_term"
+        }
+      ],
       "statementCalibrationLines": [
         {
-          "date": "2025-03-07",
-          "capital": 214.82,
-          "interest": 75.38
+          "date": "2025-05-07",
+          "capital": 217.19,
+          "interest": 73.01
         },
         {
-          "date": "2025-03-07",
-          "capital": 214.82,
-          "interest": 75.38
+          "date": "2025-06-07",
+          "capital": 218.28,
+          "interest": 71.92
         },
         {
-          "date": "2025-04-04",
-          "capital": 214.82,
-          "interest": 75.38
-        },
-        {
-          "date": "2025-04-04",
-          "capital": 40,
-          "interest": 0
-        },
-        {
-          "date": "2025-04-05",
-          "capital": 214.9,
-          "interest": 75.3
+          "date": "2025-07-07",
+          "capital": 219.37,
+          "interest": 70.83
         }
-      ]
+      ],
+      "interestConventionId": "flat_monthly",
+      "calibratedMonthlyRate": 0.004865250165516252
     }
   ],
   "creditCards": [
@@ -727,7 +844,7 @@
       "color": "#14b8a6",
       "interestRatePercent": 0,
       "currentBalance": 0,
-      "balanceAsOfDate": "2026-08-24",
+      "balanceAsOfDate": "2026-08-17",
       "minimumPayment": {
         "type": "percent_of_balance",
         "percent": 100
@@ -804,7 +921,7 @@
       "direction": "out",
       "categoryId": "category-seed-cash",
       "paymentMethod": "cash",
-      "status": "pending",
+      "status": "cleared",
       "type": "expense",
       "location": "personal",
       "ownerId": "vh5IbJbo",
@@ -830,7 +947,7 @@
       "direction": "out",
       "categoryId": "category-seed-baby",
       "paymentMethod": "cash",
-      "status": "pending",
+      "status": "cleared",
       "type": "expense",
       "location": "personal",
       "ownerId": "vh5IbJbo",
@@ -843,7 +960,7 @@
       "direction": "in",
       "categoryId": "category-income",
       "paymentMethod": "bank_transfer",
-      "status": "pending",
+      "status": "cleared",
       "type": "income",
       "location": "personal",
       "ownerId": "vh5IbJbo",
@@ -1001,6 +1118,148 @@
       "location": "personal",
       "ownerId": "vh5IbJbo",
       "note": "Lottery"
+    },
+    {
+      "date": "2025-02-12",
+      "amount": 40,
+      "direction": "out",
+      "categoryId": "category-seed-home",
+      "paymentMethod": "bank_transfer",
+      "status": "cleared",
+      "type": "loan_payment",
+      "location": "personal",
+      "ownerId": "vh5IbJbo",
+      "payee": "",
+      "payeeSharePercent": 100,
+      "sourceType": "loan_overpayment",
+      "sourceId": "2-Ue7gX7",
+      "note": "Overpayment",
+      "id": "JAPtgml7"
+    },
+    {
+      "date": "2026-08-28",
+      "amount": 171.93,
+      "direction": "out",
+      "categoryId": "category-seed-car",
+      "paymentMethod": "direct_debit",
+      "status": "cleared",
+      "type": "loan_payment",
+      "location": "personal",
+      "ownerId": "vh5IbJbo",
+      "payee": "",
+      "payeeSharePercent": 100,
+      "sourceType": "loan",
+      "sourceId": "tr1nHhZv",
+      "note": "Car Finance",
+      "id": "xwAVbpq5"
+    },
+    {
+      "id": "SjagFF3z",
+      "date": "2026-08-29",
+      "amount": 24,
+      "direction": "out",
+      "categoryId": "category-seed-health",
+      "paymentMethod": "card",
+      "status": "cleared",
+      "type": "expense",
+      "location": "personal",
+      "ownerId": "tue8sV-d",
+      "note": "Haircut"
+    },
+    {
+      "id": "5BmOXihO",
+      "date": "2026-08-31",
+      "amount": 200,
+      "direction": "in",
+      "categoryId": "category-credit-card",
+      "paymentMethod": "bank_transfer",
+      "status": "cleared",
+      "type": "income",
+      "location": "personal",
+      "ownerId": "tue8sV-d",
+      "personId": "tue8sV-d",
+      "note": "Transfer from Savings"
+    },
+    {
+      "date": "2026-09-01",
+      "amount": 17.06,
+      "direction": "out",
+      "categoryId": "category-seed-car",
+      "paymentMethod": "direct_debit",
+      "status": "cleared",
+      "type": "bill_payment",
+      "location": "personal",
+      "ownerId": "vh5IbJbo",
+      "payee": "",
+      "payeeSharePercent": 100,
+      "sourceType": "recurring_template",
+      "sourceId": "QekMH2ZE",
+      "note": "DVLA",
+      "id": "U4enDNxQ"
+    },
+    {
+      "date": "2026-09-01",
+      "amount": 18.96,
+      "direction": "out",
+      "categoryId": "category-seed-car",
+      "paymentMethod": "direct_debit",
+      "status": "cleared",
+      "type": "bill_payment",
+      "location": "personal",
+      "ownerId": "vh5IbJbo",
+      "payee": "",
+      "payeeSharePercent": 100,
+      "sourceType": "recurring_template",
+      "sourceId": "JHpX_Paz",
+      "note": "RAC",
+      "id": "rd1WLp5w"
+    },
+    {
+      "date": "2026-09-01",
+      "amount": 75,
+      "direction": "out",
+      "categoryId": "category-seed-baby",
+      "paymentMethod": "standing_order",
+      "status": "cleared",
+      "type": "bill_payment",
+      "location": "personal",
+      "ownerId": "vh5IbJbo",
+      "payee": "",
+      "payeeSharePercent": 100,
+      "sourceType": "recurring_template",
+      "sourceId": "9s8TJ3pV",
+      "note": "Jennifer",
+      "id": "MlcyLs0R"
+    },
+    {
+      "date": "2026-09-01",
+      "amount": 37,
+      "direction": "out",
+      "categoryId": "category-seed-fitness",
+      "paymentMethod": "direct_debit",
+      "status": "cleared",
+      "type": "bill_payment",
+      "location": "personal",
+      "ownerId": "tue8sV-d",
+      "payee": "",
+      "payeeSharePercent": 100,
+      "sourceType": "recurring_template",
+      "sourceId": "MXVm7EDk",
+      "note": "Gym",
+      "id": "miNzmW5M"
+    },
+    {
+      "id": "CcO2zlC4",
+      "date": "2026-09-03",
+      "amount": 1000,
+      "direction": "out",
+      "categoryId": "category-seed-shopping",
+      "paymentMethod": "card",
+      "status": "pending",
+      "type": "expense",
+      "location": "personal",
+      "ownerId": "tue8sV-d",
+      "note": "Tesco"
     }
   ],
   "payCycles": [
@@ -1012,7 +1271,44 @@
       "paydayAdjustForNonWorkingDay": true,
       "cycleStartDayOfMonth": 14,
       "cycleStartFollowsPayday": true
+    },
+    {
+      "personId": "tue8sV-d",
+      "openingBalance": 150.74,
+      "openingBalanceDate": "2026-08-28",
+      "paydayDayOfMonth": 31,
+      "paydayAdjustForNonWorkingDay": true,
+      "cycleStartDayOfMonth": 31,
+      "cycleStartFollowsPayday": true
     }
   ],
-  "scenarios": []
+  "scenarios": [
+    {
+      "name": "Loan overpayment",
+      "includeInCumulative": true,
+      "actions": [
+        {
+          "id": "7JTP8y",
+          "type": "pay_off_loan",
+          "label": "Lump sum toward a loan/credit card",
+          "value": 1000,
+          "targets": [
+            {
+              "kind": "loan",
+              "id": "Pnhr__HF"
+            }
+          ]
+        },
+        {
+          "id": "267mA-",
+          "type": "loan_overpayment",
+          "label": "Regular extra payment on a loan/credit card",
+          "value": 100,
+          "linkedTargetKind": "loan",
+          "linkedTargetId": "Pnhr__HF"
+        }
+      ],
+      "id": "ZBVZXnx4"
+    }
+  ]
 }

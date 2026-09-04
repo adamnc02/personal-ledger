@@ -18,6 +18,7 @@ import type { Scenario, ScenarioActionType, ScenarioTargetKind, BillLocation } f
 import type { RecurringTemplate, Loan } from '../types/ledger'
 import { BILLS_CATEGORY_ID } from '../types/ledger'
 import { SplitEditor } from '../components/SplitEditor'
+import { ConfirmModal } from '../components/ConfirmModal'
 import { nanoid } from 'nanoid'
 
 const ACTION_LABELS: Record<ScenarioActionType, string> = {
@@ -34,9 +35,13 @@ const ACTION_LABELS: Record<ScenarioActionType, string> = {
 
 const NEEDS_VALUE: ScenarioActionType[] = ['sell_asset', 'pay_off_loan', 'new_bill', 'loan_overpayment', 'salary_change', 'savings_lump_sum', 'purchase']
 const NEEDS_SPLIT: ScenarioActionType[] = ['new_bill', 'new_finance_agreement']
-// The only action type anchored to a real calendar date — see
-// lib/purchaseImpact.ts for why a purchase needs one and nothing else does.
+// The only action type anchored to a real calendar date via purchaseDate
+// — see lib/purchaseImpact.ts for why a purchase needs one and nothing
+// else does. pay_off_loan/loan_overpayment get their OWN date field
+// (action.date) below, shown only once a loan target is actually picked
+// (item d — a credit-card-only action stays dateless, per its own scope).
 const NEEDS_DATE: ScenarioActionType[] = ['purchase']
+const NEEDS_LOAN_DATE: ScenarioActionType[] = ['pay_off_loan', 'loan_overpayment']
 
 // These three action types are meaningless without a loan/credit card to
 // point at — a lump sum has nowhere to go, "exclude" has nothing to
@@ -67,6 +72,7 @@ export function Scenarios() {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [combinedOpen, setCombinedOpen] = useState(true)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [confirmingRemoveScenarioId, setConfirmingRemoveScenarioId] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'personal' | 'household'>('personal')
 
   const me = data.people.find((p) => p.id === data.primaryPersonId) ?? data.people[0]
@@ -264,7 +270,7 @@ export function Scenarios() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      removeScenario(scenario.id)
+                      setConfirmingRemoveScenarioId(scenario.id)
                     }}
                     className="text-[var(--color-ink-faint)]"
                   >
@@ -334,6 +340,25 @@ export function Scenarios() {
           </p>
         )}
       </div>
+
+      {confirmingRemoveScenarioId &&
+        (() => {
+          const target = data.scenarios.find((s) => s.id === confirmingRemoveScenarioId)
+          if (!target) return null
+          return (
+            <ConfirmModal
+              title={`Delete "${target.name}"?`}
+              description="This can't be undone."
+              confirmLabel="Delete"
+              tone="danger"
+              onConfirm={() => {
+                removeScenario(target.id)
+                setConfirmingRemoveScenarioId(null)
+              }}
+              onCancel={() => setConfirmingRemoveScenarioId(null)}
+            />
+          )
+        })()}
     </div>
   )
 }
@@ -568,9 +593,9 @@ function ImpactSummary({
           )}
 
           {li.kind === 'overpayment' && (
-            <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
-              <span>Extra per month</span>
-              <span className="font-mono">£{formatCurrency(li.overpaymentPerMonth)}</span>
+            <div className="flex justify-between text-xs mt-1" style={{ color: 'var(--color-negative)' }}>
+              <span>Impact on monthly cash</span>
+              <span className="font-mono">-£{formatCurrency(li.overpaymentPerMonth)}/mo</span>
             </div>
           )}
 
@@ -580,8 +605,14 @@ function ImpactSummary({
               <span className="font-mono">{li.monthsSaved} month{li.monthsSaved === 1 ? '' : 's'}</span>
             </div>
           )}
-          {li.originalMonthlyCostForPerson !== li.newMonthlyCostForPerson && (
+          {li.newEndDate && (
             <div className="flex justify-between text-xs mt-1" style={{ color: 'var(--color-positive)' }}>
+              <span>New end date</span>
+              <span className="font-mono">{formatFullDate(li.newEndDate)}</span>
+            </div>
+          )}
+          {li.originalMonthlyCostForPerson !== li.newMonthlyCostForPerson && (
+            <div className="flex justify-between text-xs mt-1" style={{ color: li.newMonthlyCostForPerson < li.originalMonthlyCostForPerson ? 'var(--color-positive)' : 'var(--color-negative)' }}>
               <span>{viewerId ? 'Your payment' : 'Household payment'}</span>
               <span className="font-mono">
                 £{formatCurrency(li.originalMonthlyCostForPerson)} → £{formatCurrency(li.newMonthlyCostForPerson)}/mo
@@ -594,38 +625,56 @@ function ImpactSummary({
         </div>
       ))}
 
-      <div className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
-        <p className="text-sm font-medium text-[var(--color-ink)] mb-2">Impact on available cash</p>
-        <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
-          <span>Available now (per month)</span>
-          <span className="font-mono">£{formatCurrency(impact.monthlyAvailableBefore)}</span>
-        </div>
-        <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
-          <span>Available after (per month)</span>
-          <span className="font-mono">£{formatCurrency(impact.monthlyAvailableAfter)}</span>
-        </div>
-        {impact.monthlyImpact !== 0 && (
-          <div className="flex justify-between text-xs mt-1" style={{ color: impact.monthlyImpact > 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
-            <span>Change</span>
-            <span className="font-mono">
-              {impact.monthlyImpact > 0 ? '+' : '-'}£{formatCurrency(Math.abs(impact.monthlyImpact))}/mo
-            </span>
-          </div>
-        )}
+      {/* BUGFIX (Adam-reported, 2026-09 session — "I still see the bottom
+          Available impact on cash even though it is zero, this should
+          not show if the value is 0") — the whole card now only renders
+          when there's genuinely something to report (a real monthly
+          change, a real one-off change, or both); previously it always
+          rendered with at least the "One-off cash impact £0.00" row
+          showing regardless. The one-off row itself is separately gated
+          the same way, so a scenario with a real monthly impact but no
+          leftover one-off cash doesn't show a pointless "£0.00" line
+          underneath it either. */}
+      {(impact.monthlyImpact !== 0 || impact.oneOffCashImpact !== 0) && (
+        <div className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
+          <p className="text-sm font-medium text-[var(--color-ink)] mb-2">Impact on available cash</p>
+          {impact.monthlyImpact !== 0 && (
+            <>
+              <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
+                <span>Available now (per month)</span>
+                <span className="font-mono">£{formatCurrency(impact.monthlyAvailableBefore)}</span>
+              </div>
+              <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
+                <span>Available after (per month)</span>
+                <span className="font-mono">£{formatCurrency(impact.monthlyAvailableAfter)}</span>
+              </div>
+              <div className="flex justify-between text-xs mt-1" style={{ color: impact.monthlyImpact > 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
+                <span>Change</span>
+                <span className="font-mono">
+                  {impact.monthlyImpact > 0 ? '+' : '-'}£{formatCurrency(Math.abs(impact.monthlyImpact))}/mo
+                </span>
+              </div>
+            </>
+          )}
 
-        <div className="h-px my-2" style={{ background: 'var(--color-track)' }} />
+          {impact.monthlyImpact !== 0 && impact.oneOffCashImpact !== 0 && <div className="h-px my-2" style={{ background: 'var(--color-track)' }} />}
 
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-[var(--color-ink-muted)]">One-off cash impact</span>
-          <span className="font-mono font-semibold" style={{ color: impact.oneOffCashImpact >= 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
-            {impact.oneOffCashImpact >= 0 ? '+' : '-'}£{formatCurrency(Math.abs(impact.oneOffCashImpact))}
-          </span>
+          {impact.oneOffCashImpact !== 0 && (
+            <>
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-[var(--color-ink-muted)]">One-off cash impact</span>
+                <span className="font-mono font-semibold" style={{ color: impact.oneOffCashImpact >= 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
+                  {impact.oneOffCashImpact >= 0 ? '+' : '-'}£{formatCurrency(Math.abs(impact.oneOffCashImpact))}
+                </span>
+              </div>
+              <p className="text-[11px] text-[var(--color-ink-faint)] mt-1 leading-relaxed">
+                A single payment, not a monthly change, so it's kept separate from the figures above — whatever's left
+                after every linked loan target and savings goal in this scenario has taken what it needs.
+              </p>
+            </>
+          )}
         </div>
-        <p className="text-[11px] text-[var(--color-ink-faint)] mt-1 leading-relaxed">
-          A single payment, not a monthly change, so it's kept separate from the figures above — whatever's left
-          after every linked loan target and savings goal in this scenario has taken what it needs.
-        </p>
-      </div>
+      )}
     </div>
   )
 }
@@ -674,6 +723,17 @@ function ScenarioForm({
   // it would save as a silently inert action, which is exactly the kind
   // of "saved but does nothing" state this app has been bitten by before.
   const purchasesComplete = actions.every((a) => a.type !== 'purchase' || (Boolean(a.purchaseDate) && a.value > 0))
+  // A pay_off_loan/loan_overpayment action with a LOAN target needs a
+  // date before the real amortisation engine can place it in the
+  // schedule (item d) — a credit-card-only target stays dateless (out of
+  // this item's scope), so this only gates when a loan is actually
+  // picked. Deliberately no default (Adam's own call) — the form forces
+  // an explicit pick rather than silently assuming "today."
+  const loanActionsHaveDateWhereNeeded = actions.every((a) => {
+    if (!NEEDS_LOAN_DATE.includes(a.type)) return true
+    const hasLoanTarget = resolveTargets(a).some((t) => t.kind === 'loan')
+    return !hasLoanTarget || Boolean(a.date)
+  })
 
   function round2(n: number): number {
     return Math.round(n * 100) / 100
@@ -736,6 +796,12 @@ function ScenarioForm({
         const showDate = NEEDS_DATE.includes(action.type)
         const showPurchaseName = action.type === 'purchase'
         const showFinanceInputs = action.type === 'new_finance_agreement'
+        // item d — only relevant once a LOAN target is actually picked;
+        // a credit-card-only pay_off_loan/loan_overpayment stays exactly
+        // as it was before this item (out of scope, per Adam's own call).
+        const targetsIncludeLoan = currentTargets.some((t) => t.kind === 'loan')
+        const showLoanDate = NEEDS_LOAN_DATE.includes(action.type) && targetsIncludeLoan
+        const showRecastToggle = action.type === 'pay_off_loan' && targetsIncludeLoan
 
         function updateAction(patch: Partial<Scenario['actions'][number]>) {
           setActions((prev) => prev.map((a, idx) => (idx === i ? { ...a, ...patch } : a)))
@@ -808,6 +874,40 @@ function ScenarioForm({
             {showDate && (!action.purchaseDate || !(action.value > 0)) && (
               <p className="col-span-2 text-[11px]" style={{ color: 'var(--color-negative)' }}>
                 A purchase needs a date and a cost before its effect on your balance can be worked out.
+              </p>
+            )}
+
+            {showLoanDate && (
+              <label className="flex flex-col gap-0.5">
+                <span className="text-[10px] uppercase tracking-wide text-[var(--color-ink-faint)]">
+                  {action.type === 'pay_off_loan' ? 'When it lands' : 'Starts'}
+                </span>
+                <input
+                  type="date"
+                  value={action.date ?? ''}
+                  onChange={(e) => updateAction({ date: e.target.value })}
+                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                />
+              </label>
+            )}
+
+            {showRecastToggle && (
+              <label className="flex flex-col gap-0.5">
+                <span className="text-[10px] uppercase tracking-wide text-[var(--color-ink-faint)]">Then</span>
+                <select
+                  value={action.recastMode ?? 'reduce_term'}
+                  onChange={(e) => updateAction({ recastMode: e.target.value as 'reduce_term' | 'reduce_payment' })}
+                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                >
+                  <option value="reduce_term">Finish sooner (keep the payment)</option>
+                  <option value="reduce_payment">Lower the payment (keep the term)</option>
+                </select>
+              </label>
+            )}
+
+            {showLoanDate && !action.date && (
+              <p className="col-span-2 text-[11px]" style={{ color: 'var(--color-negative)' }}>
+                {action.type === 'pay_off_loan' ? 'When does this lump sum actually land?' : 'When does this extra payment start?'}
               </p>
             )}
 
@@ -1098,7 +1198,7 @@ function ScenarioForm({
         </button>
       </div>
       <button
-        disabled={!name.trim() || actions.length === 0 || !actionsAllLinkedWhereRequired || !purchasesComplete}
+        disabled={!name.trim() || actions.length === 0 || !actionsAllLinkedWhereRequired || !purchasesComplete || !loanActionsHaveDateWhereNeeded}
         onClick={() => {
           onSave({
             name: name.trim(),

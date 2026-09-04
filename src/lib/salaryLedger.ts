@@ -52,7 +52,35 @@ export function findApplicableSnapshot(person: Person, date: string): SalarySnap
       if (byDate !== 0) return byDate
       return b.index - a.index // tie: prefer the one added later (a more recent edit)
     })
-  return applicable[0]?.s ?? null
+  const resolved = applicable[0]?.s ?? null
+  // If the snapshot that would otherwise govern `date` has an end date,
+  // and `date` falls after it, nothing governs this period — this is
+  // exactly the "no salary payments generate after [end date]" behaviour
+  // the Wallet page's end-date field promises. Only the RESOLVED
+  // snapshot's own endDate matters here: if a later snapshot exists
+  // covering `date`, it already won the sort above and its own (likely
+  // unset) endDate is what applies instead, correctly ignoring the
+  // earlier snapshot's end.
+  if (resolved?.endDate && date > resolved.endDate) return null
+  return resolved
+}
+
+/**
+ * The most recent snapshot by effectiveFrom, regardless of endDate —
+ * deliberately NOT the same lookup as findApplicableSnapshot, which
+ * excludes a snapshot once its own endDate has passed. The Wallet page's
+ * end-date field needs to find and edit that snapshot even once it's
+ * ended (e.g. to push the date back out, or clear it entirely) —
+ * findApplicableSnapshot(person, today) would return null in exactly
+ * that case, since "no longer governs today" is precisely what it just
+ * got told to mean. Returns null only when the person has no salary
+ * history at all yet.
+ */
+export function latestSalarySnapshot(person: Person): SalarySnapshot | null {
+  return person.salaryHistory.reduce<SalarySnapshot | null>(
+    (latest, s) => (!latest || s.effectiveFrom >= latest.effectiveFrom ? s : latest),
+    null,
+  )
 }
 
 function snapshotToSalaryInput(snapshot: SalarySnapshot): SalaryInput {
@@ -108,6 +136,16 @@ export function computeSnapshotNetPayForPeriod(person: Person, payPeriodDate: st
  * that date) — a genuinely unanswerable case, not a zero.
  */
 export function computeNetPayForPeriod(person: Person, payPeriodDate: string): number | null {
+  // Gate on the underlying snapshot FIRST, even for a manual override —
+  // findApplicableSnapshot already returns null for a period past the
+  // governing snapshot's endDate (see its own comment), and a manual
+  // override or an attached bonus shouldn't be able to resurrect a
+  // payment for a period the end date says shouldn't happen. This only
+  // affects periods created before the end date was set and now fall
+  // after it; it never touches an already-materialized/cleared
+  // Transaction, which doesn't go through this function again.
+  if (!findApplicableSnapshot(person, payPeriodDate)) return null
+
   const override = person.salaryOverrides.find((o) => o.payPeriodDate === payPeriodDate)
 
   // A BONUS override is RECOMPUTED here rather than read back from its
@@ -131,6 +169,26 @@ export function computeNetPayForPeriod(person: Person, payPeriodDate: string): n
   if (override) return round2(override.netPayOverride)
 
   return computeSnapshotNetPayForPeriod(person, payPeriodDate)
+}
+
+/**
+ * When a person's ENTIRE salary is deleted (not just an end date — see
+ * SalaryEndDateField/Wallet.tsx for that, deliberately non-destructive,
+ * case), already-CLEARED 'salary' transactions must not retroactively
+ * look broken, or keep being chased forever by autoClear.ts's
+ * reconcileSalaryTransactions against a person who no longer has any
+ * salary history to compute against. Confirmed direction: convert them
+ * into standalone 'income' transactions — same date/amount/note,
+ * silently, in the background — so deleting the salary record never
+ * ripples into already-happened history. PENDING 'salary' transactions
+ * are deliberately left alone: they simply stop being regenerated
+ * (autoClearDuePayments's materialization step produces nothing new once
+ * salaryHistory is empty, since computeNetPayForPeriod has nothing left
+ * to compute against), and any already-stored pending one is harmless to
+ * leave as-is since it hasn't touched the balance yet.
+ */
+export function convertClearedSalaryToStandaloneIncome(transactions: Transaction[], personId: string): Transaction[] {
+  return transactions.map((t) => (t.type === 'salary' && t.personId === personId && t.status === 'cleared' ? { ...t, type: 'income' } : t))
 }
 
 /** Generates pending 'salary' transactions for each resolved payday in the range. Skips any period with no applicable snapshot rather than emitting a zero-amount transaction. */

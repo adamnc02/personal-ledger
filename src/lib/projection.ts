@@ -13,9 +13,12 @@ import { generateTransactionsForTemplate } from './schedule'
 import { generateLoanPaymentTransactions } from './ledgerLoans'
 import { generateMinimumPaymentTransactions } from './creditCards'
 import { generateSalaryTransactions } from './salaryLedger'
+import { generatePensionTransactions } from './pensionLedger'
 import { generateSavingsContributions } from './savingsLedger'
+import { generateSavingsDepositTransactions, generateSavingsInterestTransactions, generateSavingsWithdrawalTransactions } from './savingsPotLedger'
+import { generatePotDepositTransactions } from './potLedger'
 import { generateJointContributionTransactions } from './jointLedger'
-import { cycleBoundsForDate } from './payCycle'
+import { resolveCycleBounds } from './pensionLedger'
 import { isLedgerTransaction, signedAmount } from './runningBalance'
 import type { AppDataV2, PayCycleConfig, Transaction } from '../types/ledger'
 
@@ -33,19 +36,19 @@ export type ProjectionHorizon = 'current_cycle' | 'three_cycles'
 export const THREE_CYCLES_AHEAD = 3
 
 /** Every cycle window inside the horizon, in order, starting with the one containing `asOfDate`. The Summary page's cycle-end grouping folds its rows against exactly these bounds, so grouping and totals can't disagree with the horizon they're drawn from. */
-export function horizonCycles(payCycle: PayCycleConfig, horizon: ProjectionHorizon, asOfDate: Date): { start: Date; end: Date }[] {
-  const cycles = [cycleBoundsForDate(asOfDate, payCycle)]
+export function horizonCycles(data: AppDataV2, personId: string, horizon: ProjectionHorizon, asOfDate: Date): { start: Date; end: Date }[] {
+  const cycles = [resolveCycleBounds(data, personId, asOfDate)]
   if (horizon === 'current_cycle') return cycles
 
   for (let i = 0; i < THREE_CYCLES_AHEAD; i++) {
-    cycles.push(cycleBoundsForDate(addDays(cycles[cycles.length - 1].end, 1), payCycle))
+    cycles.push(resolveCycleBounds(data, personId, addDays(cycles[cycles.length - 1].end, 1)))
   }
   return cycles
 }
 
 /** The end of the projection window: the current cycle's end, or the end of the last cycle in the horizon (current + THREE_CYCLES_AHEAD). */
-export function horizonRangeEnd(payCycle: PayCycleConfig, horizon: ProjectionHorizon, asOfDate: Date): Date {
-  const cycles = horizonCycles(payCycle, horizon, asOfDate)
+export function horizonRangeEnd(data: AppDataV2, personId: string, horizon: ProjectionHorizon, asOfDate: Date): Date {
+  const cycles = horizonCycles(data, personId, horizon, asOfDate)
   return cycles[cycles.length - 1].end
 }
 
@@ -82,7 +85,7 @@ export function computeProjection(
 ): ProjectionResult {
   return {
     horizon,
-    ...computeProjectionToDate(data, personId, payCycle, horizonRangeEnd(payCycle, horizon, asOfDate), asOfDate),
+    ...computeProjectionToDate(data, personId, payCycle, horizonRangeEnd(data, personId, horizon, asOfDate), asOfDate),
   }
 }
 
@@ -156,15 +159,27 @@ export function computeProjectionToDate(
   // into a real Transaction yet, would silently never appear anywhere.
   // Never generate anything before the opening balance date either, for
   // the same visibility-floor reason `stored` is filtered above.
-  const cycleStart = cycleBoundsForDate(asOfDate, payCycle).start
+  const cycleStart = resolveCycleBounds(data, personId, asOfDate).start
   const rangeStart = cycleStart > new Date(payCycle.openingBalanceDate) ? cycleStart : new Date(payCycle.openingBalanceDate)
 
   const generated: Omit<Transaction, 'id'>[] = []
   for (const template of data.recurringTemplates.filter((t) => t.location === 'personal' && t.ownerId === personId)) {
-    generated.push(...generateTransactionsForTemplate(template, rangeStart, horizonEndDate))
+    // `payCycle` is only actually consulted when `template.kind ===
+    // 'transfer' && template.followsPayday` (2026-09-04 session) — every
+    // other kind ignores the 4th argument entirely, so this is safe to
+    // pass unconditionally for every template this loop generates.
+    generated.push(...generateTransactionsForTemplate(template, rangeStart, horizonEndDate, payCycle))
   }
   for (const loan of data.loans.filter((l) => l.location === 'personal' && l.ownerId === personId && l.active)) {
-    generated.push(...generateLoanPaymentTransactions(loan, rangeStart, horizonEndDate))
+    // Filtered to 'personal' rows only, not just pre-filtered by the
+    // loan's own location — Pots backlog item (2026-09-03): a
+    // 'personal'-location loan's RECURRING OVERPAYMENT can now
+    // independently resolve to 'pot' (resolveRecurringOverpaymentSource
+    // in ledgerLoans.ts), so a single call can return a mix of locations
+    // for the same loan. Without this filter, a pot-funded overpayment
+    // row would leak into this person's personal cash balance even
+    // though it's meant to be purely internal to the pot.
+    generated.push(...generateLoanPaymentTransactions(loan, rangeStart, horizonEndDate).filter((t) => t.location === 'personal'))
   }
   for (const card of data.creditCards.filter((c) => c.ownerId === personId)) {
     // Full transaction list, not the person-scoped `stored` one: the
@@ -176,7 +191,69 @@ export function computeProjectionToDate(
   }
   if (person) {
     generated.push(...generateSalaryTransactions(person, payCycle, rangeStart, horizonEndDate))
+    for (const pension of data.pensions.filter((p) => p.personId === personId)) {
+      generated.push(...generatePensionTransactions(pension, rangeStart, horizonEndDate))
+    }
     generated.push(...generateSavingsContributions(person, payCycle, rangeStart, horizonEndDate))
+    // BUGFIX (2026-09-02, reported by Adam): recurring monthly deposits
+    // and interest were computed correctly by savingsPotLedger.ts's own
+    // functions (the Wallet info-icon modal and Home's SavingsPotsSection
+    // both call them directly), but computeProjection — the thing that
+    // actually builds the Home page's PERSONAL LEDGER list and balance —
+    // never called them at all. A hand-logged deposit/withdrawal from the
+    // Transactions page is a real stored Transaction, so it showed up
+    // fine; a recurring deposit that hasn't materialized yet never had
+    // anywhere to come from on this page. Same generator pattern as
+    // pension/salary above: interest needs the real + already-generated
+    // deposit activity to compute its balance-at-period-start correctly,
+    // same as buildSavingsPotScheduleRows already does for the ledger
+    // modal — so deposits are generated first, then passed in.
+    // Defensive rather than trusting the type here (unlike data.pensions
+    // just above, which doesn't get this treatment) — a real swept sweep
+    // of this codebase's own test fixtures (2026-09-02) turned up several
+    // using `as unknown as AppDataV2` to sidestep the type checker
+    // entirely, several of which genuinely lacked savingsPots and crashed
+    // at runtime the moment this loop was added. ledgerStorage.ts always
+    // defaults it on load, so real app state should never hit this, but
+    // an unsafe cast — test fixture or otherwise — shouldn't be able to
+    // crash the whole projection over one missing array.
+    for (const pot of (data.savingsPots ?? []).filter((p) => p.personId === personId && p.active)) {
+      // Legacy field-based deposits still get pushed into `generated`
+      // directly (unchanged behaviour). NEW transfer-template-based
+      // deposits/withdrawals are deliberately NOT pushed into `generated`
+      // a second time here — the top-level `location === 'personal'`
+      // loop above already generated that exact occurrence once (every
+      // transfer template carries `location: 'personal'`), so doing it
+      // again here would double-count its effect on this person's cash
+      // balance. They're still folded into `realActivity` below purely
+      // so generateSavingsInterestTransactions sees them and compounds
+      // correctly against money that hasn't materialized into a stored
+      // Transaction yet — interest itself doesn't touch personal cash
+      // (see TransactionType's own comment), so THAT part is safe to
+      // push into `generated` unconditionally, same as before.
+      const legacyDeposits = generateSavingsDepositTransactions(pot, rangeStart, horizonEndDate)
+      generated.push(...legacyDeposits)
+      const transferDeposits = generateSavingsDepositTransactions(pot, rangeStart, horizonEndDate, data.recurringTemplates, payCycle).filter((t) => t.type === 'transfer')
+      const transferWithdrawals = generateSavingsWithdrawalTransactions(pot, rangeStart, horizonEndDate, data.recurringTemplates, payCycle)
+      const realActivity = [
+        ...data.transactions,
+        ...legacyDeposits.map((d, i) => ({ ...d, id: `generated:dep-preview:${i}` })),
+        ...transferDeposits.map((d, i) => ({ ...d, id: `generated:xfer-dep-preview:${i}` })),
+        ...transferWithdrawals.map((d, i) => ({ ...d, id: `generated:xfer-wd-preview:${i}` })),
+      ]
+      generated.push(...generateSavingsInterestTransactions(pot, realActivity, rangeStart, horizonEndDate))
+    }
+    // Pots backlog item (2026-09-03) — a pot DEPOSIT is the one pot-
+    // related thing that touches personal cash (see potLedger.ts's file
+    // header), so it belongs in this person's own projection exactly
+    // like a savings-pot deposit above. A pot-funded bill/loan PAYMENT
+    // deliberately does NOT get generated here — it's purely internal to
+    // the pot (potLedger.ts's own buildPotScheduleRows/potBalanceAsOf is
+    // where that lives), the same way generateSavingsInterestTransactions
+    // is deliberately never called in this file either.
+    for (const pot of (data.pots ?? []).filter((p) => p.personId === personId && p.active)) {
+      generated.push(...generatePotDepositTransactions(pot, rangeStart, horizonEndDate))
+    }
   }
   // This person's share of every joint bill/loan — the piece that used to
   // be missing entirely (doc's flagged Joint/Household gap). Not scoped

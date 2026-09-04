@@ -9,7 +9,10 @@
 
 import { addMonths, addQuarters, addWeeks, addYears } from 'date-fns'
 import { nanoid } from 'nanoid'
-import type { RecurringTemplate, Transaction } from '../types/ledger'
+import type { PayCycleConfig, RecurringTemplate, Transaction } from '../types/ledger'
+import { upcomingPaydays } from './salaryLedger'
+import { nextCycleStartAfter } from './payCycle'
+import { categoryForTransfer } from './transferLedger'
 
 function daysInMonth(year: number, monthIndex0: number): number {
   return new Date(year, monthIndex0 + 1, 0).getDate()
@@ -143,37 +146,83 @@ function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd
   return results
 }
 
+/**
+ * `payCycle` is only used for a `kind: 'transfer'` template with
+ * `followsPayday: true` OR `followsCycleStart: true` — every other kind
+ * ignores it entirely, so existing callers that don't have one to hand
+ * (or are generating for a pot/joint account rather than the primary
+ * person) can keep omitting it. See TransferLocation/RecurringTemplate.
+ * followsPayday/followsCycleStart in types/ledger.ts for the full
+ * reasoning. If a template somehow has both set, followsPayday wins —
+ * the two are meant to be mutually exclusive (enforced by the UI), this
+ * is just a defined tie-break rather than an unreachable branch.
+ */
 export function generateTransactionsForTemplate(
   template: RecurringTemplate,
   rangeStart: Date,
   rangeEnd: Date,
+  payCycle?: PayCycleConfig,
 ): Omit<Transaction, 'id'>[] {
   const isTransactionKind = template.kind === 'transaction'
+  const isTransferKind = template.kind === 'transfer'
   const isIncome = isTransactionKind && template.recurringTransactionType === 'income'
+  const fromLoc = isTransferKind ? template.transferFrom : undefined
+  const toLoc = isTransferKind ? template.transferTo : undefined
 
-  return walkOccurrences(template, rangeStart, rangeEnd).map((occ) => ({
-    date: occ.date,
-    amount: occ.amount,
-    direction: isTransactionKind ? (isIncome ? 'in' : 'out') : 'out',
-    categoryId: template.categoryId,
-    paymentMethod: template.paymentMethod,
-    status: 'pending',
-    type: isTransactionKind ? template.recurringTransactionType! : 'bill_payment',
-    location: template.location,
-    ownerId: template.ownerId,
-    payee: template.payee,
-    payeeSharePercent: template.payeeSharePercent,
-    sourceType: 'recurring_template',
-    sourceId: template.id,
-    // The specific bill's/recurring transaction's own name — without
-    // this, a row falls back to its category's name for display, which
-    // duplicates the category group header when viewed grouped by
-    // category (e.g. a "TV" category group whose own rows also just say
-    // "TV" instead of "TV License").
-    note: template.name,
-    personId: isIncome ? template.personId : undefined,
-  }))
+  return walkOccurrences(template, rangeStart, rangeEnd).map((occ) => {
+    // A follows-payday transfer resolves its date against the actual
+    // payday on/after the naturally-walked date, rather than using that
+    // date directly — this is what lets a transfer "land on payday" even
+    // when payday itself drifts (weekends/bank holidays, non-monthly pay
+    // frequencies). Falls back to the natural date if no payCycle was
+    // supplied. A follows-cycle-start transfer does the same against the
+    // person's budgeting-cycle boundary instead (Salary Sorter session,
+    // 2026-09) — for someone whose cycle doesn't track payday
+    // (PayCycleConfig.cycleStartFollowsPayday can differ from payday
+    // entirely). followsPayday takes precedence if both are somehow set.
+    const date =
+      isTransferKind && template.followsPayday && payCycle
+        ? toIso(upcomingPaydays(payCycle, new Date(occ.date), 1)[0] ?? new Date(occ.date))
+        : isTransferKind && template.followsCycleStart && payCycle
+          ? toIso(nextCycleStartAfter(new Date(occ.date), payCycle))
+          : occ.date
+
+    return {
+      date,
+      amount: occ.amount,
+      direction: isTransferKind ? (fromLoc?.type === 'personal' ? 'out' : 'in') : isTransactionKind ? (isIncome ? 'in' : 'out') : 'out',
+      categoryId: isTransferKind ? categoryForTransfer(fromLoc, toLoc) : template.categoryId,
+      paymentMethod: template.paymentMethod,
+      status: 'pending',
+      type: isTransferKind ? 'transfer' : isTransactionKind ? template.recurringTransactionType! : 'bill_payment',
+      location: template.location,
+      ownerId: template.ownerId,
+      payee: template.payee,
+      payeeSharePercent: template.payeeSharePercent,
+      // Pots backlog item (2026-09-03) — carried straight through only
+      // when this template is actually pot-located (a pot-funded bill),
+      // OR (2026-09-04) when this is a transfer with a pot on either
+      // end — same convention as creditCardId/savingsPotId being set
+      // only on the transaction types that need them.
+      potId: isTransferKind ? (fromLoc?.type === 'pot' ? fromLoc.potId : toLoc?.type === 'pot' ? toLoc.potId : undefined) : template.location === 'pot' ? template.potId : undefined,
+      savingsPotId: isTransferKind ? (fromLoc?.type === 'savings' ? fromLoc.savingsPotId : toLoc?.type === 'savings' ? toLoc.savingsPotId : undefined) : undefined,
+      fromLocation: fromLoc,
+      toLocation: toLoc,
+      followsPayday: isTransferKind ? template.followsPayday : undefined,
+      followsCycleStart: isTransferKind ? template.followsCycleStart : undefined,
+      sourceType: 'recurring_template',
+      sourceId: template.id,
+      // The specific bill's/recurring transaction's/transfer's own name —
+      // without this, a row falls back to its category's name for
+      // display, which duplicates the category group header when viewed
+      // grouped by category (e.g. a "TV" category group whose own rows
+      // also just say "TV" instead of "TV License").
+      note: template.name,
+      personId: isIncome ? template.personId : undefined,
+    }
+  })
 }
+
 
 /**
  * Every upcoming occurrence for a 'transaction'-kind template, WITH its
@@ -187,6 +236,55 @@ export function generateTransactionsForTemplate(
  */
 export function templateOccurrencePreviews(template: RecurringTemplate, asOfDate: Date, count: number): RawOccurrence[] {
   return walkOccurrences(template, asOfDate, addYears(asOfDate, 15)).slice(0, count)
+}
+
+/**
+ * Every calendar date the template's frequency would land on in
+ * [rangeStart, rangeEnd] — deliberately IGNORING occurrenceOverrides
+ * entirely, unlike walkOccurrences/generateTransactionsForTemplate. This
+ * is what the pause picker itself needs to show as candidates: a
+ * currently-paused date has to appear in the list so it can be unchecked,
+ * which the normal (pause-aware) walk would never surface — a paused
+ * date isn't a real occurrence any more, generator-side. Same shape and
+ * purpose as savingsPotLedger.ts's scheduledDepositDates (Phase 4 —
+ * generalizing the SavingsPot-only pause picker to Bills/Pensions too).
+ */
+export function scheduledTemplateDates(template: RecurringTemplate, rangeStart: Date, rangeEnd: Date): string[] {
+  if (rangeEnd < rangeStart) return []
+  const anchor = new Date(template.anchorDate)
+  const anchorDay = anchor.getDate()
+  let cursor = anchor
+  let iterations = 0
+  while (cursor < rangeStart && iterations < MAX_OCCURRENCES) {
+    cursor = nextOccurrence(cursor, template, anchorDay)
+    iterations++
+  }
+  const results: string[] = []
+  while (cursor <= rangeEnd && iterations < MAX_OCCURRENCES) {
+    results.push(toIso(cursor))
+    cursor = nextOccurrence(cursor, template, anchorDay)
+    iterations++
+  }
+  return results
+}
+
+/**
+ * Given the FULL set of dates the person now wants paused (from a
+ * multi-select checklist drawn from scheduledTemplateDates), reconciles
+ * occurrenceOverrides to match — a newly-checked date gets a
+ * {originalDate, deleted: true} entry, an unchecked one has its entry
+ * removed, anything already correct is left alone. Overrides outside the
+ * shown window, or carrying a date/amount override rather than a pure
+ * pause marker, are untouched. Identical logic to
+ * savingsPotLedger.ts's setPausedDeposits — see that function's comment
+ * for the full reasoning (Adam's explicit no-separate-resume-flow call).
+ */
+export function setPausedTemplateOccurrences(template: RecurringTemplate, windowDates: string[], pausedDates: string[]): Pick<RecurringTemplate, 'occurrenceOverrides'> {
+  const windowSet = new Set(windowDates)
+  const pausedSet = new Set(pausedDates)
+  const untouched = (template.occurrenceOverrides ?? []).filter((o) => !windowSet.has(o.originalDate) || o.date !== undefined || o.amount !== undefined)
+  const newPauses = [...pausedSet].map((originalDate) => ({ originalDate, deleted: true }))
+  return { occurrenceOverrides: [...untouched, ...newPauses] }
 }
 
 /**
