@@ -69,9 +69,17 @@ export function LocationEditor({
   const showLocationField = canBeJoint || canBePot
   const showOwnerField = (location === 'personal' || location === 'pot') && people.length > 1
   const showSplitEditor = location === 'joint' && canBeJoint
-  const showPotField = location === 'pot' && canBePot
 
-  if (!showLocationField && !showOwnerField && !showSplitEditor && !showPotField) return null
+  if (!showLocationField && !showOwnerField && !showSplitEditor) return null
+
+  // Batch 3 (2026-09-04 UAT): "Location" and "Pot" used to be two
+  // separate selects (pick Pot, then a second dropdown appears to pick
+  // WHICH pot) — flattened into one flat list, matching the picker-first
+  // creation flow's own already-flat design (Personal, Joint, then each
+  // pot individually by name — lib/pickerFirst.ts's shouldOfferLocationPicker
+  // comment/App_Dev.md's "Location is one flat list" decision). Picking a
+  // pot by name sets location:'pot' + potId in one tap, no second step.
+  const flatValue = location === 'pot' ? `pot:${potId && ownerPots.some((p) => p.id === potId) ? potId : ownerPots[0]?.id ?? ''}` : location
 
   return (
     <div className="grid grid-cols-2 gap-3">
@@ -79,12 +87,12 @@ export function LocationEditor({
         <label className="flex flex-col gap-1">
           <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
           <select
-            value={location}
+            value={flatValue}
             onChange={(e) => {
-              const next = e.target.value as BillLocation
-              if (next === 'joint') onChange({ location: next, payee: payee || people[0]?.id || '', potId: undefined })
-              else if (next === 'pot') onChange({ location: next, ownerId: ownerId || people[0]?.id || '', potId: potId && ownerPots.some((p) => p.id === potId) ? potId : ownerPots[0]?.id || '' })
-              else onChange({ location: next, ownerId: ownerId || people[0]?.id || '', potId: undefined })
+              const raw = e.target.value
+              if (raw === 'joint') onChange({ location: 'joint', payee: payee || people[0]?.id || '', potId: undefined })
+              else if (raw.startsWith('pot:')) onChange({ location: 'pot', ownerId: ownerId || people[0]?.id || '', potId: raw.slice('pot:'.length) })
+              else onChange({ location: 'personal', ownerId: ownerId || people[0]?.id || '', potId: undefined })
             }}
             className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
           >
@@ -96,11 +104,11 @@ export function LocationEditor({
                 Joint
               </option>
             )}
-            {canBePot && (
-              <option value="pot" style={{ color: '#000' }}>
-                Pot
+            {ownerPots.map((p) => (
+              <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
+                {p.name}
               </option>
-            )}
+            ))}
           </select>
         </label>
       )}
@@ -129,22 +137,6 @@ export function LocationEditor({
             className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
           >
             {people.map((p) => (
-              <option key={p.id} value={p.id} style={{ color: '#000' }}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {showPotField && (
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-[var(--color-ink-muted)]">Pot</span>
-          <select
-            value={potId && ownerPots.some((p) => p.id === potId) ? potId : ownerPots[0]?.id ?? ''}
-            onChange={(e) => onChange({ location, potId: e.target.value })}
-            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-          >
-            {ownerPots.map((p) => (
               <option key={p.id} value={p.id} style={{ color: '#000' }}>
                 {p.name}
               </option>

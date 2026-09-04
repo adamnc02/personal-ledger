@@ -404,6 +404,26 @@ function BillRow({
                 <span>
                   {template.location === 'joint' ? 'Joint' : template.location === 'pot' ? 'Personal' : 'Personal'} · {FREQUENCY_LABELS[template.frequency]} · {PAYMENT_METHOD_LABELS[template.paymentMethod]}
                 </span>
+                {/* Batch 3 (2026-09-04 UAT): pot bills already got a
+                    name pill — joint bills only ever had the plain
+                    "Joint" text above, no badge. Added alongside the pot
+                    pill. Deliberately NOT --color-joint (that token is
+                    #fdfdfd, a near-white BankCard background fill, not a
+                    badge accent — white-on-white would repeat the exact
+                    invisible-Cancel-button bug from Batch 2) and NOT
+                    --color-positive (already means "financially good"
+                    everywhere else in the app, e.g. deposits/income) —
+                    a neutral outlined pill instead, same border-based
+                    approach Batch 2's Cancel-button fix used, which
+                    reads against any background. */}
+                {template.location === 'joint' && (
+                  <span
+                    className="px-1.5 py-0.5 rounded-full text-[10px] font-medium shrink-0"
+                    style={{ background: 'var(--color-surface-raised)', border: '1px solid var(--color-track)', color: 'var(--color-ink-muted)' }}
+                  >
+                    Joint
+                  </span>
+                )}
                 {pot && (
                   <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium shrink-0" style={{ background: 'var(--color-coral)', color: '#fff' }}>
                     {pot.name}
