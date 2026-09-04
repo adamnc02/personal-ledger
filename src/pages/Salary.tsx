@@ -1535,6 +1535,26 @@ function PotForm({
   )
 }
 
+/** The edit half of an expanded PotRow — Batch 3 addendum (2026-09-04 UAT): styled to match SavingsPotForm's own editing card (darker --color-bg-elevated background, fields in a 2-column grid, Save/Cancel inside the card) rather than the bare live-saving Field it used to be. Only Name is editable here — opening balance/date are a one-time creation-only anchor, same "immutable anchor, not a live field" rule SavingsPot's own opening balance/date already follow (see SavingsPotForm's own bugfix comment). */
+function PotEditForm({ pot, onCancel, onSave }: { pot: Pot; onCancel: () => void; onSave: (updates: Partial<Omit<Pot, 'id' | 'personId'>>) => void }) {
+  const [name, setName] = useState(pot.name)
+  return (
+    <div className="rounded-2xl p-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Name">
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          />
+        </Field>
+      </div>
+      <FormButtonRow onCancel={onCancel} onSave={() => onSave({ name: name.trim() })} saveDisabled={!name.trim()} />
+    </div>
+  )
+}
+
 /** A single pot's row — collapsed summary + expand, mirroring SavingsPotRow's shape minus the ledger modal (see this section's own header comment for why). */
 function PotRow({
   pot,
@@ -1604,13 +1624,16 @@ function PotRow({
 
         {isOpen && (
           <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
-            <Field label="Name">
-              <input
-                value={pot.name}
-                onChange={(e) => onSave({ name: e.target.value })}
-                className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-              />
-            </Field>
+            {/* Batch 3 addendum (2026-09-04 UAT): used to be a bare Field
+                sitting directly on the row's own --color-surface
+                background, live-saving on every keystroke — inconsistent
+                with SavingsPotRow's own expanded form (SavingsPotForm),
+                which is the styling standard: fields sit on a darker
+                --color-bg-elevated card, in a 2-column grid, with the
+                Cancel/Save pair INSIDE that card — the red inline text
+                buttons (Log a deposit/withdrawal, recurring deposit,
+                bills checklist) stay outside it, below. Matched here. */}
+            <PotEditForm pot={pot} onCancel={onToggle} onSave={(updates) => { onSave(updates); onToggle() }} />
 
             <LogPotTransactionButton onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
             <RecurringTransferEditor
@@ -2015,6 +2038,7 @@ export function Salary() {
       <CollapsibleSection
         title="Salary"
         className="mb-8"
+        defaultOpen={anyoneHasSalary}
         headerExtra={
           <div className="flex items-center gap-2">
             {anyoneHasSalary && anyoneHasMultipleIncomeSources && <FollowingPickerButton onClick={() => setFollowingPickerOpen(true)} />}
@@ -2058,7 +2082,12 @@ export function Salary() {
           />
         )}
         <div className="flex flex-col gap-3">
-          {data.people.map((person) => {
+          {/* Batch 3 addendum (2026-09-04 UAT): "always show the primary
+              person at the top of the Salary section" — a display-order
+              sort local to this list, not a change to data.people's own
+              order (which stays whatever it was created in everywhere
+              else in the app). */}
+          {[...data.people].sort((a, b) => (a.id === data.primaryPersonId ? -1 : b.id === data.primaryPersonId ? 1 : 0)).map((person) => {
             const payCycle = data.payCycles.find((pc) => pc.personId === person.id)
             const hasSalary = hasSalaryConfigured(person)
             const isOpen = expandedPersonId === person.id
@@ -2176,6 +2205,7 @@ export function Salary() {
       <CollapsibleSection
         title="Pensions"
         className="mb-8"
+        defaultOpen={data.pensions.length > 0}
         headerExtra={
           <div className="flex items-center gap-2">
             {!anyoneHasSalary && anyoneHasMultipleIncomeSources && <FollowingPickerButton onClick={() => setFollowingPickerOpen(true)} />}
@@ -2241,6 +2271,7 @@ export function Salary() {
       <CollapsibleSection
         title="Savings"
         className="mb-8"
+        defaultOpen={data.savingsPots.length > 0}
         headerExtra={
           <AddButton
             onClick={() => {
@@ -2348,6 +2379,7 @@ export function Salary() {
       <CollapsibleSection
         title="Pots"
         className="mb-8"
+        defaultOpen={data.pots.length > 0}
         headerExtra={
           <AddButton
             onClick={() => {
