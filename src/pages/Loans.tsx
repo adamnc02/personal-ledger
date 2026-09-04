@@ -1617,6 +1617,10 @@ function LoggedPaymentEditForm({
   const [note, setNote] = useState(payment.note ?? '')
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const amountNumber = Number(amount)
+  // UAT follow-up (2026-09-05, Adam-reported): dims Save when nothing's
+  // actually changed, same rule every other edit panel in the app now
+  // follows.
+  const dirty = amountNumber !== payment.amount || date !== payment.date || note.trim() !== (payment.note ?? '')
 
   return (
     <div className="px-2.5 pb-2.5 flex flex-col gap-2 border-t" style={{ borderColor: 'var(--color-track)' }}>
@@ -1641,7 +1645,7 @@ function LoggedPaymentEditForm({
           onCancel={() => setConfirmingDelete(false)}
         />
       )}
-      <FormButtonRow onCancel={onCancel} onSave={() => onSave(amountNumber, date, note || undefined)} saveDisabled={!(amountNumber > 0 && date)} />
+      <FormButtonRow onCancel={onCancel} onSave={() => onSave(amountNumber, date, note || undefined)} saveDisabled={!(amountNumber > 0 && date) || !dirty} />
     </div>
   )
 }
