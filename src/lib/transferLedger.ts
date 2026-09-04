@@ -96,6 +96,42 @@ export function transferLocationLabel(
   }
 }
 
+/** The same key scheme buildTransferLocationOptions below uses — lets a caller exclude/match a specific TransferLocation against an options list without re-deriving the scheme. */
+export function transferLocationKey(location: TransferLocation): string {
+  return location.type === 'pot' ? `pot:${location.potId}` : location.type === 'savings' ? `savings:${location.savingsPotId}` : location.type
+}
+
+/** One pickable location for a transfer's From/To picker — Current Account, the (singleton) joint account, a specific savings pot, or a specific pot. UAT Batch 4 (2026-09-04): moved here from Expenses.tsx so the same options/picker logic can be shared with Salary.tsx's own Wallet-page deposit/withdrawal/recurring-creation flows, not just the Transactions page's Transfer pill. */
+export interface TransferLocationOption {
+  key: string
+  label: string
+  location: TransferLocation
+}
+
+/**
+ * Every pickable location, scoped to the given primary person's own
+ * savings pots/pots (falling back to everyone's if they own none — same
+ * rule the pre-rebuild SavingsTransactionForm applied).
+ */
+export function buildTransferLocationOptions(
+  savingsPots: { id: string; name: string; personId: string }[],
+  pots: { id: string; name: string; personId: string }[],
+  hasJoint: boolean,
+  primaryPersonId: string,
+): TransferLocationOption[] {
+  const ownSavingsPots = savingsPots.filter((p) => p.personId === primaryPersonId)
+  const pickableSavingsPots = ownSavingsPots.length > 0 ? ownSavingsPots : savingsPots
+  const ownPots = pots.filter((p) => p.personId === primaryPersonId)
+  const pickablePots = ownPots.length > 0 ? ownPots : pots
+
+  return [
+    { key: 'personal', label: 'Current Account', location: { type: 'personal' as const } },
+    ...(hasJoint ? [{ key: 'joint', label: 'Joint Account', location: { type: 'joint' as const } }] : []),
+    ...pickableSavingsPots.map((p) => ({ key: `savings:${p.id}`, label: p.name, location: { type: 'savings' as const, savingsPotId: p.id } })),
+    ...pickablePots.map((p) => ({ key: `pot:${p.id}`, label: p.name, location: { type: 'pot' as const, potId: p.id } })),
+  ]
+}
+
 /**
  * Which built-in category a transfer's occurrences carry — reuses the
  * same seeded categories the superseded per-type deposit/withdrawal

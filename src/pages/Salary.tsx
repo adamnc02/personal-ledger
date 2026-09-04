@@ -35,7 +35,8 @@ import {
 import { buildExampleLedger } from '../lib/savingsInterest'
 import { newPot, potBalanceAsOf, potDepositOccurrencePreviews } from '../lib/potLedger'
 import { setPausedTemplateOccurrences, scheduledTemplateDates, templateOccurrencePreviews } from '../lib/schedule'
-import { locationsEqual, transferLocationLabel } from '../lib/transferLedger'
+import { locationsEqual, transferLocationLabel, transferLocationKey, buildTransferLocationOptions, type TransferLocationOption } from '../lib/transferLedger'
+import { AmountStep, LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
 import {
   hasSalarySortDestinations,
   salarySortDestinations,
@@ -758,10 +759,27 @@ export function SavingsPotForm({
  * recurring WITHDRAWAL from one of these entities is set up from the
  * Transfer pill itself, same as it always was for a one-off withdrawal.
  */
+type RecurringCreateStep = 'closed' | 'type' | 'amount' | 'location' | 'frequency' | 'date'
+
+/**
+ * UAT Batch 4 (2026-09-04, items 2/7): rebuilt from a single "amount,
+ * then Continue" step (which silently created a Current-Account-only
+ * monthly deposit) into Adam's full picker-wizard spec — a Deposit/
+ * Withdrawal choice, then Amount → Location → Frequency (→ weeks, if
+ * every-N-weeks) → Date, the date step skipped entirely when the
+ * frequency choice was "follow payday"/"follow my budgeting cycle"
+ * (those resolve their own date at generation time — see
+ * schedule.ts's generateTransactionsForTemplate). Recurring can now be
+ * EITHER direction (a pot/savings pot/joint account can have a standing
+ * recurring WITHDRAWAL just as easily as a deposit), so `existing` now
+ * matches a template touching this location on either side, not just
+ * `transferTo`.
+ */
 function RecurringTransferEditor({
   location,
   defaultName,
   templates,
+  locationOptions,
   onAdd,
   onUpdate,
   onRemove,
@@ -769,42 +787,132 @@ function RecurringTransferEditor({
   location: TransferLocation
   defaultName: string
   templates: RecurringTemplate[]
+  locationOptions: TransferLocationOption[]
   onAdd: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
   onUpdate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemove: (id: string) => void
 }) {
-  const existing = templates.find((t) => t.kind === 'transfer' && locationsEqual(t.transferTo, location))
-  const [draftAmount, setDraftAmount] = useState<number | null>(null)
+  const existing = templates.find((t) => t.kind === 'transfer' && (locationsEqual(t.transferTo, location) || locationsEqual(t.transferFrom, location)))
+  const fixedKey = transferLocationKey(location)
 
-  if (!existing && draftAmount === null) {
+  const [step, setStep] = useState<RecurringCreateStep>('closed')
+  const [type, setType] = useState<'deposit' | 'withdrawal'>('deposit')
+  const [draftAmount, setDraftAmount] = useState('')
+  const [otherLocation, setOtherLocation] = useState<TransferLocationOption | null>(null)
+  const [freqChoice, setFreqChoice] = useState<TransferFrequencyChoice | null>(null)
+  const [intervalWeeks, setIntervalWeeks] = useState(2)
+  const [date, setDate] = useState(todayIso())
+
+  function reset() {
+    setStep('closed')
+    setType('deposit')
+    setDraftAmount('')
+    setOtherLocation(null)
+    setFreqChoice(null)
+    setIntervalWeeks(2)
+    setDate(todayIso())
+  }
+
+  function commitCreate() {
+    if (!otherLocation || !freqChoice) return
+    const resolved = resolveTransferFrequencyChoice(freqChoice)
+    onAdd({
+      name: defaultName,
+      amount: Number(draftAmount) || 0,
+      frequency: resolved.frequency,
+      intervalWeeks: resolved.frequency === 'every_n_weeks' ? intervalWeeks : undefined,
+      anchorDate: date,
+      transferFrom: type === 'deposit' ? otherLocation.location : location,
+      transferTo: type === 'deposit' ? location : otherLocation.location,
+      followsPayday: resolved.followsPayday,
+      followsCycleStart: resolved.followsCycleStart,
+    })
+    reset()
+  }
+
+  if (!existing && step === 'closed') {
     return (
-      <button onClick={() => setDraftAmount(50)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-        + Add a recurring deposit
+      <button onClick={() => setStep('type')} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+        + Add a recurring transfer
       </button>
     )
   }
 
-  // Batch 3 (2026-09-04 UAT): step 1's Cancel/Continue used to be small
-  // right-aligned text/pill buttons — every other creation form in this
-  // file (PotForm, SavingsPotForm) uses a full-width Cancel/Save pill row.
-  // Matched here via the same FormButtonRow every one of those already
-  // uses, saveLabel overridden since this step doesn't actually create
-  // the template yet (RecurringExistingDeposit below does that).
-  if (!existing && draftAmount !== null) {
+  // Adam's explicit correction (2026-09-04): Deposit/Withdrawal is its
+  // own first step here, same reasoning as LogTransferButton's — this
+  // wizard needs direction before the location step can label itself.
+  if (!existing && step === 'type') {
     return (
       <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-        <EditField label="Amount (£)" type="number" value={draftAmount} onChange={(v) => setDraftAmount(Number(v) || 0)} />
-        <FormButtonRow
-          onCancel={() => setDraftAmount(null)}
-          onSave={() => {
-            onAdd({ name: defaultName, amount: draftAmount, frequency: 'monthly', anchorDate: todayIso(), transferFrom: { type: 'personal' }, transferTo: location })
-            setDraftAmount(null)
-          }}
-          saveDisabled={!(draftAmount > 0)}
-          saveLabel="Continue"
-        />
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Deposit or withdrawal?</span>
+          <button onClick={reset} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => {
+              setType('deposit')
+              setStep('amount')
+            }}
+            className="flex-1 py-2 rounded-full text-sm font-medium"
+            style={{ background: 'var(--color-surface)', color: 'var(--color-ink)' }}
+          >
+            Deposit
+          </button>
+          <button
+            onClick={() => {
+              setType('withdrawal')
+              setStep('amount')
+            }}
+            className="flex-1 py-2 rounded-full text-sm font-medium"
+            style={{ background: 'var(--color-surface)', color: 'var(--color-ink)' }}
+          >
+            Withdrawal
+          </button>
+        </div>
       </div>
     )
+  }
+
+  if (!existing && step === 'amount') {
+    return <AmountStep value={draftAmount} onChange={setDraftAmount} onCancel={reset} onContinue={() => setStep('location')} />
+  }
+
+  if (!existing && step === 'location') {
+    return (
+      <LocationStep
+        title={type === 'deposit' ? 'From' : 'To'}
+        options={locationOptions}
+        excludeKey={fixedKey}
+        onPick={(o) => {
+          setOtherLocation(o)
+          setStep('frequency')
+        }}
+        onCancel={reset}
+      />
+    )
+  }
+
+  if (!existing && step === 'frequency') {
+    return (
+      <FrequencyStep
+        choice={freqChoice}
+        intervalWeeks={intervalWeeks}
+        onChoiceChange={setFreqChoice}
+        onIntervalWeeksChange={setIntervalWeeks}
+        onCancel={reset}
+        onContinue={() => {
+          if (freqChoice === 'follows_payday' || freqChoice === 'follows_cycle_start') commitCreate()
+          else setStep('date')
+        }}
+      />
+    )
+  }
+
+  if (!existing && step === 'date') {
+    return <DateStep value={date} onChange={setDate} onCancel={reset} onContinue={commitCreate} continueLabel="Create" />
   }
 
   return <RecurringExistingDeposit template={existing!} onUpdate={onUpdate} onRemove={onRemove} />
@@ -955,6 +1063,7 @@ function SavingsPotRow({
   onOverrideInterest,
   onLogDeposit,
   onLogWithdrawal,
+  locationOptions,
   recurringTemplates,
   onAddRecurringTransfer,
   onUpdateRecurringTemplate,
@@ -969,14 +1078,14 @@ function SavingsPotRow({
   onRemove: () => void
   onOverrideInterest: (date: string, amount: number) => void
   // Phase 5 (2026-09 session) — same entry point Loans.tsx gives a loan
-  // for logging an overpayment, right on the pot's own row. Calls
-  // straight through to logSavingsDeposit/logSavingsWithdrawal — the
-  // SAME functions the Transactions page's Savings pill already uses, so
-  // whichever entry point someone logs from, it shows up (and is
-  // editable) from the other one too. Deliberately additive, not a
-  // replacement for the Transactions-page path.
-  onLogDeposit: (amount: number, date: string, note?: string) => void
-  onLogWithdrawal: (amount: number, date: string, note?: string) => void
+  // for logging an overpayment, right on the pot's own row. UAT Batch 4
+  // (2026-09-04): now takes the picked OTHER location directly and calls
+  // straight through to logTransfer, rather than the legacy
+  // logSavingsDeposit/logSavingsWithdrawal wrappers (which always
+  // assumed Current Account was the other side).
+  onLogDeposit: (amount: number, date: string, from: TransferLocation, note?: string) => void
+  onLogWithdrawal: (amount: number, date: string, to: TransferLocation, note?: string) => void
+  locationOptions: TransferLocationOption[]
   // Transfer pill (2026-09-04 session) — the recurring deposit editor
   // below now creates/edits a RecurringTemplate against these, the same
   // "single clean consistent method" the Transactions page's Transfer
@@ -1054,11 +1163,10 @@ function SavingsPotRow({
 
             {/* Phase 5 (2026-09 session) — same "+ Log a payment" pattern
                 Loans.tsx gives a loan, right on the pot's own row. Writes
-                through logSavingsDeposit/logSavingsWithdrawal — the SAME
-                functions the Transactions page's Savings pill already
-                uses, so this is a second entry point onto existing data,
-                not a parallel mechanism. */}
-            <LogSavingsTransactionButton onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
+                through logTransfer (Batch 4: now location-aware) — a
+                second entry point onto the same data the Transactions
+                page's Transfer pill uses, not a parallel mechanism. */}
+            <LogTransferButton fixedLocation={{ type: 'savings', savingsPotId: pot.id }} locationOptions={locationOptions} onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
 
             {/* Transfer pill (2026-09-04 session) — same discoverable,
                 Loan-style entry point as before, now creating/editing a
@@ -1069,6 +1177,7 @@ function SavingsPotRow({
               location={{ type: 'savings', savingsPotId: pot.id }}
               defaultName={pot.name}
               templates={recurringTemplates}
+              locationOptions={locationOptions}
               onAdd={onAddRecurringTransfer}
               onUpdate={onUpdateRecurringTemplate}
               onRemove={onRemoveRecurringTemplate}
@@ -1113,56 +1222,117 @@ function SavingsPotRow({
  * than the loan version — a deposit has no recast-mode choice to make,
  * it's genuinely just "how much, when, which direction."
  */
-function LogSavingsTransactionButton({
+/**
+ * UAT Batch 4 (2026-09-04, items 2/7): unifies the old LogSavingsTransactionButton/
+ * LogPotTransactionButton (identical copies, one per entity type) into one
+ * component — used by Savings, Pots, AND Joint alike — and rebuilt from a
+ * flat "type toggle + amount + date + note" form into Adam's picker-wizard
+ * spec: Deposit/Withdrawal choice, Amount, then a Location step (the
+ * OTHER side — From if depositing, To if withdrawing; this entity's own
+ * side is fixed and excluded from the picker), then a final Date/Note
+ * screen. Writes through logTransfer directly (via the parent's
+ * onLogDeposit/onLogWithdrawal, now location-aware) rather than the
+ * legacy logSavingsDeposit/logPotDeposit wrappers, which always assumed
+ * Current Account was the other side.
+ */
+function LogTransferButton({
+  fixedLocation,
+  locationOptions,
   onLogDeposit,
   onLogWithdrawal,
 }: {
-  onLogDeposit: (amount: number, date: string, note?: string) => void
-  onLogWithdrawal: (amount: number, date: string, note?: string) => void
+  fixedLocation: TransferLocation
+  locationOptions: TransferLocationOption[]
+  onLogDeposit: (amount: number, date: string, from: TransferLocation, note?: string) => void
+  onLogWithdrawal: (amount: number, date: string, to: TransferLocation, note?: string) => void
 }) {
-  const [logging, setLogging] = useState(false)
+  const fixedKey = transferLocationKey(fixedLocation)
+  const [step, setStep] = useState<'closed' | 'type' | 'amount' | 'location' | 'final'>('closed')
   const [type, setType] = useState<'deposit' | 'withdrawal'>('deposit')
   const [amount, setAmount] = useState('')
+  const [otherLocation, setOtherLocation] = useState<TransferLocationOption | null>(null)
   const [date, setDate] = useState(todayIso())
   const [note, setNote] = useState('')
 
-  if (!logging) {
+  function reset() {
+    setStep('closed')
+    setType('deposit')
+    setAmount('')
+    setOtherLocation(null)
+    setDate(todayIso())
+    setNote('')
+  }
+
+  if (step === 'closed') {
     return (
-      <button onClick={() => setLogging(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+      <button onClick={() => setStep('type')} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
         + Log a deposit or withdrawal
       </button>
     )
   }
 
-  const amountNumber = Number(amount)
-  const canSave = amountNumber > 0 && !!date
-
-  function reset() {
-    setLogging(false)
-    setType('deposit')
-    setAmount('')
-    setDate(todayIso())
-    setNote('')
+  // Adam's explicit correction (2026-09-04): Deposit/Withdrawal is its
+  // own first step here — unlike the Transactions page's Transfer pill,
+  // which determines direction from its own Deposit/Withdrawal pills
+  // separately, this wizard needs to know direction before the location
+  // step can even correctly label itself "From" vs "To".
+  if (step === 'type') {
+    return (
+      <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Deposit or withdrawal?</span>
+          <button onClick={reset} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => {
+              setType('deposit')
+              setStep('amount')
+            }}
+            className="flex-1 py-2 rounded-full text-sm font-medium"
+            style={{ background: 'var(--color-surface)', color: 'var(--color-ink)' }}
+          >
+            Deposit
+          </button>
+          <button
+            onClick={() => {
+              setType('withdrawal')
+              setStep('amount')
+            }}
+            className="flex-1 py-2 rounded-full text-sm font-medium"
+            style={{ background: 'var(--color-surface)', color: 'var(--color-ink)' }}
+          >
+            Withdrawal
+          </button>
+        </div>
+      </div>
+    )
   }
 
+  if (step === 'amount') {
+    return <AmountStep value={amount} onChange={setAmount} onCancel={reset} onContinue={() => setStep('location')} />
+  }
+
+  if (step === 'location') {
+    return (
+      <LocationStep
+        title={type === 'deposit' ? 'From' : 'To'}
+        options={locationOptions}
+        excludeKey={fixedKey}
+        onPick={(o) => {
+          setOtherLocation(o)
+          setStep('final')
+        }}
+        onCancel={reset}
+      />
+    )
+  }
+
+  // final — date + note, matching the original form's trailing fields
   return (
     <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-      <div className="flex gap-2">
-        <button
-          onClick={() => setType('deposit')}
-          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-          style={{ background: type === 'deposit' ? 'var(--color-coral)' : 'var(--color-surface)', color: type === 'deposit' ? '#fff' : 'var(--color-ink-muted)' }}
-        >
-          Deposit
-        </button>
-        <button
-          onClick={() => setType('withdrawal')}
-          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-          style={{ background: type === 'withdrawal' ? 'var(--color-coral)' : 'var(--color-surface)', color: type === 'withdrawal' ? '#fff' : 'var(--color-ink-muted)' }}
-        >
-          Withdrawal
-        </button>
-      </div>
       <div className="grid grid-cols-2 gap-2">
         <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
         <EditField label="Date" type="date" value={date} onChange={setDate} />
@@ -1171,11 +1341,12 @@ function LogSavingsTransactionButton({
       <FormButtonRow
         onCancel={reset}
         onSave={() => {
-          if (type === 'deposit') onLogDeposit(amountNumber, date, note || undefined)
-          else onLogWithdrawal(amountNumber, date, note || undefined)
+          if (!otherLocation) return
+          if (type === 'deposit') onLogDeposit(Number(amount) || 0, date, otherLocation.location, note || undefined)
+          else onLogWithdrawal(Number(amount) || 0, date, otherLocation.location, note || undefined)
           reset()
         }}
-        saveDisabled={!canSave}
+        saveDisabled={!(Number(amount) > 0)}
       />
     </div>
   )
@@ -1287,75 +1458,6 @@ function SavingsPotLedgerModal({
  * swipe card instead (Phase 7) — this row only needs enough to manage
  * the pot itself, not re-show its whole history a second time.
  */
-
-/** Hand-logged "+ Log a deposit or withdrawal" — identical shape to LogSavingsTransactionButton, writing through logPotDeposit/logPotWithdrawal instead. */
-function LogPotTransactionButton({
-  onLogDeposit,
-  onLogWithdrawal,
-}: {
-  onLogDeposit: (amount: number, date: string, note?: string) => void
-  onLogWithdrawal: (amount: number, date: string, note?: string) => void
-}) {
-  const [logging, setLogging] = useState(false)
-  const [type, setType] = useState<'deposit' | 'withdrawal'>('deposit')
-  const [amount, setAmount] = useState('')
-  const [date, setDate] = useState(todayIso())
-  const [note, setNote] = useState('')
-
-  if (!logging) {
-    return (
-      <button onClick={() => setLogging(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-        + Log a deposit or withdrawal
-      </button>
-    )
-  }
-
-  const amountNumber = Number(amount)
-  const canSave = amountNumber > 0 && !!date
-
-  function reset() {
-    setLogging(false)
-    setType('deposit')
-    setAmount('')
-    setDate(todayIso())
-    setNote('')
-  }
-
-  return (
-    <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-      <div className="flex gap-2">
-        <button
-          onClick={() => setType('deposit')}
-          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-          style={{ background: type === 'deposit' ? 'var(--color-coral)' : 'var(--color-surface)', color: type === 'deposit' ? '#fff' : 'var(--color-ink-muted)' }}
-        >
-          Deposit
-        </button>
-        <button
-          onClick={() => setType('withdrawal')}
-          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-          style={{ background: type === 'withdrawal' ? 'var(--color-coral)' : 'var(--color-surface)', color: type === 'withdrawal' ? '#fff' : 'var(--color-ink-muted)' }}
-        >
-          Withdrawal
-        </button>
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
-        <EditField label="Date" type="date" value={date} onChange={setDate} />
-      </div>
-      <EditField label="Note (optional)" value={note} onChange={setNote} />
-      <FormButtonRow
-        onCancel={reset}
-        onSave={() => {
-          if (type === 'deposit') onLogDeposit(amountNumber, date, note || undefined)
-          else onLogWithdrawal(amountNumber, date, note || undefined)
-          reset()
-        }}
-        saveDisabled={!canSave}
-      />
-    </div>
-  )
-}
 
 /** Every bill/loan eligible to be paid from this pot (already personal, or already this pot's own) — shared shape between PotEditForm's checklist and its Save handler. */
 function potEligibleItems(pot: Pot, templates: RecurringTemplate[], loans: Loan[]) {
@@ -1607,6 +1709,7 @@ function PotRow({
   onRemove,
   onLogDeposit,
   onLogWithdrawal,
+  locationOptions,
   onAssignTemplateLocation,
   onAssignLoanLocation,
   onAddRecurringTransfer,
@@ -1622,8 +1725,9 @@ function PotRow({
   onToggle: () => void
   onSave: (updates: Partial<Omit<Pot, 'id' | 'personId'>>) => void
   onRemove: () => void
-  onLogDeposit: (amount: number, date: string, note?: string) => void
-  onLogWithdrawal: (amount: number, date: string, note?: string) => void
+  onLogDeposit: (amount: number, date: string, from: TransferLocation, note?: string) => void
+  onLogWithdrawal: (amount: number, date: string, to: TransferLocation, note?: string) => void
+  locationOptions: TransferLocationOption[]
   onAssignTemplateLocation: (templateId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
   onAssignLoanLocation: (loanId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
   onAddRecurringTransfer: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
@@ -1682,11 +1786,12 @@ function PotRow({
               onAssignLoanLocation={onAssignLoanLocation}
             />
 
-            <LogPotTransactionButton onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
+            <LogTransferButton fixedLocation={{ type: 'pot', potId: pot.id }} locationOptions={locationOptions} onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
             <RecurringTransferEditor
               location={{ type: 'pot', potId: pot.id }}
               defaultName={pot.name}
               templates={templates}
+              locationOptions={locationOptions}
               onAdd={onAddRecurringTransfer}
               onUpdate={onUpdateRecurringTemplate}
               onRemove={onRemoveRecurringTemplate}
@@ -1957,8 +2062,6 @@ export function Salary() {
     updateSavingsPot,
     removeSavingsPot,
     overrideSavingsInterest,
-    logSavingsDeposit,
-    logSavingsWithdrawal,
     addPension,
     updatePension,
     removePension,
@@ -1966,8 +2069,6 @@ export function Salary() {
     addPot,
     updatePot,
     removePot,
-    logPotDeposit,
-    logPotWithdrawal,
     assignRecurringTemplateLocation,
     assignLoanLocation,
     addRecurringTransfer,
@@ -1978,6 +2079,12 @@ export function Salary() {
     clearSalarySortTarget,
     clearSalarySort,
   } = useLedgerData()
+  // UAT Batch 4 (2026-09-04, items 2/7) — the same From/To picker options
+  // the Transactions page's Transfer pill builds, shared via
+  // lib/transferLedger.ts so the two never drift. Computed once here and
+  // threaded down to every Wallet-page deposit/withdrawal/recurring
+  // wizard (Savings/Pots/Joint alike) rather than each row rebuilding it.
+  const transferLocationOptions = buildTransferLocationOptions(data.savingsPots, data.pots, !!data.jointAccount, data.primaryPersonId)
   const [editingJointAccount, setEditingJointAccount] = useState(false)
   const [editingDeduction, setEditingDeduction] = useState<{ personId: string; deductionId: string } | null>(null)
   const [settingsOpenFor, setSettingsOpenFor] = useState<string | null>(null)
@@ -2400,8 +2507,9 @@ export function Salary() {
               onSave={(updates) => updateSavingsPot(pot.id, updates)}
               onRemove={() => removeSavingsPot(pot.id)}
               onOverrideInterest={(date, amount) => overrideSavingsInterest(pot.id, date, amount)}
-              onLogDeposit={(amount, date, note) => logSavingsDeposit(pot.id, amount, date, note)}
-              onLogWithdrawal={(amount, date, note) => logSavingsWithdrawal(pot.id, amount, date, note)}
+              onLogDeposit={(amount, date, from, note) => logTransfer(from, { type: 'savings', savingsPotId: pot.id }, amount, date, note)}
+              onLogWithdrawal={(amount, date, to, note) => logTransfer({ type: 'savings', savingsPotId: pot.id }, to, amount, date, note)}
+              locationOptions={transferLocationOptions}
               recurringTemplates={data.recurringTemplates}
               onAddRecurringTransfer={addRecurringTransfer}
               onUpdateRecurringTemplate={updateRecurringTemplate}
@@ -2471,8 +2579,9 @@ export function Salary() {
               onToggle={() => setExpandedBillsPotId(expandedBillsPotId === pot.id ? null : pot.id)}
               onSave={(updates) => updatePot(pot.id, updates)}
               onRemove={() => removePot(pot.id)}
-              onLogDeposit={(amount, date, note) => logPotDeposit(pot.id, amount, date, note)}
-              onLogWithdrawal={(amount, date, note) => logPotWithdrawal(pot.id, amount, date, note)}
+              onLogDeposit={(amount, date, from, note) => logTransfer(from, { type: 'pot', potId: pot.id }, amount, date, note)}
+              onLogWithdrawal={(amount, date, to, note) => logTransfer({ type: 'pot', potId: pot.id }, to, amount, date, note)}
+              locationOptions={transferLocationOptions}
               onAssignTemplateLocation={(templateId, location, effectiveFrom, potId) => assignRecurringTemplateLocation(templateId, location, effectiveFrom, { potId })}
               onAssignLoanLocation={(loanId, location, effectiveFrom, potId) => assignLoanLocation(loanId, location, effectiveFrom, { potId })}
               onAddRecurringTransfer={addRecurringTransfer}
@@ -2514,14 +2623,17 @@ export function Salary() {
                 pattern as the Savings/Pots cards above, writing through
                 the exact same logTransfer/RecurringTemplate mechanism the
                 Transactions page's Transfer pill uses. */}
-            <LogPotTransactionButton
-              onLogDeposit={(amount, date, note) => logTransfer({ type: 'personal' }, { type: 'joint' }, amount, date, note)}
-              onLogWithdrawal={(amount, date, note) => logTransfer({ type: 'joint' }, { type: 'personal' }, amount, date, note)}
+            <LogTransferButton
+              fixedLocation={{ type: 'joint' }}
+              locationOptions={transferLocationOptions}
+              onLogDeposit={(amount, date, from, note) => logTransfer(from, { type: 'joint' }, amount, date, note)}
+              onLogWithdrawal={(amount, date, to, note) => logTransfer({ type: 'joint' }, to, amount, date, note)}
             />
             <RecurringTransferEditor
               location={{ type: 'joint' }}
               defaultName="Joint Account"
               templates={data.recurringTemplates}
+              locationOptions={transferLocationOptions}
               onAdd={addRecurringTransfer}
               onUpdate={updateRecurringTemplate}
               onRemove={removeRecurringTemplate}
@@ -3388,10 +3500,6 @@ function PayPeriodRow({
   )
 }
 
-function locationKey(location: TransferLocation): string {
-  return location.type === 'pot' ? `pot:${location.potId}` : location.type === 'savings' ? `savings:${location.savingsPotId}` : location.type
-}
-
 /**
  * The sort icon's modal (App_Dev.md "Salary Sorter & Transfer Pill",
  * 2026-09 session). One row per available destination (savings
@@ -3432,10 +3540,10 @@ function SalarySortModal({
     for (const d of destinations) {
       const existingTarget = existingSort?.targets.find((t) => locationsEqual(t.to, d.location))
       if (existingTarget) {
-        initial[locationKey(d.location)] = String(existingTarget.amount)
+        initial[transferLocationKey(d.location)] = String(existingTarget.amount)
       } else {
         const suggestion = salarySortSuggestion(data, payCycle, payDate, d.location)
-        initial[locationKey(d.location)] = suggestion.prefillAmount > 0 ? String(suggestion.prefillAmount) : ''
+        initial[transferLocationKey(d.location)] = suggestion.prefillAmount > 0 ? String(suggestion.prefillAmount) : ''
       }
     }
     return initial
@@ -3449,7 +3557,7 @@ function SalarySortModal({
   const [skipped, setSkipped] = useState<TransferLocation[]>([])
 
   function handleSaveClick() {
-    const targets = destinations.map((d) => ({ to: d.location, amount: Number(drafts[locationKey(d.location)]) || 0 })).filter((t) => t.amount > 0)
+    const targets = destinations.map((d) => ({ to: d.location, amount: Number(drafts[transferLocationKey(d.location)]) || 0 })).filter((t) => t.amount > 0)
     const conflicts = targets
       .filter((t) => !existingSort?.targets.some((et) => locationsEqual(et.to, t.to)))
       .filter((t) => !!findOneOffTransferConflict(data, payDate, t.to) || !!findRecurringTransferConflict(data, payCycle, payDate, t.to))
@@ -3499,7 +3607,7 @@ function SalarySortModal({
 
         <div className="flex flex-col gap-4">
           {destinations.map((d) => {
-            const key = locationKey(d.location)
+            const key = transferLocationKey(d.location)
             const suggestion = salarySortSuggestion(data, payCycle, payDate, d.location)
             const hasSavedTarget = !!existingSort?.targets.some((t) => locationsEqual(t.to, d.location))
             return (
@@ -3546,7 +3654,7 @@ function SalarySortModal({
             tone="danger"
             onConfirm={() => {
               onClearTarget(confirmingClearLocation)
-              setDrafts((prev) => ({ ...prev, [locationKey(confirmingClearLocation)]: '' }))
+              setDrafts((prev) => ({ ...prev, [transferLocationKey(confirmingClearLocation)]: '' }))
               setConfirmingClearLocation(null)
             }}
             onCancel={() => setConfirmingClearLocation(null)}

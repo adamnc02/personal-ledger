@@ -81,8 +81,8 @@ showing on Adam's pay-period rows once a pot/joint account exist.
 ## Batch 4 — Logic/data bugs (needs sign-off on exact rules before starting)
 - [x] Salary Sort → generate real Transfer-page transfers (not just ledger transactions);
       deleting a transfer zeroes its sort; clearing/deleting a sort deletes its transfers
-- [ ] Pot recurring-deposit flow needs its own From-location picker (currently implies
-      pot → pot, which is nonsensical)
+- [x] Pot recurring-deposit flow needs its own From-location picker (currently implies
+      pot → pot, which is nonsensical) — superseded/expanded by item 7 below
 - [x] Joint bill shares should not appear in the Personal ledger at all; Joint ledger should
       show full bill amount, not the per-person share
 - [x] "Land on cycle period" option added alongside "follow payday"; checkboxes grey out
@@ -90,7 +90,7 @@ showing on Adam's pay-period rows once a pot/joint account exist.
 - [x] Deletion guard: transactions/bills/transfers created **today** hard-delete regardless
       of cleared status (this is also what fixes the stray pot balance bug above)
 - [x] Pots editable fields currently only name. Let’s make use of the space and permanently move the manage payments form this pot list into this dark-background form, still as a checklist, and drop the red inline text button to manage.
-- [ ] Savings/joint account/pots log deposit/withdrawl and recurring all need a location (to location if withdrawn, from location if deposit). Remember anything created here will auto create the transfer in the transactions page. Further to this, when creating a recurring, this should all be picker modals. First in the flow is the amount, second is the location (from or to based on deposit/withdrawal), third is frequency (options will be weekly, every n weeks, monthly, quarterly, annual, follow pay day or follow pay cycle), and if user selects weekly, every n weeks (gets it’s own step 3a to state number of weeks), monthly, quarterly or annually, then step 4 is a date picker. Step 3a and 4 get skipped if user selects follow payday or pay cycle (search the app for the commonly used wording). This is the standard for all recurring transfers (deposits or withdrawals). This should be the exact same flow when creating recurring transfers in the transactions page except we insert a to location after step 2. For log a deposit or withdrawal, flow is shorter, step 1 is amount, step 2 is from location. This is the same flow used on the transfer section in the transactions page, only has a step 3 for to location. If using the salary page to log these transactions, for deposits, the to location is whatever the deposit is being built on (pot, savings pot or joint account), and reversed for withdrawals, the from location is the target where the withdrawal is being built on.
+- [x] Savings/joint account/pots log deposit/withdrawl and recurring all need a location (to location if withdrawn, from location if deposit). Remember anything created here will auto create the transfer in the transactions page. Further to this, when creating a recurring, this should all be picker modals. First in the flow is the amount, second is the location (from or to based on deposit/withdrawal), third is frequency (options will be weekly, every n weeks, monthly, quarterly, annual, follow pay day or follow pay cycle), and if user selects weekly, every n weeks (gets it’s own step 3a to state number of weeks), monthly, quarterly or annually, then step 4 is a date picker. Step 3a and 4 get skipped if user selects follow payday or pay cycle (search the app for the commonly used wording). This is the standard for all recurring transfers (deposits or withdrawals). This should be the exact same flow when creating recurring transfers in the transactions page except we insert a to location after step 2. For log a deposit or withdrawal, flow is shorter, step 1 is amount, step 2 is from location. This is the same flow used on the transfer section in the transactions page, only has a step 3 for to location. If using the salary page to log these transactions, for deposits, the to location is whatever the deposit is being built on (pot, savings pot or joint account), and reversed for withdrawals, the from location is the target where the withdrawal is being built on.
 
 ---
 
@@ -262,3 +262,87 @@ real bills, checkable as if it could be reassigned there. Pre-existing behaviour
 introduced by this session; noticed live-testing item 4, not one of the five signed-off Batch
 4 items, so left as-is — flagged for a future pass (likely fix: add `t.kind !== 'transfer'`
 to the eligible-templates filter).
+
+**2026-09-04 — Batch 4, items 2/7 (deposit/withdrawal/recurring picker wizards) — built and
+live-tested.** Item 2 (Pot recurring-deposit From-location picker) turned out to be fully
+superseded by item 7's later, more detailed spec, which generalized the same ask to Savings
+and Joint too, and to one-off deposits/withdrawals as well as recurring — built as one
+combined piece of work.
+
+- New shared `components/TransferSteps.tsx` — `AmountStep`, `LocationStep`, `FrequencyStep`,
+  `DateStep`, plus `resolveTransferFrequencyChoice`/`transferFrequencyChoiceFor` and a new
+  `TRANSFER_FREQUENCY_LABELS` covering all 7 choices (weekly/every-N-weeks/monthly/quarterly/
+  **annual**/follow payday/follow my budgeting cycle) — used by both Salary.tsx's Wallet-page
+  wizards and Expenses.tsx's Transfer pill, so the two step orders/wording can never drift
+  apart. Confirmed the underlying engine (`RecurrenceFrequency` in `types/ledger.ts`,
+  `schedule.ts`) already fully supports `'annual'` — only the Transfer pill's own UI had never
+  offered it. Deliberately did NOT touch the separate, narrower `RECURRING_FREQUENCY_LABELS`
+  used by the general Recurring-transaction/bill form in `Expenses.tsx` — a prior session's
+  code comment there explicitly documents annual being excluded from that specific picker on
+  purpose ("a recurring transaction's picker can never silently offer annual"), unrelated to
+  transfers.
+- `lib/transferLedger.ts` gained `TransferLocationOption`/`buildTransferLocationOptions`
+  (moved from `Expenses.tsx`, now exported/shared) and `transferLocationKey` (moved from a
+  near-identical local copy in `Salary.tsx`'s `SalarySortModal`) — both now the one shared
+  source for "every pickable location" and "this location's key," rather than three
+  independent copies.
+- **Salary.tsx (Wallet page) — `LogTransferButton`** replaces the old `LogSavingsTransactionButton`/
+  `LogPotTransactionButton` (identical copies, one per entity) — used by Savings, Pots, AND
+  Joint alike now. Flow: **Deposit/Withdrawal choice (its own first step) → Amount → Location
+  (labelled "From" for a deposit, "To" for a withdrawal; the entity's OWN location is excluded
+  from the picker, since it's what's being logged against) → a final Date/Note/Save screen.**
+  Writes through `logTransfer` directly (now location-aware) rather than the legacy
+  `logSavingsDeposit`/`logPotDeposit` wrappers, which always assumed Current Account was the
+  other side — those wrapper functions are now unused from these call sites (kept for whoever
+  else may still call them, unrelated to this change).
+- **Salary.tsx — `RecurringTransferEditor`'s creation flow** rebuilt the same way, and can now
+  create a recurring **withdrawal** as well as a deposit (previously deposit-only): Deposit/
+  Withdrawal → Amount → Location (same exclusion rule) → Frequency (the flat 7-choice list,
+  "Every N weeks" revealing its own weeks field inline rather than a genuinely separate step)
+  → Date (skipped entirely when the frequency choice was "follow payday"/"follow my budgeting
+  cycle" — those resolve their own date at generation time). `existing` template lookup
+  widened to match either `transferFrom` or `transferTo` touching this location, not just
+  `transferTo`, so an existing recurring WITHDRAWAL is found and edited via the same
+  `RecurringExistingDeposit` component as a deposit would be.
+- **Expenses.tsx (Transactions page) — `TransferForm`** rebuilt from one flat card (mode
+  toggle + simultaneous From/To dropdowns + inline fields) into the same wizard shape:
+  Amount+mode → **From → To** (the "insert a to location after step 2" Adam specifically
+  called out, since neither side is fixed here) → (Recurring only) Frequency → Date (same
+  skip rule) → a final Name(recurring-only)/Note/Save screen. All existing business logic —
+  the reverse Salary Sort conflict guard (`findSalarySortConflicts`, both one-off and
+  recurring's draft-template occurrence-scanning), the "nowhere to transfer to yet" empty
+  state — carried over unchanged, just re-triggered from the final step. The old "swap
+  From/To" button was dropped — it doesn't fit a sequential-pick flow the way it fit
+  simultaneous dropdowns, and nothing asked to keep it.
+- **Mid-session correction from Adam, applied immediately:** the Salary-page wizards
+  (`LogTransferButton`/`RecurringTransferEditor`) originally bundled the Deposit/Withdrawal
+  toggle onto the same screen as Amount (matching how the old flat forms worked) — Adam
+  clarified Deposit/Withdrawal must be its own genuinely first step, before Amount, on the
+  Salary page specifically (the Transactions page's Transfer pill is unaffected — it
+  determines direction from its own One-Off/Recurring pill and From/To picks, not a
+  Deposit/Withdrawal toggle, so there's nothing to reorder there). Fixed in both components.
+  The target-location exclusion Adam also flagged as a must-have turned out to already be
+  correct in the first pass (`excludeKey={fixedKey}` on both wizards' `LocationStep`) —
+  confirmed live rather than re-built.
+- **Also fixed, Adam-requested:** renamed the Transactions page's "Transfer" pill label to
+  "Transfers" (`modeLabel` in `Expenses.tsx`) — display text only, the internal `'transfer'`
+  mode value is unchanged.
+- Verified live in the headless-Chromium browser against Adam's real fixture backup: logged a
+  one-off £20 deposit into the Bills Pot from Current Account (confirmed the From-picker
+  excluded the Bills Pot itself, and the pot's balance updated £400→£420 correctly);
+  created a new recurring transfer on the Transactions page (Current Account → Bills Pot,
+  monthly, "Follow payday" — confirmed the date step was skipped entirely and the saved
+  template shows "Follows payday · Next 2026-10-04"); confirmed the Frequency step's full
+  7-option list including Annually; confirmed the "Transfers" pill rename and the
+  Deposit/Withdrawal-first step reordering. Did not separately re-verify the recurring-
+  WITHDRAWAL branch or the "every N weeks" sub-field live (ran out of a clean second pot to
+  test against mid-session) — both reuse the exact same `commitCreate`/`FrequencyStep` code
+  paths already exercised by the deposit/monthly cases above, and `tsc -b` type-checks every
+  branch, but flagging that the withdrawal direction and every-N-weeks specifically haven't
+  had their own dedicated click-through.
+- `tsc -b` clean throughout (same 3 pre-existing `SavingsPotForm.test.tsx` errors). Full
+  verify suite re-run after every step: no new regressions (same two pre-existing gaps as
+  always — missing `backup-2026-08-24.json` fixture, `verify-purchase-scenario.ts`'s three
+  `cycleStartFollowsPayday` failures). No `lib/` business logic changed beyond the two small,
+  additive `transferLedger.ts` exports, so no new verify script was needed — this was
+  overwhelmingly a UI/component rebuild over already-tested engine functions.

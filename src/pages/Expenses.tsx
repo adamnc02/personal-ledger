@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency, formatFullDate, formatMonthYear } from '../lib/format'
-import { Plus, Trash2, X, ChevronDown, ChevronUp, ArrowRight, ArrowLeftRight } from 'lucide-react'
+import { Plus, Trash2, X, ChevronDown, ChevronUp, ArrowRight } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { EditField } from '../components/EditField'
 import { CategoryIcon } from '../components/CategoryIcon'
@@ -14,7 +14,8 @@ import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButto
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { visibleCategoriesFor } from '../lib/categories'
 import { recentAndUpcomingOccurrences, applyTemplateAmountChange, templateOccurrencePreviews, setPausedTemplateOccurrences, scheduledTemplateDates, generateTransactionsForTemplate, type RawOccurrence } from '../lib/schedule'
-import { transferLocationLabel } from '../lib/transferLedger'
+import { transferLocationLabel, buildTransferLocationOptions, type TransferLocationOption } from '../lib/transferLedger'
+import { LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { addYears } from 'date-fns'
@@ -257,7 +258,7 @@ export function Expenses() {
   // it would do something" rule the old Savings/Joint/Pots pills used
   // individually.
   const pageModes: PageMode[] = ['transactions', 'recurring', ...(data.savingsPots.length > 0 || data.jointAccount || data.pots.length > 0 ? (['transfer'] as const) : [])]
-  const modeLabel: Record<PageMode, string> = { transactions: 'Transactions', recurring: 'Recurring', transfer: 'Transfer' }
+  const modeLabel: Record<PageMode, string> = { transactions: 'Transactions', recurring: 'Recurring', transfer: 'Transfers' }
 
   return (
     <div className="max-w-md mx-auto px-4 pt-6">
@@ -731,36 +732,27 @@ function ExpenseForm({
 // in transferLedger.ts and autoClear.ts's own dedicated materialization
 // pass for how that's kept correct end-to-end).
 
-/** One pickable location — Current Account, the (singleton) joint account, a specific savings pot, or a specific pot. Used for BOTH the From and To pickers. */
-interface TransferLocationOption {
-  key: string
-  label: string
-  location: TransferLocation
-}
-
-function buildTransferLocationOptions(savingsPots: SavingsPot[], pots: Pot[], hasJoint: boolean, primaryPersonId: string): TransferLocationOption[] {
-  // Own pots first, same "silently scope to me, fall back to everyone
-  // if I own none" rule SavingsTransactionForm used to apply — see this
-  // file's git history for that reasoning; unchanged here.
-  const ownSavingsPots = savingsPots.filter((p) => p.personId === primaryPersonId)
-  const pickableSavingsPots = ownSavingsPots.length > 0 ? ownSavingsPots : savingsPots
-  const ownPots = pots.filter((p) => p.personId === primaryPersonId)
-  const pickablePots = ownPots.length > 0 ? ownPots : pots
-
-  return [
-    { key: 'personal', label: 'Current Account', location: { type: 'personal' as const } },
-    ...(hasJoint ? [{ key: 'joint', label: 'Joint Account', location: { type: 'joint' as const } }] : []),
-    ...pickableSavingsPots.map((p) => ({ key: `savings:${p.id}`, label: p.name, location: { type: 'savings' as const, savingsPotId: p.id } })),
-    ...pickablePots.map((p) => ({ key: `pot:${p.id}`, label: p.name, location: { type: 'pot' as const, potId: p.id } })),
-  ]
-}
-
 const TRANSFER_MODES = [
   { value: 'one_off', label: 'One-Off' },
   { value: 'recurring', label: 'Recurring' },
 ] as const
 type TransferMode = (typeof TRANSFER_MODES)[number]['value']
 
+type TransferFormStep = 'amount' | 'from' | 'to' | 'frequency' | 'date' | 'final'
+
+/**
+ * UAT Batch 4 (2026-09-04, items 2/7): rebuilt from one flat card (mode
+ * toggle + From/To dropdowns + inline fields all at once) into Adam's
+ * picker-wizard spec — Amount → From → To (the "insert a to location
+ * after step 2" Adam specifically called out, since neither side is
+ * fixed here the way a Wallet-page pot/savings-pot/joint card's own
+ * wizard has one side implied) → for Recurring, Frequency (→ weeks, if
+ * every-N-weeks) → Date (skipped if the frequency choice was "follow
+ * payday"/"follow my budgeting cycle") → a final Name(recurring)/Note/
+ * Save screen. All the existing business logic (reverse Salary Sort
+ * conflict guard, draft-template occurrence scanning) is unchanged,
+ * just re-triggered from the final step instead of one flat form.
+ */
 function TransferForm({
   data,
   onCancel,
@@ -778,16 +770,15 @@ function TransferForm({
   const options = buildTransferLocationOptions(savingsPots, pots, !!jointAccount, primaryPersonId)
   const payCycle = data.payCycles.find((pc) => pc.personId === primaryPersonId)
 
+  const [step, setStep] = useState<TransferFormStep>('amount')
   const [mode, setMode] = useState<TransferMode>('one_off')
-  const [fromKey, setFromKey] = useState('personal')
-  const [toKey, setToKey] = useState(options.find((o) => o.key !== 'personal')?.key ?? 'personal')
   const [amount, setAmount] = useState('')
+  const [fromOption, setFromOption] = useState<TransferLocationOption | null>(null)
+  const [toOption, setToOption] = useState<TransferLocationOption | null>(null)
+  const [freqChoice, setFreqChoice] = useState<TransferFrequencyChoice | null>(null)
+  const [intervalWeeks, setIntervalWeeks] = useState(4)
   const [date, setDate] = useState(todayIso())
   const [note, setNote] = useState('')
-  const [followsPayday, setFollowsPayday] = useState(false)
-  const [followsCycleStart, setFollowsCycleStart] = useState(false)
-  const [frequency, setFrequency] = useState<RecurringFrequency>('monthly')
-  const [intervalWeeks, setIntervalWeeks] = useState(4)
   const [name, setName] = useState('')
   // Reverse Salary Sort guard (2026-09 session) — set when Save finds this
   // new transfer would land on the same destination as one or more
@@ -798,10 +789,7 @@ function TransferForm({
   // all" call).
   const [pendingConflicts, setPendingConflicts] = useState<{ conflicts: { payDate: string; amount: number }[]; isRecurring: boolean } | null>(null)
 
-  const fromOption = options.find((o) => o.key === fromKey)
-  const toOption = options.find((o) => o.key === toKey)
   const amountNumber = Number(amount)
-  const canSave = !!fromOption && !!toOption && fromKey !== toKey && amountNumber > 0 && date && (mode === 'one_off' || name.trim())
 
   // Current Account + exactly one other destination is the floor — with
   // nothing to transfer to/from beyond personal, there's nowhere to go.
@@ -819,30 +807,42 @@ function TransferForm({
     )
   }
 
-  function swap() {
-    setFromKey(toKey)
-    setToKey(fromKey)
+  function reset() {
+    setStep('amount')
+    setMode('one_off')
+    setAmount('')
+    setFromOption(null)
+    setToOption(null)
+    setFreqChoice(null)
+    setIntervalWeeks(4)
+    setDate(todayIso())
+    setNote('')
+    setName('')
+    setPendingConflicts(null)
+    onCancel()
   }
 
   function commitSave() {
-    if (!fromOption || !toOption) return
+    if (!fromOption || !toOption || !freqChoice) return
     const from = fromOption.location
     const to = toOption.location
     if (mode === 'one_off') {
       onSaveOneOff(from, to, amountNumber, date, note.trim() || undefined)
     } else {
+      const resolved = resolveTransferFrequencyChoice(freqChoice)
       onSaveRecurring({
         name: name.trim(),
         amount: amountNumber,
-        frequency,
-        intervalWeeks: frequency === 'every_n_weeks' ? intervalWeeks : undefined,
+        frequency: resolved.frequency,
+        intervalWeeks: resolved.frequency === 'every_n_weeks' ? intervalWeeks : undefined,
         anchorDate: date,
         transferFrom: from,
         transferTo: to,
-        followsPayday,
-        followsCycleStart,
+        followsPayday: resolved.followsPayday,
+        followsCycleStart: resolved.followsCycleStart,
       })
     }
+    reset()
   }
 
   function handleSave() {
@@ -864,6 +864,8 @@ function TransferForm({
         return
       }
     } else {
+      if (!freqChoice) return
+      const resolved = resolveTransferFrequencyChoice(freqChoice)
       // Scan this payday-like date plus the next 3 resolved occurrences
       // (Adam's explicit 2026-09 call) — resolved via the exact same
       // generation path the recurring template will actually use once
@@ -875,8 +877,8 @@ function TransferForm({
         amount: amountNumber,
         categoryId: '',
         paymentMethod: 'bank_transfer',
-        frequency,
-        intervalWeeks: frequency === 'every_n_weeks' ? intervalWeeks : undefined,
+        frequency: resolved.frequency,
+        intervalWeeks: resolved.frequency === 'every_n_weeks' ? intervalWeeks : undefined,
         anchorDate: date,
         location: 'personal',
         ownerId: primaryPersonId,
@@ -886,8 +888,8 @@ function TransferForm({
         kind: 'transfer',
         transferFrom: fromOption.location,
         transferTo: toOption.location,
-        followsPayday,
-        followsCycleStart,
+        followsPayday: resolved.followsPayday,
+        followsCycleStart: resolved.followsCycleStart,
       }
       const occurrenceDates = generateTransactionsForTemplate(draftTemplate, new Date(), addYears(new Date(), 2), payCycle)
         .map((o) => o.date)
@@ -901,104 +903,92 @@ function TransferForm({
     commitSave()
   }
 
+  if (step === 'amount') {
+    return (
+      <div className="mb-6 p-4 rounded-2xl flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-[var(--color-ink)]">New transfer</h2>
+          <button onClick={reset} className="text-[var(--color-ink-muted)]">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="flex gap-2">
+          {TRANSFER_MODES.map((tm) => (
+            <button
+              key={tm.value}
+              onClick={() => setMode(tm.value)}
+              className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+              style={{ background: mode === tm.value ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: mode === tm.value ? '#fff' : 'var(--color-ink-muted)' }}
+            >
+              {tm.label}
+            </button>
+          ))}
+        </div>
+        <EditField key="transfer-amount" label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+        <FormButtonRow onCancel={reset} onSave={() => setStep('from')} saveLabel="Continue" saveDisabled={!(amountNumber > 0)} />
+      </div>
+    )
+  }
+
+  if (step === 'from') {
+    return (
+      <LocationStep
+        title="From"
+        options={options}
+        excludeKey={toOption?.key}
+        onPick={(o) => {
+          setFromOption(o)
+          setStep('to')
+        }}
+        onCancel={reset}
+      />
+    )
+  }
+
+  if (step === 'to') {
+    return (
+      <LocationStep
+        title="To"
+        options={options}
+        excludeKey={fromOption?.key}
+        onPick={(o) => {
+          setToOption(o)
+          setStep(mode === 'recurring' ? 'frequency' : 'final')
+        }}
+        onCancel={reset}
+      />
+    )
+  }
+
+  if (step === 'frequency') {
+    return (
+      <FrequencyStep
+        choice={freqChoice}
+        intervalWeeks={intervalWeeks}
+        onChoiceChange={setFreqChoice}
+        onIntervalWeeksChange={setIntervalWeeks}
+        onCancel={reset}
+        onContinue={() => setStep(freqChoice === 'follows_payday' || freqChoice === 'follows_cycle_start' ? 'final' : 'date')}
+      />
+    )
+  }
+
+  if (step === 'date') {
+    return <DateStep value={date} onChange={setDate} onCancel={reset} onContinue={() => setStep('final')} />
+  }
+
+  // final — Name (recurring only) + Note + Save, same trailing fields/
+  // helper text/conflict-guard the old flat form always had.
   return (
     <div className="mb-6 p-4 rounded-2xl flex flex-col gap-4" style={{ background: 'var(--color-surface)' }}>
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold text-[var(--color-ink)]">New transfer</h2>
-        <button onClick={onCancel} className="text-[var(--color-ink-muted)]">
+        <button onClick={reset} className="text-[var(--color-ink-muted)]">
           <X size={18} />
         </button>
       </div>
 
-      <div className="flex gap-2">
-        {TRANSFER_MODES.map((tm) => (
-          <button
-            key={tm.value}
-            onClick={() => setMode(tm.value)}
-            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-            style={{ background: mode === tm.value ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: mode === tm.value ? '#fff' : 'var(--color-ink-muted)' }}
-          >
-            {tm.label}
-          </button>
-        ))}
-      </div>
-
-      <div className="flex items-end gap-2">
-        <label className="flex-1 flex flex-col gap-1 min-w-0">
-          <span className="text-xs text-[var(--color-ink-muted)]">From</span>
-          <select value={fromKey} onChange={(e) => setFromKey(e.target.value)} className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none">
-            {options
-              .filter((o) => o.key !== toKey)
-              .map((o) => (
-                <option key={o.key} value={o.key} style={{ color: '#000' }}>
-                  {o.label}
-                </option>
-              ))}
-          </select>
-        </label>
-        <button onClick={swap} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 mb-1" style={{ background: 'var(--color-bg-elevated)' }} aria-label="Swap From/To">
-          <ArrowLeftRight size={14} className="text-[var(--color-ink-muted)]" />
-        </button>
-        <label className="flex-1 flex flex-col gap-1 min-w-0">
-          <span className="text-xs text-[var(--color-ink-muted)]">To</span>
-          <select value={toKey} onChange={(e) => setToKey(e.target.value)} className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none">
-            {options
-              .filter((o) => o.key !== fromKey)
-              .map((o) => (
-                <option key={o.key} value={o.key} style={{ color: '#000' }}>
-                  {o.label}
-                </option>
-              ))}
-          </select>
-        </label>
-      </div>
-
       {mode === 'recurring' && <EditField key="transfer-name" label="Name" type="text" value={name} onChange={setName} />}
-
-      <EditField key="transfer-amount" label="Amount (£)" type="number" value={amount} onChange={setAmount} />
-
-      {mode === 'one_off' ? (
-        <EditField key="transfer-date" label="Date" type="date" value={date} onChange={setDate} />
-      ) : (
-        <RecurringFrequencyEditor
-          frequency={frequency}
-          intervalWeeks={intervalWeeks}
-          anchorDate={date}
-          onChange={(patch) => {
-            if (patch.frequency) setFrequency(patch.frequency as RecurringFrequency)
-            if (patch.intervalWeeks !== undefined) setIntervalWeeks(patch.intervalWeeks)
-            if (patch.anchorDate) setDate(patch.anchorDate)
-          }}
-        />
-      )}
-
-      {mode === 'recurring' && (
-        <div className="flex flex-col gap-1.5">
-          <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
-            <input
-              type="checkbox"
-              checked={followsPayday}
-              onChange={(e) => {
-                setFollowsPayday(e.target.checked)
-                if (e.target.checked) setFollowsCycleStart(false)
-              }}
-            />
-            Land on payday, even if it moves
-          </label>
-          <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
-            <input
-              type="checkbox"
-              checked={followsCycleStart}
-              onChange={(e) => {
-                setFollowsCycleStart(e.target.checked)
-                if (e.target.checked) setFollowsPayday(false)
-              }}
-            />
-            Land on the start of my budgeting cycle instead
-          </label>
-        </div>
-      )}
-
       <EditField key="transfer-note" label="Note (optional)" type="text" value={note} onChange={setNote} />
 
       <p className="text-xs text-[var(--color-ink-faint)]">
@@ -1006,7 +996,7 @@ function TransferForm({
         {toOption?.location.type === 'personal' ? ', shown as income' : ''}.
       </p>
 
-      <FormButtonRow onCancel={onCancel} onSave={handleSave} saveDisabled={!canSave} />
+      <FormButtonRow onCancel={reset} onSave={handleSave} saveDisabled={mode === 'recurring' && !name.trim()} />
 
       {pendingConflicts && (
         <ConfirmModal
