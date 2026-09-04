@@ -87,7 +87,7 @@ showing on Adam's pay-period rows once a pot/joint account exist.
       show full bill amount, not the per-person share
 - [ ] "Land on cycle period" option added alongside "follow payday"; checkboxes grey out
       day-of-month field when ticked; wording matched with Transfers page; row collapsible
-- [ ] Deletion guard: transactions/bills/transfers created **today** hard-delete regardless
+- [x] Deletion guard: transactions/bills/transfers created **today** hard-delete regardless
       of cleared status (this is also what fixes the stray pot balance bug above)
 - [ ] Pots editable fields currently only name. Let’s make use of the space and permanently move the manage payments form this pot list into this dark-background form, still as a checklist, and drop the red inline text button to manage.
 - [ ] Savings/joint account/pots log deposit/withdrawl and recurring all need a location (to location if withdrawn, from location if deposit). Remember anything created here will auto create the transfer in the transactions page. Further to this, when creating a recurring, this should all be picker modals. First in the flow is the amount, second is the location (from or to based on deposit/withdrawal), third is frequency (options will be weekly, every n weeks, monthly, quarterly, annual, follow pay day or follow pay cycle), and if user selects weekly, every n weeks (gets it’s own step 3a to state number of weeks), monthly, quarterly or annually, then step 4 is a date picker. Step 3a and 4 get skipped if user selects follow payday or pay cycle (search the app for the commonly used wording). This is the standard for all recurring transfers (deposits or withdrawals). This should be the exact same flow when creating recurring transfers in the transactions page except we insert a to location after step 2. For log a deposit or withdrawal, flow is shorter, step 1 is amount, step 2 is from location. This is the same flow used on the transfer section in the transactions page, only has a step 3 for to location. If using the salary page to log these transactions, for deposits, the to location is whatever the deposit is being built on (pot, savings pot or joint account), and reversed for withdrawals, the from location is the target where the withdrawal is being built on.
@@ -190,3 +190,21 @@ needed this time; flagged here in case an older backup ever surfaces one. Two ve
 (`verify-ledger-phase3.ts`, `verify-joint-account.ts`) had "sanity check" assertions baked in
 that literally asserted the old (now-reversed) behaviour — updated to assert the new one.
 Full verify suite + `tsc -b` re-run: no new regressions (same pre-existing gaps as always).
+
+**2026-09-04 — Batch 4, item 5 (deletion guard for today-dated cleared transactions).**
+Confirmed with Adam: "created today" means the transaction's own `date` field equals today
+(there's no creation-timestamp field anywhere on `Transaction`); applies to BOTH the
+generator-delete sweep path AND direct single-transaction deletion. Investigated the direct
+path first (`removeTransaction` in `LedgerContext.tsx`, wired to every row's swipe-to-delete
+in `Expenses.tsx`) — it already deletes unconditionally regardless of cleared status or date,
+no guard exists there to begin with, so nothing needed changing on that path. The real gap
+was the five `sweepPending*` helpers (`LedgerContext.tsx`) that run when a Loan/CreditCard/
+RecurringTemplate/Pension/SavingsPot/Pot is deleted — they kept every cleared transaction
+forever ("cleared is immutable"), which is exactly the mechanism behind the stray-pot-balance
+bug (a cleared recurring-transfer occurrence surviving deletion of its template). Added a
+shared `isSweepableOnGeneratorDelete(t, asOfIso)` predicate (pending OR dated `asOfIso`) and
+threaded an explicit `asOfIso` parameter (defaulting to real today) through all five sweep
+functions, so today-dated cleared rows now get swept away too, everything older stays
+immutable exactly as before. `scripts/verify-pending-sweep-on-delete.ts` gained one new
+today-dated-cleared case per entity type. Full verify suite + `tsc -b` re-run: no new
+regressions.
