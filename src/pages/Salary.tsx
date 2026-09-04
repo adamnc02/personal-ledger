@@ -1314,87 +1314,16 @@ function LogPotTransactionButton({
   )
 }
 
-function PotBillsAndLoansControl({
-  pot,
-  templates,
-  loans,
-  onAssignTemplateLocation,
-  onAssignLoanLocation,
-}: {
-  pot: Pot
-  templates: RecurringTemplate[]
-  loans: Loan[]
-  onAssignTemplateLocation: (templateId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
-  onAssignLoanLocation: (loanId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
-}) {
+/** Every bill/loan eligible to be paid from this pot (already personal, or already this pot's own) — shared shape between PotEditForm's checklist and its Save handler. */
+function potEligibleItems(pot: Pot, templates: RecurringTemplate[], loans: Loan[]) {
   const eligibleTemplates = templates.filter((t) => t.ownerId === pot.personId && (t.location === 'personal' || (t.location === 'pot' && t.potId === pot.id)))
   const eligibleLoans = loans.filter((l) => l.ownerId === pot.personId && (l.location === 'personal' || (l.location === 'pot' && l.potId === pot.id)))
-
   type Item = { key: string; id: string; kind: 'template' | 'loan'; name: string; amount: number; inPot: boolean }
   const items: Item[] = [
     ...eligibleTemplates.map((t) => ({ key: `t:${t.id}`, id: t.id, kind: 'template' as const, name: t.name, amount: t.amount, inPot: t.location === 'pot' })),
     ...eligibleLoans.map((l) => ({ key: `l:${l.id}`, id: l.id, kind: 'loan' as const, name: l.name, amount: l.monthlyPayment, inPot: l.location === 'pot' })),
   ]
-
-  const [checked, setChecked] = useState<Set<string>>(new Set(items.filter((i) => i.inPot).map((i) => i.key)))
-  const [effectiveFrom, setEffectiveFrom] = useState(todayIso())
-  const [editing, setEditing] = useState(false)
-
-  if (items.length === 0) return null
-
-  const dirty = items.some((i) => checked.has(i.key) !== i.inPot)
-
-  if (!editing) {
-    const inPotCount = items.filter((i) => i.inPot).length
-    return (
-      <button onClick={() => setEditing(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-        {inPotCount > 0 ? `Manage what this pot pays (${inPotCount} of ${items.length})` : 'Choose what this pot pays'}
-      </button>
-    )
-  }
-
-  function toggle(key: string) {
-    setChecked((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-  function reset() {
-    setChecked(new Set(items.filter((i) => i.inPot).map((i) => i.key)))
-    setEffectiveFrom(todayIso())
-    setEditing(false)
-  }
-
-  return (
-    <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-      <span className="text-xs font-medium text-[var(--color-ink)]">What this pot pays</span>
-      <div className="flex flex-col divide-y max-h-64 overflow-y-auto" style={{ borderColor: 'var(--color-track)' }}>
-        {items.map((item) => (
-          <label key={item.key} className="py-2 flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" checked={checked.has(item.key)} onChange={() => toggle(item.key)} className="accent-[var(--color-coral)]" />
-            <span className="flex-1 text-sm text-[var(--color-ink)] truncate">{item.name}</span>
-            <span className="text-xs font-mono text-[var(--color-ink-muted)] shrink-0">£{formatCurrency(item.amount)}</span>
-          </label>
-        ))}
-      </div>
-      {dirty && <EditField label="Changes take effect from" type="date" value={effectiveFrom} onChange={setEffectiveFrom} />}
-      <FormButtonRow
-        onCancel={reset}
-        onSave={() => {
-          for (const item of items) {
-            const nowChecked = checked.has(item.key)
-            if (nowChecked === item.inPot) continue // untouched — nothing to do
-            if (item.kind === 'template') onAssignTemplateLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
-            else onAssignLoanLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
-          }
-          setEditing(false)
-        }}
-        saveDisabled={!dirty}
-      />
-    </div>
-  )
+  return items
 }
 
 /** Pot creation — person is already chosen by the PersonPickerCard step before this ever renders (Adam's spec step 1), so unlike SavingsPotForm there's no person selector here, creation-only or edit-mode split.
@@ -1535,9 +1464,55 @@ function PotForm({
   )
 }
 
-/** The edit half of an expanded PotRow — Batch 3 addendum (2026-09-04 UAT): styled to match SavingsPotForm's own editing card (darker --color-bg-elevated background, fields in a 2-column grid, Save/Cancel inside the card) rather than the bare live-saving Field it used to be. Only Name is editable here — opening balance/date are a one-time creation-only anchor, same "immutable anchor, not a live field" rule SavingsPot's own opening balance/date already follow (see SavingsPotForm's own bugfix comment). */
-function PotEditForm({ pot, onCancel, onSave }: { pot: Pot; onCancel: () => void; onSave: (updates: Partial<Omit<Pot, 'id' | 'personId'>>) => void }) {
+/** The edit half of an expanded PotRow — Batch 3 addendum (2026-09-04 UAT): styled to match SavingsPotForm's own editing card (darker --color-bg-elevated background, fields in a 2-column grid, Save/Cancel inside the card) rather than the bare live-saving Field it used to be. Name is the only pot-level field editable here — opening balance/date are a one-time creation-only anchor, same "immutable anchor, not a live field" rule SavingsPot's own opening balance/date already follow (see SavingsPotForm's own bugfix comment).
+ *
+ * Batch 4 (2026-09-04 UAT): the "what this pot pays" bill/loan checklist —
+ * previously its own click-to-reveal card behind a separate red inline
+ * text button, sitting outside this form — is now permanently part of
+ * this same card, still a checklist, saved together with the name in one
+ * Save action. The red inline button is gone. */
+function PotEditForm({
+  pot,
+  templates,
+  loans,
+  onCancel,
+  onSave,
+  onAssignTemplateLocation,
+  onAssignLoanLocation,
+}: {
+  pot: Pot
+  templates: RecurringTemplate[]
+  loans: Loan[]
+  onCancel: () => void
+  onSave: (updates: Partial<Omit<Pot, 'id' | 'personId'>>) => void
+  onAssignTemplateLocation: (templateId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
+  onAssignLoanLocation: (loanId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
+}) {
   const [name, setName] = useState(pot.name)
+  const items = potEligibleItems(pot, templates, loans)
+  const [checked, setChecked] = useState<Set<string>>(new Set(items.filter((i) => i.inPot).map((i) => i.key)))
+  const [effectiveFrom, setEffectiveFrom] = useState(todayIso())
+  const dirty = items.some((i) => checked.has(i.key) !== i.inPot)
+
+  function toggle(key: string) {
+    setChecked((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  function handleSave() {
+    onSave({ name: name.trim() })
+    for (const item of items) {
+      const nowChecked = checked.has(item.key)
+      if (nowChecked === item.inPot) continue // untouched — nothing to do
+      if (item.kind === 'template') onAssignTemplateLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
+      else onAssignLoanLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
+    }
+  }
+
   return (
     <div className="rounded-2xl p-4" style={{ background: 'var(--color-bg-elevated)' }}>
       <div className="grid grid-cols-2 gap-3">
@@ -1550,7 +1525,28 @@ function PotEditForm({ pot, onCancel, onSave }: { pot: Pot; onCancel: () => void
           />
         </Field>
       </div>
-      <FormButtonRow onCancel={onCancel} onSave={() => onSave({ name: name.trim() })} saveDisabled={!name.trim()} />
+
+      {items.length > 0 && (
+        <div className="mt-4">
+          <span className="text-xs font-medium text-[var(--color-ink)]">What this pot pays</span>
+          <div className="flex flex-col divide-y max-h-64 overflow-y-auto mt-2" style={{ borderColor: 'var(--color-track)' }}>
+            {items.map((item) => (
+              <label key={item.key} className="py-2 flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" checked={checked.has(item.key)} onChange={() => toggle(item.key)} className="accent-[var(--color-coral)]" />
+                <span className="flex-1 text-sm text-[var(--color-ink)] truncate">{item.name}</span>
+                <span className="text-xs font-mono text-[var(--color-ink-muted)] shrink-0">£{formatCurrency(item.amount)}</span>
+              </label>
+            ))}
+          </div>
+          {dirty && (
+            <div className="mt-3">
+              <EditField label="Changes take effect from" type="date" value={effectiveFrom} onChange={setEffectiveFrom} />
+            </div>
+          )}
+        </div>
+      )}
+
+      <FormButtonRow onCancel={onCancel} onSave={handleSave} saveDisabled={!name.trim()} />
     </div>
   )
 }
@@ -1624,16 +1620,24 @@ function PotRow({
 
         {isOpen && (
           <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
-            {/* Batch 3 addendum (2026-09-04 UAT): used to be a bare Field
-                sitting directly on the row's own --color-surface
-                background, live-saving on every keystroke — inconsistent
-                with SavingsPotRow's own expanded form (SavingsPotForm),
-                which is the styling standard: fields sit on a darker
+            {/* Batch 3 addendum (2026-09-04 UAT): fields sit on a darker
                 --color-bg-elevated card, in a 2-column grid, with the
-                Cancel/Save pair INSIDE that card — the red inline text
-                buttons (Log a deposit/withdrawal, recurring deposit,
-                bills checklist) stay outside it, below. Matched here. */}
-            <PotEditForm pot={pot} onCancel={onToggle} onSave={(updates) => { onSave(updates); onToggle() }} />
+                Cancel/Save pair INSIDE that card, matching
+                SavingsPotRow's own expanded form (SavingsPotForm) — the
+                red inline text buttons (Log a deposit/withdrawal,
+                recurring deposit) stay outside it, below. Batch 4
+                (2026-09-04 UAT): the bills/loans checklist used to be its
+                own red-inline-button-gated card here too — now folded
+                permanently into PotEditForm itself, see its own comment. */}
+            <PotEditForm
+              pot={pot}
+              templates={templates}
+              loans={loans}
+              onCancel={onToggle}
+              onSave={(updates) => { onSave(updates); onToggle() }}
+              onAssignTemplateLocation={onAssignTemplateLocation}
+              onAssignLoanLocation={onAssignLoanLocation}
+            />
 
             <LogPotTransactionButton onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
             <RecurringTransferEditor
@@ -1644,7 +1648,6 @@ function PotRow({
               onUpdate={onUpdateRecurringTemplate}
               onRemove={onRemoveRecurringTemplate}
             />
-            <PotBillsAndLoansControl pot={pot} templates={templates} loans={loans} onAssignTemplateLocation={onAssignTemplateLocation} onAssignLoanLocation={onAssignLoanLocation} />
           </div>
         )}
       </div>

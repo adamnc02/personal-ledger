@@ -226,12 +226,19 @@ export function Expenses() {
 
   // ── Transfer (2026-09-04 session) — replaces the Savings/Joint/Pots
   // pills entirely (Adam-specified: "remove Savings/Joint/Pots pills
-  // entirely"). One-off hand-logged transfers only — same !sourceType
+  // entirely"). One-off hand-logged transfers, same !sourceType
   // convention as adHocTransactions above (a generated recurring
-  // occurrence carries sourceType: 'recurring_template'; this list is
-  // deliberately just what was typed in here).
+  // occurrence carries sourceType: 'recurring_template') — PLUS
+  // sourceType: 'salary_sort' rows (UAT Batch 4, 2026-09-04 fix): those
+  // are real, independently-editable transfers too (per spec, "I can
+  // edit them here and they will update in the salary sort, and vice
+  // versa" — LedgerContext.tsx's updateTransaction/removeTransaction
+  // already handle the sync), just created by the Salary Sort modal
+  // instead of typed in here. Excluding them left TransferRowItem's own
+  // sourceType === 'salary_sort' coral-arrow special-casing below
+  // permanently unreachable.
   const transferTransactions = data.transactions
-    .filter((t) => t.type === 'transfer' && !t.sourceType)
+    .filter((t) => t.type === 'transfer' && (!t.sourceType || t.sourceType === 'salary_sort'))
     .slice()
     .sort((a, b) => (a.date === b.date ? 0 : a.date < b.date ? 1 : -1))
 

@@ -79,7 +79,7 @@ empty behaviour, Adam's row sorting first ahead of Beverley's, and the sort icon
 showing on Adam's pay-period rows once a pot/joint account exist.
 
 ## Batch 4 — Logic/data bugs (needs sign-off on exact rules before starting)
-- [ ] Salary Sort → generate real Transfer-page transfers (not just ledger transactions);
+- [x] Salary Sort → generate real Transfer-page transfers (not just ledger transactions);
       deleting a transfer zeroes its sort; clearing/deleting a sort deletes its transfers
 - [ ] Pot recurring-deposit flow needs its own From-location picker (currently implies
       pot → pot, which is nonsensical)
@@ -89,7 +89,7 @@ showing on Adam's pay-period rows once a pot/joint account exist.
       day-of-month field when ticked; wording matched with Transfers page; row collapsible
 - [x] Deletion guard: transactions/bills/transfers created **today** hard-delete regardless
       of cleared status (this is also what fixes the stray pot balance bug above)
-- [ ] Pots editable fields currently only name. Let’s make use of the space and permanently move the manage payments form this pot list into this dark-background form, still as a checklist, and drop the red inline text button to manage.
+- [x] Pots editable fields currently only name. Let’s make use of the space and permanently move the manage payments form this pot list into this dark-background form, still as a checklist, and drop the red inline text button to manage.
 - [ ] Savings/joint account/pots log deposit/withdrawl and recurring all need a location (to location if withdrawn, from location if deposit). Remember anything created here will auto create the transfer in the transactions page. Further to this, when creating a recurring, this should all be picker modals. First in the flow is the amount, second is the location (from or to based on deposit/withdrawal), third is frequency (options will be weekly, every n weeks, monthly, quarterly, annual, follow pay day or follow pay cycle), and if user selects weekly, every n weeks (gets it’s own step 3a to state number of weeks), monthly, quarterly or annually, then step 4 is a date picker. Step 3a and 4 get skipped if user selects follow payday or pay cycle (search the app for the commonly used wording). This is the standard for all recurring transfers (deposits or withdrawals). This should be the exact same flow when creating recurring transfers in the transactions page except we insert a to location after step 2. For log a deposit or withdrawal, flow is shorter, step 1 is amount, step 2 is from location. This is the same flow used on the transfer section in the transactions page, only has a step 3 for to location. If using the salary page to log these transactions, for deposits, the to location is whatever the deposit is being built on (pot, savings pot or joint account), and reversed for withdrawals, the from location is the target where the withdrawal is being built on.
 
 ---
@@ -208,3 +208,31 @@ functions, so today-dated cleared rows now get swept away too, everything older 
 immutable exactly as before. `scripts/verify-pending-sweep-on-delete.ts` gained one new
 today-dated-cleared case per entity type. Full verify suite + `tsc -b` re-run: no new
 regressions.
+
+**2026-09-04 — Batch 4, item 1 live-tested — found and fixed one real display bug.** The
+data-layer mechanism (see the earlier note above) was fully correct, but the Transfer page's
+own one-off list (`Expenses.tsx`'s `transferTransactions`) filtered to `!t.sourceType` only —
+written before the Salary Sort mechanism existed, so it silently excluded every
+`sourceType: 'salary_sort'` row. The transaction was real and correctly synced, just
+invisible on the one screen the spec explicitly promises it on ("I can edit them here").
+`TransferRowItem`'s own coral-arrow "Salary Sort · Destination" special-casing was already
+built and correct, just unreachable. Fixed the filter to `!t.sourceType ||
+t.sourceType === 'salary_sort'`. Verified live in a headless-Chromium browser against Adam's
+real fixture backup end to end: created a pot, moved a bill into it, sorted a salary
+(correctly prefilled £37 = the bill's due amount), confirmed the resulting transfer now
+appears on the Transfer page as "Salary Sort · Bills Pot", and confirmed "Clear this sort"
+deletes the transfer and reverts the sort icon to unfilled. `tsc -b` + full verify suite
+re-run: no new regressions.
+
+**2026-09-04 — Batch 4, item 6 (pot checklist relocation) — built and live-tested.** The
+bill/loan checklist (`PotBillsAndLoansControl`) used to be its own click-to-reveal card
+behind a red inline "Manage what this pot pays" text button, sitting outside `PotEditForm`.
+Folded permanently into `PotEditForm` itself (shared `potEligibleItems` helper extracted so
+both the checklist rendering and the Save handler's location-reassignment loop read the same
+list) — one card, one Name field, one always-visible checklist when the pot has eligible
+bills/loans, one Save button that commits both the name and any bill/loan reassignments
+together. The red inline button is gone. Verified live: creating a pot now opens straight
+into this merged form, checking a bill shows it as dirty, and Save persists both the pot and
+the bill's new location together (collapsed summary correctly updates to "pays 1 bill/loan").
+Pure UI change, no `lib/` files touched — confirmed by direct code review plus a clean
+`tsc -b` rather than a verify script.
