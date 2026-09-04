@@ -321,7 +321,6 @@ export function Loans() {
                 categories={visibleCategoriesFor(data, loan.categoryId)}
                 people={data.people}
                 pots={data.pots}
-                hasJointBills={hasJointBills}
                 canBeJoint={canBeJoint}
                 onAddCategory={addCategory}
                 onSave={(u) => updateLoan(loan.id, u)}
@@ -457,7 +456,6 @@ function LoanRow({
   categories,
   people,
   pots,
-  hasJointBills,
   canBeJoint,
   onAddCategory,
   onSave,
@@ -480,7 +478,6 @@ function LoanRow({
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   people: { id: string; name: string }[]
   pots: Pot[]
-  hasJointBills: boolean
   canBeJoint: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
@@ -539,7 +536,6 @@ function LoanRow({
             categories={categories}
             people={people}
             pots={pots}
-            hasJointBills={hasJointBills}
             canBeJoint={canBeJoint}
             onAddCategory={onAddCategory}
             onSave={(u) => {
@@ -678,7 +674,6 @@ function LoanEditPanel({
   categories,
   people,
   pots,
-  hasJointBills,
   canBeJoint,
   onAddCategory,
   onSave,
@@ -695,7 +690,6 @@ function LoanEditPanel({
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   people: { id: string; name: string }[]
   pots: Pot[]
-  hasJointBills: boolean
   canBeJoint: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
@@ -788,19 +782,28 @@ function LoanEditPanel({
 
       <CategoryPicker categories={categories} value={draft.categoryId} onChange={(categoryId) => update({ categoryId })} onAddCategory={onAddCategory} />
 
-      {(hasJointBills || draft.location === 'joint' || pots.some((p) => p.personId === draft.ownerId) || draft.location === 'pot') && (
-        <LocationEditor
-          people={people}
-          pots={pots}
-          canBeJoint={canBeJoint}
-          location={draft.location}
-          ownerId={draft.ownerId}
-          potId={draft.potId}
-          payee={draft.payee}
-          payeeSharePercent={draft.payeeSharePercent}
-          onChange={update}
-        />
-      )}
+      {/* UAT follow-up (2026-09-05, Adam-reported): used to be gated on
+          `hasJointBills || pots.some(p => p.personId === draft.ownerId) ||
+          already joint/pot` — for a loan owned by someone with NO pot of
+          their own (and no joint bill anywhere yet to unlock Joint),
+          that condition was false and this never rendered at all, with
+          no way to even reach the Owner field to reassign ownership to
+          someone who DOES have a pot. LocationEditor already self-gates
+          correctly (renders nothing when truly nothing applies, same as
+          Bills.tsx's own unconditional render) — the outer wrapper here
+          was redundant AND wrong, since it couldn't see a pot change
+          becoming possible after an owner reassignment. */}
+      <LocationEditor
+        people={people}
+        pots={pots}
+        canBeJoint={canBeJoint}
+        location={draft.location}
+        ownerId={draft.ownerId}
+        potId={draft.potId}
+        payee={draft.payee}
+        payeeSharePercent={draft.payeeSharePercent}
+        onChange={update}
+      />
       {/* Pots backlog item (2026-09 session) — governs ONLY this loan's
           own regular monthlyPayment; a recurring overpayment has its own,
           independent location field further down in
@@ -1678,9 +1681,9 @@ function RecurringOverpaymentEditor({
   // afterward, via the inline "Paid from" dropdown further down in the
   // live editor. Held the same way pendingAmount is: nothing is written
   // to `value` until the whole wizard (amount → location → recast)
-  // completes. Only ever shown when the owner actually has a pot to pick
-  // (see the render branch below) — with none, this step is skipped
-  // entirely and behaviour is unchanged from before this session.
+  // completes. Widened 2026-09-05 (Adam-reported): this step always
+  // shows now, not just when the owner happens to have a pot — see the
+  // render branch below.
   const [pendingAmount, setPendingAmount] = useState<LoanRecurringOverpayment['amount'] | null>(null)
   const ownerPots = pots.filter((p) => p.personId === loan.ownerId)
 
@@ -1731,14 +1734,14 @@ function RecurringOverpaymentEditor({
           <button
             disabled={draftAmount.type === 'fixed' ? !(draftAmount.amount > 0) : !(draftAmount.percent > 0)}
             onClick={() => {
-              if (ownerPots.length > 0) {
-                setPendingAmount(draftAmount)
-                setDraftAmount(null)
-              } else {
-                onChange({ startDate: todayIso(), amount: draftAmount })
-                setDraftAmount(null)
-                setChoosingRecast(true)
-              }
+              // UAT follow-up (2026-09-05, Adam-reported): used to skip
+              // straight to the recast choice whenever the owner had no
+              // pot of their own — but "Follows the loan" and "Personal"
+              // are still real, meaningful choices even with no pot to
+              // pick, so the location step should always show, not only
+              // once a pot happens to exist.
+              setPendingAmount(draftAmount)
+              setDraftAmount(null)
             }}
             className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
             style={{ background: 'var(--color-coral)' }}
@@ -1750,14 +1753,16 @@ function RecurringOverpaymentEditor({
     )
   }
 
-  // Picker-First Flows (2026-09 session) — only reachable when the owner
-  // has at least one pot (see ownerPots above); with none, the amount
-  // step's own Continue skips straight to recast, exactly as before this
-  // session. "Follows the loan" mirrors the field's own documented
-  // default (LoanRecurringOverpayment.location in types/ledger.ts) —
-  // explicitly offered here rather than just leaving it unset by
-  // omission, since a person choosing at set-up time deserves to see
-  // that as a real option, not a side effect of skipping the step.
+  // Picker-First Flows (2026-09 session), widened 2026-09-05 (Adam-
+  // reported) — always shown right after Amount, before the recast
+  // choice, regardless of whether the owner has a pot ("Follows the
+  // loan" and "Personal" are real choices either way; ownerPots below
+  // just adds more options when there's a pot to pick from). "Follows
+  // the loan" mirrors the field's own documented default
+  // (LoanRecurringOverpayment.location in types/ledger.ts) — explicitly
+  // offered here rather than just leaving it unset by omission, since a
+  // person choosing at set-up time deserves to see that as a real
+  // option, not a side effect of skipping the step.
   if (!value && !draftAmount && pendingAmount) {
     const commit = (patch: { location?: 'personal' | 'pot'; potId?: string }) => {
       onChange({ startDate: todayIso(), amount: pendingAmount, ...patch })
@@ -1905,33 +1910,35 @@ function RecurringOverpaymentEditor({
           regular payment," exactly what already happened before this
           field existed. A flat overwrite, not effective-dated — see that
           same type comment for why. */}
-      {ownerPots.length > 0 && (
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-[var(--color-ink-muted)]">Paid from</span>
-          <select
-            value={value.location === 'pot' ? `pot:${value.potId ?? ''}` : (value.location ?? '')}
-            onChange={(e) => {
-              const raw = e.target.value
-              if (raw === '') onChange({ ...value, location: undefined, potId: undefined })
-              else if (raw === 'personal') onChange({ ...value, location: 'personal', potId: undefined })
-              else onChange({ ...value, location: 'pot', potId: raw.slice(4) })
-            }}
-            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-          >
-            <option value="" style={{ color: '#000' }}>
-              Follows the loan's own location
+      {/* UAT follow-up (2026-09-05, Adam-reported): used to be gated on
+          `ownerPots.length > 0` too — "Follows the loan's own location"
+          and "Personal" are real choices even with no pot, so this field
+          always shows now, matching the creation wizard's own fix. */}
+      <label className="flex flex-col gap-1">
+        <span className="text-xs text-[var(--color-ink-muted)]">Paid from</span>
+        <select
+          value={value.location === 'pot' ? `pot:${value.potId ?? ''}` : (value.location ?? '')}
+          onChange={(e) => {
+            const raw = e.target.value
+            if (raw === '') onChange({ ...value, location: undefined, potId: undefined })
+            else if (raw === 'personal') onChange({ ...value, location: 'personal', potId: undefined })
+            else onChange({ ...value, location: 'pot', potId: raw.slice(4) })
+          }}
+          className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+        >
+          <option value="" style={{ color: '#000' }}>
+            Follows the loan's own location
+          </option>
+          <option value="personal" style={{ color: '#000' }}>
+            Personal
+          </option>
+          {ownerPots.map((p) => (
+            <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
+              {p.name}
             </option>
-            <option value="personal" style={{ color: '#000' }}>
-              Personal
-            </option>
-            {ownerPots.map((p) => (
-              <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
+          ))}
+        </select>
+      </label>
 
       <div className="grid grid-cols-2 gap-2">
         <EditField label="Payment date" type="date" value={value.startDate} onChange={(v) => onChange({ ...value, startDate: v })} />

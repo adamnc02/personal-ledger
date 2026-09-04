@@ -172,6 +172,11 @@ function EditSimpleTransactionForm({
 
   const amountNumber = Number(amount)
   const canSave = amountNumber > 0 && !!date
+  // UAT follow-up (2026-09-05, Adam-reported): dims Save when nothing's
+  // actually changed — this form is shared by the Transfer pill's own
+  // edit row as well as any other simple amount/date/note entity, so
+  // this one fix covers both "transaction" and "transfer" edit rows.
+  const dirty = amountNumber !== transaction.amount || date !== transaction.date || note.trim() !== (transaction.note ?? '')
 
   return (
     <div className="p-3 pt-0 flex flex-col gap-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
@@ -184,7 +189,7 @@ function EditSimpleTransactionForm({
         <EditField label="Date" type="date" value={date} onChange={setDate} />
       </div>
       <EditField label="Note (optional)" type="text" value={note} onChange={setNote} />
-      <FormButtonRow onCancel={onCancel} onSave={() => onSave({ amount: amountNumber, date, note: note.trim() || undefined })} saveDisabled={!canSave} />
+      <FormButtonRow onCancel={onCancel} onSave={() => onSave({ amount: amountNumber, date, note: note.trim() || undefined })} saveDisabled={!canSave || !dirty} />
     </div>
   )
 }
@@ -526,6 +531,15 @@ function EditEntryForm({
   // to change that here (changing the linked card itself isn't supported
   // from this form; delete and re-log against the right card instead).
   const paymentMethodEditable = transaction.type !== 'credit_card_spend'
+  // UAT follow-up (2026-09-05, Adam-reported): dims Save when nothing's
+  // actually changed, same rule every other edit panel in the app now
+  // follows.
+  const dirty =
+    name.trim() !== (transaction.note ?? '') ||
+    amountNumber !== transaction.amount ||
+    date !== transaction.date ||
+    categoryId !== transaction.categoryId ||
+    (paymentMethodEditable && paymentMethod !== transaction.paymentMethod)
 
   return (
     <div className="p-3 pt-0 flex flex-col gap-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
@@ -566,7 +580,7 @@ function EditEntryForm({
             note: name.trim(),
           })
         }
-        saveDisabled={!canSave}
+        saveDisabled={!canSave || !dirty}
       />
     </div>
   )
@@ -1155,9 +1169,9 @@ function TransferRecurringRow({
                 const amountNumber = Number(amount)
                 if (amountNumber > 0) onUpdate({ amount: amountNumber })
               }}
-              className="text-xs self-start"
+              className="text-xs self-start disabled:opacity-40"
               style={{ color: 'var(--color-coral)' }}
-              disabled={!(Number(amount) > 0)}
+              disabled={!(Number(amount) > 0) || Number(amount) === template.amount}
             >
               Save amount
             </button>
