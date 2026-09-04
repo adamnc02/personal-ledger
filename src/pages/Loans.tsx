@@ -723,6 +723,10 @@ function LoanEditPanel({
   const [loggingOverpayment, setLoggingOverpayment] = useState(overpaymentPrefill?.mode === 'payoff')
   const [settlingLoan, setSettlingLoan] = useState(false)
   const [calibratingLoan, setCalibratingLoan] = useState(false)
+  // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
+  // when nothing's changed — this panel's Save was a plain always-on
+  // button with no dirty/validity gating at all before this.
+  const dirty = JSON.stringify(draft) !== JSON.stringify(draftFromLoan(loan))
   // Pots backlog item (2026-09 session) — a location change needs its own
   // effective date, same reasoning as Bills.tsx's BillEditPanel (see
   // that component's own comment for the full picture; this mirrors it
@@ -855,6 +859,7 @@ function LoanEditPanel({
       )}
 
       <button
+        disabled={!dirty}
         onClick={() => {
           const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
           if (locationChanged) {
@@ -865,7 +870,7 @@ function LoanEditPanel({
             onSave(draft)
           }
         }}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white"
+        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
         style={{ background: 'var(--color-coral)' }}
       >
         Save
@@ -914,6 +919,9 @@ function CreditCardEditPanel({
   // would re-anchor the card to a figure that already includes logged
   // payments, and the replay would then subtract them a second time.
   const [draft, setDraft] = useState<CreditCardDraft>(() => draftFromCard(storedCard))
+  // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): same dirty
+  // gate as LoanEditPanel's own Save button, just below.
+  const dirty = JSON.stringify(draft) !== JSON.stringify(draftFromCard(storedCard))
   // Matches LoanEditPanel's pattern (loggingOverpayment) — collapsed
   // behind a link by default, same as the loan's own "+ Log an
   // overpayment," confirmed as a real inconsistency otherwise: this form
@@ -1026,8 +1034,9 @@ function CreditCardEditPanel({
       )}
 
       <button
+        disabled={!dirty}
         onClick={() => onSave(draft)}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white"
+        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
         style={{ background: 'var(--color-coral)' }}
       >
         Save

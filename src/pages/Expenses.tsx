@@ -1448,6 +1448,9 @@ function RecurringTransactionEditPanel({
 }) {
   const [draft, setDraft] = useState<RecurringTxDraft>(() => draftFromRecurringTemplate(template))
   const [choosingEffectiveDate, setChoosingEffectiveDate] = useState(false)
+  // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
+  // when nothing's changed, same as BillEditPanel's own dirty check.
+  const dirty = JSON.stringify(draft) !== JSON.stringify(draftFromRecurringTemplate(template))
 
   function update(patch: Partial<RecurringTxDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
@@ -1515,7 +1518,7 @@ function RecurringTransactionEditPanel({
         <Trash2 size={13} /> Delete recurring transaction
       </button>
 
-      <button onClick={handleSaveClick} className="col-span-2 w-full py-2.5 rounded-full text-sm font-semibold text-white mt-1" style={{ background: 'var(--color-coral)' }}>
+      <button disabled={!dirty} onClick={handleSaveClick} className="col-span-2 w-full py-2.5 rounded-full text-sm font-semibold text-white mt-1 disabled:opacity-40" style={{ background: 'var(--color-coral)' }}>
         Save
       </button>
     </div>

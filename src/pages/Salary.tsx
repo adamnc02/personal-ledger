@@ -278,6 +278,7 @@ function PensionForm({
           Cancel
         </button>
         <button
+          disabled={!name.trim()}
           onClick={() => {
             if (!name.trim()) return
             onSave(personId, {
@@ -290,7 +291,7 @@ function PensionForm({
               cycleStartFollowsPayday,
             })
           }}
-          className="flex-1 py-2 rounded-full text-sm font-semibold text-white"
+          className="flex-1 py-2 rounded-full text-sm font-semibold text-white disabled:opacity-40"
           style={{ background: 'var(--color-coral)' }}
         >
           Save
@@ -723,11 +724,12 @@ export function SavingsPotForm({
           Cancel
         </button>
         <button
+          disabled={!name.trim()}
           onClick={() => {
             if (!name.trim()) return
             setConfirming(true)
           }}
-          className="flex-1 py-2 rounded-full text-sm font-semibold text-white"
+          className="flex-1 py-2 rounded-full text-sm font-semibold text-white disabled:opacity-40"
           style={{ background: 'var(--color-coral)' }}
         >
           Save
@@ -792,7 +794,16 @@ function RecurringTransferEditor({
   onUpdate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemove: (id: string) => void
 }) {
-  const existing = templates.find((t) => t.kind === 'transfer' && (locationsEqual(t.transferTo, location) || locationsEqual(t.transferFrom, location)))
+  // UAT Batch 4 follow-up (2026-09-04, Adam-reported): this used to match
+  // ANY transfer touching this location and treat it as THE one slot —
+  // so configuring a recurring deposit made the "+ Add" button disappear
+  // entirely, with no way to also add a recurring withdrawal (or vice
+  // versa). A deposit (transferTo === location) and a withdrawal
+  // (transferFrom === location) are independent slots now; the "+"
+  // button only disappears once BOTH are configured.
+  const existingDeposit = templates.find((t) => t.kind === 'transfer' && locationsEqual(t.transferTo, location))
+  const existingWithdrawal = templates.find((t) => t.kind === 'transfer' && locationsEqual(t.transferFrom, location))
+  const bothConfigured = !!existingDeposit && !!existingWithdrawal
   const fixedKey = transferLocationKey(location)
 
   const [step, setStep] = useState<RecurringCreateStep>('closed')
@@ -830,18 +841,40 @@ function RecurringTransferEditor({
     reset()
   }
 
-  if (!existing && step === 'closed') {
+  if (step === 'closed') {
     return (
-      <button onClick={() => setStep('type')} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-        + Add a recurring transfer
-      </button>
+      <>
+        {existingDeposit && <RecurringExistingDeposit template={existingDeposit} onUpdate={onUpdate} onRemove={onRemove} />}
+        {existingWithdrawal && <RecurringExistingDeposit template={existingWithdrawal} onUpdate={onUpdate} onRemove={onRemove} />}
+        {!bothConfigured && (
+          <button
+            onClick={() => {
+              // Skip the Deposit/Withdrawal choice entirely when only one
+              // direction is still available — nothing meaningful to pick.
+              if (existingDeposit && !existingWithdrawal) {
+                setType('withdrawal')
+                setStep('amount')
+              } else if (existingWithdrawal && !existingDeposit) {
+                setType('deposit')
+                setStep('amount')
+              } else {
+                setStep('type')
+              }
+            }}
+            className="text-xs font-medium self-start"
+            style={{ color: 'var(--color-coral)' }}
+          >
+            + Add a recurring transfer
+          </button>
+        )}
+      </>
     )
   }
 
   // Adam's explicit correction (2026-09-04): Deposit/Withdrawal is its
   // own first step here, same reasoning as LogTransferButton's — this
   // wizard needs direction before the location step can label itself.
-  if (!existing && step === 'type') {
+  if (step === 'type') {
     return (
       <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
         <div className="flex items-center justify-between">
@@ -876,11 +909,11 @@ function RecurringTransferEditor({
     )
   }
 
-  if (!existing && step === 'amount') {
+  if (step === 'amount') {
     return <AmountStep value={draftAmount} onChange={setDraftAmount} onCancel={reset} onContinue={() => setStep('location')} />
   }
 
-  if (!existing && step === 'location') {
+  if (step === 'location') {
     return (
       <LocationStep
         title={type === 'deposit' ? 'From' : 'To'}
@@ -895,7 +928,7 @@ function RecurringTransferEditor({
     )
   }
 
-  if (!existing && step === 'frequency') {
+  if (step === 'frequency') {
     return (
       <FrequencyStep
         choice={freqChoice}
@@ -911,11 +944,8 @@ function RecurringTransferEditor({
     )
   }
 
-  if (!existing && step === 'date') {
-    return <DateStep value={date} onChange={setDate} onCancel={reset} onContinue={commitCreate} continueLabel="Create" />
-  }
-
-  return <RecurringExistingDeposit template={existing!} onUpdate={onUpdate} onRemove={onRemove} />
+  // step === 'date'
+  return <DateStep value={date} onChange={setDate} onCancel={reset} onContinue={commitCreate} continueLabel="Create" />
 }
 
 /** The already-configured-template half of RecurringTransferEditor, above — split out once it needed its own draft/collapse state. Batch 3 (2026-09-04 UAT): this used to live-save every field the instant it changed and was always expanded; now a collapsed one-line summary by default (tap to expand), and edits are a local draft that only commits on Save/reverts on Cancel — matching every other editable card in this file (PotRow, SavingsPotRow) rather than being the one live-editing exception.
@@ -1460,13 +1490,38 @@ function SavingsPotLedgerModal({
  */
 
 /** Every bill/loan eligible to be paid from this pot (already personal, or already this pot's own) — shared shape between PotEditForm's checklist and its Save handler. */
+/**
+ * UAT Batch 4 follow-up (2026-09-04, Adam-reported): this used to filter
+ * templates by `location`/`ownerId` alone, with no `kind` check — a
+ * transfer template DEPOSITING into this pot resolves `location:
+ * 'personal'` too (locationTypeForTransfer treats personal-leg transfers
+ * that way), so it silently satisfied the "personal bill eligible to
+ * move into this pot" condition and showed up here as if it were a bill,
+ * unticked and reassignable, which makes no sense for money moving IN.
+ * Now explicitly `kind: 'transaction'` only for bills/loans, PLUS a
+ * separate, always-ticked-and-LOCKED entry for any recurring transfer
+ * WITHDRAWAL already set up FROM this pot (transferFrom === this pot) —
+ * that's a real standing pot outgoing worth showing here, but its
+ * location isn't something this checklist can reassign (it's fixed by
+ * the transfer's own from/to, edited via RecurringTransferEditor
+ * instead), so it's neither a deposit nor an untickable bill.
+ */
 function potEligibleItems(pot: Pot, templates: RecurringTemplate[], loans: Loan[]) {
-  const eligibleTemplates = templates.filter((t) => t.ownerId === pot.personId && (t.location === 'personal' || (t.location === 'pot' && t.potId === pot.id)))
+  // A real bill's `kind` is undefined in practice (never explicitly
+  // 'bill' — see RecurringTemplate.kind's own comment; 'transaction' and
+  // 'transfer' are the two later-added extensions), so the exclusion has
+  // to be `!== 'transfer'`, not `=== 'transaction'` — the latter silently
+  // excluded every real bill and made this whole checklist vanish.
+  const eligibleTemplates = templates.filter(
+    (t) => t.kind !== 'transfer' && t.ownerId === pot.personId && (t.location === 'personal' || (t.location === 'pot' && t.potId === pot.id)),
+  )
   const eligibleLoans = loans.filter((l) => l.ownerId === pot.personId && (l.location === 'personal' || (l.location === 'pot' && l.potId === pot.id)))
-  type Item = { key: string; id: string; kind: 'template' | 'loan'; name: string; amount: number; inPot: boolean }
+  const potWithdrawals = templates.filter((t) => t.kind === 'transfer' && t.transferFrom?.type === 'pot' && t.transferFrom.potId === pot.id)
+  type Item = { key: string; id: string; kind: 'template' | 'loan' | 'withdrawal'; name: string; amount: number; inPot: boolean; locked?: boolean }
   const items: Item[] = [
     ...eligibleTemplates.map((t) => ({ key: `t:${t.id}`, id: t.id, kind: 'template' as const, name: t.name, amount: t.amount, inPot: t.location === 'pot' })),
     ...eligibleLoans.map((l) => ({ key: `l:${l.id}`, id: l.id, kind: 'loan' as const, name: l.name, amount: l.monthlyPayment, inPot: l.location === 'pot' })),
+    ...potWithdrawals.map((t) => ({ key: `w:${t.id}`, id: t.id, kind: 'withdrawal' as const, name: t.name, amount: t.amount, inPot: true, locked: true })),
   ]
   return items
 }
@@ -1637,7 +1692,14 @@ function PotEditForm({
   const items = potEligibleItems(pot, templates, loans)
   const [checked, setChecked] = useState<Set<string>>(new Set(items.filter((i) => i.inPot).map((i) => i.key)))
   const [effectiveFrom, setEffectiveFrom] = useState(todayIso())
-  const dirty = items.some((i) => checked.has(i.key) !== i.inPot)
+  // Locked items (recurring withdrawals) are never part of the draft —
+  // their checked state always reflects the real data (always `true`,
+  // by construction), never the stale `checked` Set from whenever this
+  // form last mounted. Without this, a withdrawal created while this
+  // form stayed open (e.g. via "+ Add a recurring transfer" just below)
+  // rendered unticked until the pot row was collapsed and reopened.
+  const isChecked = (item: (typeof items)[number]) => (item.locked ? item.inPot : checked.has(item.key))
+  const dirty = items.some((i) => !i.locked && checked.has(i.key) !== i.inPot)
 
   function toggle(key: string) {
     setChecked((prev) => {
@@ -1651,6 +1713,7 @@ function PotEditForm({
   function handleSave() {
     onSave({ name: name.trim() })
     for (const item of items) {
+      if (item.kind === 'withdrawal') continue // locked — its location comes from the transfer's own from/to, not reassignable here
       const nowChecked = checked.has(item.key)
       if (nowChecked === item.inPot) continue // untouched — nothing to do
       if (item.kind === 'template') onAssignTemplateLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
@@ -1676,9 +1739,18 @@ function PotEditForm({
           <span className="text-xs font-medium text-[var(--color-ink)]">What this pot pays</span>
           <div className="flex flex-col divide-y max-h-64 overflow-y-auto mt-2" style={{ borderColor: 'var(--color-track)' }}>
             {items.map((item) => (
-              <label key={item.key} className="py-2 flex items-center gap-3 cursor-pointer">
-                <input type="checkbox" checked={checked.has(item.key)} onChange={() => toggle(item.key)} className="accent-[var(--color-coral)]" />
-                <span className="flex-1 text-sm text-[var(--color-ink)] truncate">{item.name}</span>
+              <label key={item.key} className={`py-2 flex items-center gap-3 ${item.locked ? '' : 'cursor-pointer'}`}>
+                <input
+                  type="checkbox"
+                  checked={isChecked(item)}
+                  disabled={item.locked}
+                  onChange={() => toggle(item.key)}
+                  className="accent-[var(--color-coral)] disabled:opacity-50"
+                />
+                <span className="flex-1 text-sm text-[var(--color-ink)] truncate">
+                  {item.name}
+                  {item.kind === 'withdrawal' && <span className="text-[var(--color-ink-faint)]"> · recurring withdrawal</span>}
+                </span>
                 <span className="text-xs font-mono text-[var(--color-ink-muted)] shrink-0">£{formatCurrency(item.amount)}</span>
               </label>
             ))}
@@ -3099,6 +3171,16 @@ function PayCycleSettingsModal({
   const [draftOpeningBalance, setDraftOpeningBalance] = useState(String(openingBalance))
   const [draftOpeningBalanceDate, setDraftOpeningBalanceDate] = useState(openingBalanceDate)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
+  // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
+  // when nothing's changed, same rule the new Transfer wizards follow.
+  const dirty =
+    draftPayday !== payday ||
+    draftAdjust !== adjustForNonWorkingDay ||
+    draftCycleStartDay !== cycleStartDay ||
+    draftCycleFollowsPayday !== cycleStartFollowsPayday ||
+    draftSalarySortBasis !== salarySortBasis ||
+    (Number(draftOpeningBalance) || 0) !== openingBalance ||
+    draftOpeningBalanceDate !== openingBalanceDate
 
   function handleSave() {
     onSave({
@@ -3208,7 +3290,7 @@ function PayCycleSettingsModal({
           </div>
         )}
 
-        <FormButtonRow onCancel={onClose} onSave={handleSave} />
+        <FormButtonRow onCancel={onClose} onSave={handleSave} saveDisabled={!dirty} />
 
         <div className="mt-6 pt-4 border-t" style={{ borderColor: 'var(--color-track)' }}>
           <button onClick={() => setConfirmingDelete(true)} className="w-full text-center py-2 text-xs font-medium text-[var(--color-ink-faint)]">
@@ -3556,6 +3638,17 @@ function SalarySortModal({
   const [pendingTargets, setPendingTargets] = useState<{ to: TransferLocation; amount: number }[]>([])
   const [skipped, setSkipped] = useState<TransferLocation[]>([])
 
+  // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
+  // when the draft amounts (after the same >0 filter Save itself applies)
+  // exactly match what's already saved for this payday — a suggested
+  // prefill the person hasn't touched still counts as "nothing to save"
+  // until it would actually change a real target.
+  const draftTargets = destinations.map((d) => ({ to: d.location, amount: Number(drafts[transferLocationKey(d.location)]) || 0 })).filter((t) => t.amount > 0)
+  const currentTargets = existingSort?.targets ?? []
+  const dirty =
+    draftTargets.length !== currentTargets.length ||
+    draftTargets.some((t) => !currentTargets.some((ct) => locationsEqual(ct.to, t.to) && ct.amount === t.amount))
+
   function handleSaveClick() {
     const targets = destinations.map((d) => ({ to: d.location, amount: Number(drafts[transferLocationKey(d.location)]) || 0 })).filter((t) => t.amount > 0)
     const conflicts = targets
@@ -3638,7 +3731,7 @@ function SalarySortModal({
           })}
         </div>
 
-        <FormButtonRow onCancel={onClose} onSave={handleSaveClick} />
+        <FormButtonRow onCancel={onClose} onSave={handleSaveClick} saveDisabled={!dirty} />
 
         {existingSort && (
           <button onClick={() => setConfirmingClearAll(true)} className="w-full text-center py-2 mt-3 text-xs font-medium" style={{ color: 'var(--color-negative)' }}>

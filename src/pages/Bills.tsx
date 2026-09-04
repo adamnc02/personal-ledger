@@ -520,6 +520,12 @@ function BillEditPanel({
   }
 
   const locationChanged = draft.location !== template.location || (draft.location === 'pot' && draft.potId !== template.potId)
+  // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
+  // when nothing's actually changed, matching the same rule the new
+  // Transfer wizards already follow — same "compare against the mount-
+  // time snapshot" approach `dirty` already uses elsewhere in this app
+  // (e.g. PotEditForm's own checklist dirty check).
+  const dirty = JSON.stringify(draft) !== JSON.stringify(draftFromTemplate(template))
 
   function handleSaveClick() {
     // A genuine amount change gets routed through "which payment should
@@ -645,7 +651,7 @@ function BillEditPanel({
       )}
 
       <div className="col-span-2 mt-1">
-        <FormButtonRow onCancel={onCancel} onSave={handleSaveClick} />
+        <FormButtonRow onCancel={onCancel} onSave={handleSaveClick} saveDisabled={!dirty} />
       </div>
     </div>
   )
