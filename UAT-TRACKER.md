@@ -59,6 +59,25 @@ added/edited/cancelled/saved a recurring deposit (collapse + draft-revert-on-Can
 confirmed), and set a bill to Joint via the flattened Bills-page picker, confirming both the
 Joint pill and the first-time joint-account-setup prompt fire correctly.
 
+### Batch 3 addendum — Wallet page UI consistency — ✅ DONE, awaiting your UAT
+- [x] Pot's expanded edit form now matches Savings' own styling standard: fields on a
+      darker `--color-bg-elevated` card, 2-column grid, Save/Cancel inside that card — the
+      red inline text buttons (Log a deposit/withdrawal, recurring deposit, bills checklist)
+      stay outside it, below — `src/pages/Salary.tsx` (`PotEditForm`, new)
+- [x] Salary/Pensions/Savings/Pots sections default to collapsed when empty, instead of
+      always expanded — `src/pages/Salary.tsx` (`defaultOpen` on each `CollapsibleSection`)
+- [x] Primary person's row always sorted first in the Salary section's list (display-order
+      only — `data.people`'s own underlying order is untouched everywhere else)
+- [x] Salary sorter icon's visibility condition (savings pot OR pot OR joint account) —
+      checked against real data live in the browser and confirmed it was already correct;
+      no code change needed
+
+Verified: `tsc -b` clean, full `verify-*.ts` suite re-run with no new regressions (same two
+pre-existing gaps as always). Driven live in a headless-Chromium browser against Adam's real
+fixture backup — confirmed the pot edit form's new styling, both sections' collapse-when-
+empty behaviour, Adam's row sorting first ahead of Beverley's, and the sort icon correctly
+showing on Adam's pay-period rows once a pot/joint account exist.
+
 ## Batch 4 — Logic/data bugs (needs sign-off on exact rules before starting)
 - [ ] Salary Sort → generate real Transfer-page transfers (not just ledger transactions);
       deleting a transfer zeroes its sort; clearing/deleting a sort deletes its transfers
@@ -131,3 +150,10 @@ Also found and fixed one near-miss while building the Joint pill: the app alread
 a badge accent) — using it for white-on-token badge text would have reproduced the exact
 invisible-Cancel-button bug from Batch 2, just on a new element. Used a neutral outlined
 pill (same border-based approach as that fix) instead.
+
+**2026-09-04 — Batch 3 addendum, "Set as me" request clarified.** "Set as me" was
+deliberately moved off the Salary rows into a dedicated People modal in an earlier session
+(2026-09-02, "household ownership model" decision). Adam's "always show the salary 'Set as
+me' at the top of the salary section" did NOT mean reversing that move — confirmed it means
+the primary person's row should always be sorted first in the Salary section's own list.
+The People modal remains the only place to actually change who's primary.
