@@ -784,31 +784,69 @@ function RecurringTransferEditor({
     )
   }
 
+  // Batch 3 (2026-09-04 UAT): step 1's Cancel/Continue used to be small
+  // right-aligned text/pill buttons — every other creation form in this
+  // file (PotForm, SavingsPotForm) uses a full-width Cancel/Save pill row.
+  // Matched here via the same FormButtonRow every one of those already
+  // uses, saveLabel overridden since this step doesn't actually create
+  // the template yet (RecurringExistingDeposit below does that).
   if (!existing && draftAmount !== null) {
     return (
       <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
         <EditField label="Amount (£)" type="number" value={draftAmount} onChange={(v) => setDraftAmount(Number(v) || 0)} />
-        <div className="flex justify-end gap-3 mt-1">
-          <button onClick={() => setDraftAmount(null)} className="text-xs text-[var(--color-ink-muted)]">
-            Cancel
-          </button>
-          <button
-            disabled={!(draftAmount > 0)}
-            onClick={() => {
-              onAdd({ name: defaultName, amount: draftAmount, frequency: 'monthly', anchorDate: todayIso(), transferFrom: { type: 'personal' }, transferTo: location })
-              setDraftAmount(null)
-            }}
-            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
-            style={{ background: 'var(--color-coral)' }}
-          >
-            Continue
-          </button>
-        </div>
+        <FormButtonRow
+          onCancel={() => setDraftAmount(null)}
+          onSave={() => {
+            onAdd({ name: defaultName, amount: draftAmount, frequency: 'monthly', anchorDate: todayIso(), transferFrom: { type: 'personal' }, transferTo: location })
+            setDraftAmount(null)
+          }}
+          saveDisabled={!(draftAmount > 0)}
+          saveLabel="Continue"
+        />
       </div>
     )
   }
 
-  const template = existing!
+  return <RecurringExistingDeposit template={existing!} onUpdate={onUpdate} onRemove={onRemove} />
+}
+
+/** The already-configured-template half of RecurringTransferEditor, above — split out once it needed its own draft/collapse state. Batch 3 (2026-09-04 UAT): this used to live-save every field the instant it changed and was always expanded; now a collapsed one-line summary by default (tap to expand), and edits are a local draft that only commits on Save/reverts on Cancel — matching every other editable card in this file (PotRow, SavingsPotRow) rather than being the one live-editing exception. */
+function RecurringExistingDeposit({
+  template,
+  onUpdate,
+  onRemove,
+}: {
+  template: RecurringTemplate
+  onUpdate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
+  onRemove: (id: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const [draftAmount, setDraftAmount] = useState(template.amount)
+  const [draftDay, setDraftDay] = useState(new Date(template.anchorDate).getDate())
+  const [draftFollowsPayday, setDraftFollowsPayday] = useState(!!template.followsPayday)
+
+  function startEditing() {
+    setDraftAmount(template.amount)
+    setDraftDay(new Date(template.anchorDate).getDate())
+    setDraftFollowsPayday(!!template.followsPayday)
+    setExpanded(true)
+  }
+
+  if (!expanded) {
+    return (
+      <button onClick={startEditing} className="rounded-xl p-3 flex items-center justify-between text-left" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div>
+          <span className="text-xs font-medium text-[var(--color-ink)]">Recurring deposit</span>
+          <p className="text-xs text-[var(--color-ink-muted)]">
+            £{formatCurrency(template.amount)}/mo · day {new Date(template.anchorDate).getDate()}
+            {template.followsPayday ? ' · follows payday' : ''}
+          </p>
+        </div>
+        <ChevronDown size={16} className="text-[var(--color-ink-muted)] shrink-0" />
+      </button>
+    )
+  }
+
   return (
     <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
       <div className="flex items-center justify-between">
@@ -818,24 +856,24 @@ function RecurringTransferEditor({
         </button>
       </div>
       <div className="grid grid-cols-2 gap-2">
-        <EditField label="Amount (£)" type="number" value={template.amount} onChange={(v) => onUpdate(template.id, { amount: Number(v) || 0 })} />
-        <EditField
-          label="On day of month"
-          type="number"
-          value={new Date(template.anchorDate).getDate()}
-          onChange={(v) => {
-            const day = Math.min(31, Math.max(1, Number(v) || 1))
-            const anchor = new Date(template.anchorDate)
-            anchor.setDate(day)
-            onUpdate(template.id, { anchorDate: toLocalIsoDate(anchor) })
-          }}
-        />
+        <EditField label="Amount (£)" type="number" value={draftAmount} onChange={(v) => setDraftAmount(Number(v) || 0)} />
+        <EditField label="On day of month" type="number" value={draftDay} onChange={(v) => setDraftDay(Math.min(31, Math.max(1, Number(v) || 1)))} />
       </div>
       <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
-        <input type="checkbox" checked={!!template.followsPayday} onChange={(e) => onUpdate(template.id, { followsPayday: e.target.checked })} />
+        <input type="checkbox" checked={draftFollowsPayday} onChange={(e) => setDraftFollowsPayday(e.target.checked)} />
         Land on payday, even if it moves
       </label>
       <RecurringTransferPauseControl template={template} onUpdate={(updates) => onUpdate(template.id, updates)} />
+      <FormButtonRow
+        onCancel={() => setExpanded(false)}
+        onSave={() => {
+          const anchor = new Date(template.anchorDate)
+          anchor.setDate(draftDay)
+          onUpdate(template.id, { amount: draftAmount, anchorDate: toLocalIsoDate(anchor), followsPayday: draftFollowsPayday })
+          setExpanded(false)
+        }}
+        saveDisabled={!(draftAmount > 0)}
+      />
     </div>
   )
 }
@@ -1359,7 +1397,15 @@ function PotBillsAndLoansControl({
   )
 }
 
-/** Pot creation — person is already chosen by the PersonPickerCard step before this ever renders (Adam's spec step 1), so unlike SavingsPotForm there's no person selector here, creation-only or edit-mode split. Just name (step 2), then — only if this person actually has any eligible personal bills — the move-in checklist (step 3) and its effective date (step 4). A brand-new pot always starts at £0 as of today; Adam's spec never describes an "existing pot with a starting balance" option the way SavingsPot/Pension/Loan get, so this deliberately doesn't offer one. */
+/** Pot creation — person is already chosen by the PersonPickerCard step before this ever renders (Adam's spec step 1), so unlike SavingsPotForm there's no person selector here, creation-only or edit-mode split.
+ *
+ * Batch 3 (2026-09-04 UAT): a brand-new pot used to always start at £0 as
+ * of today with no way to say otherwise — root-caused as the actual cause
+ * of a reported "£100 total" bug (a stray already-cleared recurring
+ * transfer occurrence was the only thing giving the pot any balance at
+ * all, since there was no legitimate opening balance to anchor to). Now
+ * asks new-vs-existing FIRST, same as SavingsPotForm's own step, before
+ * name/checklist. */
 function PotForm({
   eligibleBills,
   onCancel,
@@ -1367,9 +1413,12 @@ function PotForm({
 }: {
   eligibleBills: RecurringTemplate[]
   onCancel: () => void
-  onSave: (fields: { name: string; billIdsToMoveIn: string[]; effectiveFrom: string }) => void
+  onSave: (fields: { name: string; openingBalance: number; openingDate: string; billIdsToMoveIn: string[]; effectiveFrom: string }) => void
 }) {
+  const [kind, setKind] = useState<'new' | 'existing' | null>(null)
   const [name, setName] = useState('')
+  const [openingBalance, setOpeningBalance] = useState(0)
+  const [openingDate, setOpeningDate] = useState(todayIso())
   const [checkedBillIds, setCheckedBillIds] = useState<Set<string>>(new Set())
   const [effectiveFrom, setEffectiveFrom] = useState(todayIso())
 
@@ -1380,6 +1429,39 @@ function PotForm({
       else next.add(id)
       return next
     })
+  }
+
+  if (kind === null) {
+    return (
+      <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Is this a new pot, or one you already have?</span>
+          <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <button
+            onClick={() => {
+              setKind('new')
+              setOpeningBalance(0)
+              setOpeningDate(todayIso())
+            }}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            New pot — starts at £0.00
+          </button>
+          <button
+            onClick={() => setKind('existing')}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            Existing pot — I already have a balance
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -1393,6 +1475,20 @@ function PotForm({
           className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
         />
       </Field>
+
+      {kind === 'existing' && (
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <Field label="Opening balance (£)">
+            <NumberInput
+              inputMode="decimal"
+              value={openingBalance || ''}
+              onChange={(v) => setOpeningBalance(Number(v) || 0)}
+              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+            />
+          </Field>
+          <EditField label="Opening date" type="date" value={openingDate} onChange={setOpeningDate} />
+        </div>
+      )}
 
       {eligibleBills.length > 0 && (
         <div className="mt-4">
@@ -1420,7 +1516,15 @@ function PotForm({
         </button>
         <button
           disabled={!name.trim()}
-          onClick={() => onSave({ name: name.trim(), billIdsToMoveIn: [...checkedBillIds], effectiveFrom })}
+          onClick={() =>
+            onSave({
+              name: name.trim(),
+              openingBalance: kind === 'existing' ? openingBalance : 0,
+              openingDate: kind === 'existing' ? openingDate : todayIso(),
+              billIdsToMoveIn: [...checkedBillIds],
+              effectiveFrom,
+            })
+          }
           className="flex-1 py-2 rounded-full text-sm font-semibold text-white disabled:opacity-40"
           style={{ background: 'var(--color-coral)' }}
         >
@@ -1471,6 +1575,11 @@ function PotRow({
   const balance = potBalanceAsOf(pot, transactions, new Date())
   const nextDeposit = potDepositOccurrencePreviews(pot, new Date(), 1)[0]
   const payingCount = templates.filter((t) => t.location === 'pot' && t.potId === pot.id).length + loans.filter((l) => l.location === 'pot' && l.potId === pot.id).length
+  // Batch 3 (2026-09-04 UAT): show the opening balance + net activity
+  // since, Joint-Account-card style, rather than a single opaque current-
+  // balance figure — the opening balance/date now exist on every pot
+  // (see PotForm above), so there's something real to break out.
+  const netActivity = balance - pot.openingBalance
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
@@ -1482,7 +1591,11 @@ function PotRow({
               {people.length > 1 && <span className="text-xs text-[var(--color-ink-muted)] shrink-0">{owner?.name ?? 'Unknown'}</span>}
             </div>
             <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
-              £{formatCurrency(balance)} · {payingCount > 0 ? `pays ${payingCount} bill${payingCount === 1 ? '' : 's'}/loan${payingCount === 1 ? '' : 's'}` : 'not paying anything yet'}
+              £{formatCurrency(pot.openingBalance)} opening ({formatFullDate(pot.openingDate)})
+              {netActivity !== 0 ? ` · ${netActivity > 0 ? '+' : '-'}£${formatCurrency(Math.abs(netActivity))} since` : ''}
+            </p>
+            <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+              £{formatCurrency(balance)} now · {payingCount > 0 ? `pays ${payingCount} bill${payingCount === 1 ? '' : 's'}/loan${payingCount === 1 ? '' : 's'}` : 'not paying anything yet'}
               {nextDeposit ? ` · next deposit ${nextDeposit.date}` : ''}
             </p>
           </div>
@@ -2258,9 +2371,9 @@ export function Salary() {
           <PotForm
             eligibleBills={data.recurringTemplates.filter((t) => t.ownerId === addingBillsPotFor && t.location === 'personal')}
             onCancel={() => setAddingBillsPotFor(null)}
-            onSave={({ name, billIdsToMoveIn, effectiveFrom }) => {
+            onSave={({ name, openingBalance, openingDate, billIdsToMoveIn, effectiveFrom }) => {
               const personId = addingBillsPotFor
-              const id = addPot(personId, newPot({ personId, name, openingBalance: 0, openingDate: todayIso() }))
+              const id = addPot(personId, newPot({ personId, name, openingBalance, openingDate }))
               for (const billId of billIdsToMoveIn) assignRecurringTemplateLocation(billId, 'pot', effectiveFrom, { potId: id })
               setAddingBillsPotFor(null)
               setExpandedBillsPotId(id)
