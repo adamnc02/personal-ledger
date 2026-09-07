@@ -147,6 +147,9 @@ export function Bills() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [importGeneration])
   const [locationFilter, setLocationFilter] = useState<'all' | BillLocation>('all')
+  // Batch 9 (2026-09-07, Bug 11) — see BillRow's own comment on why a
+  // brand-new bill flashes on MOUNT rather than at save time.
+  const [justCreatedId, setJustCreatedId] = useState<string | null>(null)
   const routerLocation = useLocation()
   const navigate = useNavigate()
   const prefill = (routerLocation.state as { billPrefill?: BillPrefill } | null)?.billPrefill
@@ -250,7 +253,15 @@ export function Bills() {
             if (prefill) navigate('.', { replace: true, state: null })
           }}
           onSave={(template) => {
-            addRecurringTemplate(template)
+            // Batch 9 (2026-09-07, Bug 11) — no card exists yet at the
+            // moment a brand-new bill saves (BillRow only mounts once
+            // `visibleBills` includes it, on the NEXT render), so a
+            // trigger() call here would have nothing to flash. Recording
+            // the new id and handing it to that row as `shouldFlashOnMount`
+            // lets IT fire its own flash the instant it mounts instead —
+            // same pattern used for new pensions/loans/credit cards.
+            const id = addRecurringTemplate(template)
+            setJustCreatedId(id)
             setAdding(false)
             if (prefill) navigate('.', { replace: true, state: null })
           }}
@@ -291,6 +302,8 @@ export function Bills() {
             onUpdate={(u) => updateRecurringTemplate(template.id, u)}
             onAssignLocation={(location, effectiveFrom, potId) => assignRecurringTemplateLocation(template.id, location, effectiveFrom, { potId })}
             onRemove={() => removeRecurringTemplate(template.id)}
+            shouldFlashOnMount={justCreatedId === template.id}
+            onFlashedOnMount={() => setJustCreatedId(null)}
           />
         ))}
         {visibleBills.length === 0 && !adding && (
@@ -373,6 +386,8 @@ function BillRow({
   onUpdate,
   onAssignLocation,
   onRemove,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   template: RecurringTemplate
   people: { id: string; name: string }[]
@@ -383,10 +398,27 @@ function BillRow({
   onUpdate: (u: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onAssignLocation: (location: BillLocation, effectiveFrom: string, potId?: string) => void
   onRemove: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — true for exactly one render right
+   * after this bill was newly created, so it can flash "Bill saved." on
+   * mount (no card exists yet at the moment a brand-new bill's own save
+   * button is clicked). */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const category = categories.find((c) => c.id === template.categoryId)
-  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  // Batch 9 (2026-09-07, Bug 11) — this row is always an EXISTING bill
+  // (a brand-new one flashes on mount instead, from BillsListSection's
+  // own justCreatedId — see this file's own comment there), so "updated"
+  // is always the right wording here.
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash('Bill updated.')
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash('Bill saved.')
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   // Pots backlog item (2026-09 session) — "all bills paid out of a pot
   // gain a pill/badge with the pot name in the Bills page" (Adam's spec,
   // verbatim).
@@ -474,7 +506,7 @@ function BillRow({
           />
         )}
 
-        <SavedFlashOverlay active={flashActive} />
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
     </SwipeToDelete>
   )
