@@ -2163,6 +2163,7 @@ export function Salary() {
   const {
     data,
     setData,
+    importGeneration,
     addPerson,
     removePerson,
     updatePerson,
@@ -2243,6 +2244,32 @@ export function Salary() {
   const [pensionsSectionOpen, setPensionsSectionOpen] = useState(data.pensions.length > 0)
   const [savingsSectionOpen, setSavingsSectionOpen] = useState(data.savingsPots.length > 0)
   const [potsSectionOpen, setPotsSectionOpen] = useState(data.pots.length > 0)
+
+  // Batch 7 (2026-09-07, bug 7) — a backup import replaces `data` wholesale,
+  // but the four section-open flags above (and the expanded-row ids below)
+  // are plain useState seeded once at mount; React ignores a useState
+  // initial-value argument on re-render, so they never revisit whatever's
+  // actually in the freshly-imported data. Concretely: importing a backup
+  // with a savings pot already in it left the Savings section collapsed
+  // (seeded false from the PRE-import, pot-less data) with no way to open
+  // it except adding a new pot, which happens to also flip its own local
+  // state true. `importGeneration` (LedgerContext) bumps exactly once per
+  // import (never on an ordinary incremental mutation, which is what the
+  // "seed once, then only touch via explicit '+' " design elsewhere in
+  // this file deliberately relies on) — resync here, and drop any expanded-
+  // row id too, since it may point at something the import replaced,
+  // renamed, or removed outright.
+  useEffect(() => {
+    setSalarySectionOpen(data.people.some(hasSalaryConfigured))
+    setPensionsSectionOpen(data.pensions.length > 0)
+    setSavingsSectionOpen(data.savingsPots.length > 0)
+    setPotsSectionOpen(data.pots.length > 0)
+    setExpandedPersonId(data.primaryPersonId ?? null)
+    setExpandedPensionId(null)
+    setExpandedPotId(null)
+    setExpandedBillsPotId(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importGeneration])
 
   // All three sections (Salary, Pensions, Savings) always render, each
   // with its own "+", matching Borrowing's Loans/Credit Cards layout —

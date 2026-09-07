@@ -149,6 +149,7 @@ function LocationPickerCard({
 export function Loans() {
   const {
     data,
+    importGeneration,
     addLoan,
     updateLoan,
     removeLoan,
@@ -183,6 +184,18 @@ export function Loans() {
   const [cardDefaultOwnerId, setCardDefaultOwnerId] = useState(data.primaryPersonId)
   const [expandedLoan, setExpandedLoan] = useState<string | null>(null)
   const [expandedCard, setExpandedCard] = useState<string | null>(null)
+  // Batch 7 (2026-09-07, bug 7) — resync these picker-first defaults (and
+  // drop any stale expanded row) after a backup import, which replaces
+  // `data` wholesale — see LedgerContext's own comment on
+  // `importGeneration` for why an ordinary `data` dependency can't tell
+  // an import apart from any other mutation.
+  useEffect(() => {
+    setLoanDefaultOwnerId(data.primaryPersonId)
+    setCardDefaultOwnerId(data.primaryPersonId)
+    setExpandedLoan(null)
+    setExpandedCard(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importGeneration])
   const [overpaymentPrefill, setOverpaymentPrefill] = useState<OverpaymentPrefill | null>(null)
   const routerLocation = useLocation()
   const navigate = useNavigate()

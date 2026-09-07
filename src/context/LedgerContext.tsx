@@ -130,6 +130,18 @@ interface AdHocInput {
 interface LedgerContextValue {
   data: AppDataV2
   setData: (data: AppDataV2) => void
+  /** Bumped exactly once per `setData` call (i.e. per backup import — the
+   * only current caller). `data` itself changes on every ordinary
+   * mutation too, so it can't tell a page "this was a WHOLESALE
+   * replacement, not an incremental edit" — several pages seed derived
+   * UI state (section open/closed, a default-owner picker) once via
+   * `useState(...)` and never revisit it on later renders, which is
+   * exactly correct for incremental edits but leaves that state stale
+   * after an import replaces the underlying data out from under it
+   * (Batch 7, Bug 7 — "a savings pot stays hidden until you add a new
+   * one"). Pages that need to resync such state on import should key a
+   * `useEffect` off this value. */
+  importGeneration: number
 
   addCategory: (name: string, overrides?: { icon?: string; iconColor?: string }) => Category
   updateCategory: (id: string, updates: Partial<Omit<Category, 'id'>>) => void
@@ -343,6 +355,7 @@ const LedgerContext = createContext<LedgerContextValue | null>(null)
 
 export function LedgerProvider({ children }: { children: ReactNode }) {
   const [data, setDataState] = useState<AppDataV2>(() => loadLedgerData() ?? defaultLedgerData())
+  const [importGeneration, setImportGeneration] = useState(0)
 
   useEffect(() => {
     saveLedgerData(data)
@@ -357,7 +370,10 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     if (settled !== data) setDataState(settled)
   }, [data])
 
-  const setData = (next: AppDataV2) => setDataState(next)
+  const setData = (next: AppDataV2) => {
+    setDataState(next)
+    setImportGeneration((g) => g + 1)
+  }
 
   const addCategory: LedgerContextValue['addCategory'] = (name, overrides) => {
     let created: Category | undefined
@@ -1135,6 +1151,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
   const value: LedgerContextValue = {
     data,
     setData,
+    importGeneration,
     addCategory,
     updateCategory,
     removeCategory,

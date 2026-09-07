@@ -123,7 +123,7 @@ function LocationPickerCard({
 }
 
 export function Bills() {
-  const { data, addRecurringTemplate, updateRecurringTemplate, removeRecurringTemplate, addCategory, assignRecurringTemplateLocation } = useLedgerData()
+  const { data, importGeneration, addRecurringTemplate, updateRecurringTemplate, removeRecurringTemplate, addCategory, assignRecurringTemplateLocation } = useLedgerData()
   const [adding, setAdding] = useState(false)
   // Picker-First Flows (2026-09 session) — Owner then Location, each
   // independently skipped when there's nothing to actually choose
@@ -137,6 +137,14 @@ export function Bills() {
   const [pickingBillLocation, setPickingBillLocation] = useState(false)
   const [billDefaultOwnerId, setBillDefaultOwnerId] = useState(data.primaryPersonId)
   const [billDefaultLocation, setBillDefaultLocation] = useState<{ location: BillLocation; potId?: string }>({ location: 'personal' })
+  // Batch 7 (2026-09-07, bug 7) — resync this picker-first default after a
+  // backup import (which replaces `data` wholesale — see LedgerContext's
+  // own comment on `importGeneration`), rather than leaving it seeded from
+  // whatever the PRE-import primaryPersonId happened to be.
+  useEffect(() => {
+    setBillDefaultOwnerId(data.primaryPersonId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importGeneration])
   const [locationFilter, setLocationFilter] = useState<'all' | BillLocation>('all')
   const routerLocation = useLocation()
   const navigate = useNavigate()
