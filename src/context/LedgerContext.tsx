@@ -836,6 +836,13 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
       const keepTransactionIds = new Set<string>()
       const finalTargets: SalarySortTarget[] = []
       let transactions = prev.transactions
+      // Computed ONCE per save, not per target below — every new
+      // transaction's sourceId and the SalarySort record's own id must
+      // be the SAME value (this is what dropSalarySortTarget/
+      // clearSalarySortTarget match on later), so a fresh nanoid() per
+      // loop iteration would give each new target its own orphaned id
+      // that never matches the record it belongs to.
+      const sortId = existingSort?.id ?? nanoid(8)
 
       for (const incoming of targets) {
         // Adam's explicit 2026-09 call: 0 (or negative) is treated as
@@ -854,7 +861,6 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
           }
           finalTargets.push({ ...existingTarget, amount: incoming.amount })
         } else {
-          const sortId = existingSort?.id ?? nanoid(8)
           const transaction = buildTransferTransaction({ type: 'personal' }, incoming.to, incoming.amount, payDate, prev.primaryPersonId, {
             note: `Salary Sort → ${transferLocationLabel(incoming.to, prev.savingsPots, prev.pots)}`,
             sourceType: 'salary_sort',
@@ -878,7 +884,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
       // An empty result (every target omitted/zeroed) means no SalarySort
       // record at all for this payDate — an empty sort isn't a sort, per
       // dropSalarySortTarget's own rule elsewhere in this file.
-      const salarySorts = finalTargets.length > 0 ? [...otherSorts, { id: existingSort?.id ?? nanoid(8), payDate, targets: finalTargets }] : otherSorts
+      const salarySorts = finalTargets.length > 0 ? [...otherSorts, { id: sortId, payDate, targets: finalTargets }] : otherSorts
 
       return { ...prev, transactions, salarySorts }
     })
