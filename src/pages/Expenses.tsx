@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency, formatFullDate, formatMonthYear } from '../lib/format'
-import { Plus, Trash2, X, ChevronDown, ChevronUp, ArrowRight } from 'lucide-react'
+import { Plus, Trash2, X, ChevronDown, ChevronUp, ArrowRight, ArrowLeftRight } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { EditField } from '../components/EditField'
 import { CategoryIcon } from '../components/CategoryIcon'
@@ -14,7 +14,7 @@ import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButto
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { visibleCategoriesFor } from '../lib/categories'
 import { recentAndUpcomingOccurrences, applyTemplateAmountChange, templateOccurrencePreviews, setPausedTemplateOccurrences, scheduledTemplateDates, generateTransactionsForTemplate, type RawOccurrence } from '../lib/schedule'
-import { transferLocationLabel, buildTransferLocationOptions, type TransferLocationOption } from '../lib/transferLedger'
+import { transferLocationLabel, buildTransferLocationOptions, transferLocationKey, locationsEqual, type TransferLocationOption } from '../lib/transferLedger'
 import { LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
@@ -153,6 +153,7 @@ function MonthCollapsedTransactionList<T>({
 function EditSimpleTransactionForm({
   transaction,
   extraFields,
+  locations,
   onSave,
   onCancel,
 }: {
@@ -163,23 +164,75 @@ function EditSimpleTransactionForm({
   // here), and gets folded into `onSave`'s closure there — this form
   // stays scoped to amount/date/note either way.
   extraFields?: React.ReactNode
-  onSave: (updates: Partial<Pick<Transaction, 'amount' | 'date' | 'note'>>) => void
+  // UAT 2026-09-07 (bug 2.2): a Transfer-page transfer's from/to locations
+  // are editable too — a plain amount/date/note pot/savings picker doesn't
+  // apply here (either side can be any location), so this is its own
+  // opt-in prop rather than folding into `extraFields`.
+  locations?: { options: TransferLocationOption[]; savingsPots: SavingsPot[]; pots: Pot[] }
+  onSave: (updates: Partial<Pick<Transaction, 'amount' | 'date' | 'note' | 'fromLocation' | 'toLocation'>>) => void
   onCancel: () => void
 }) {
   const [amount, setAmount] = useState(String(transaction.amount))
   const [date, setDate] = useState(transaction.date)
   const [note, setNote] = useState(transaction.note ?? '')
+  const [fromLocation, setFromLocation] = useState(transaction.fromLocation)
+  const [toLocation, setToLocation] = useState(transaction.toLocation)
+  const [pickingSide, setPickingSide] = useState<'from' | 'to' | null>(null)
 
   const amountNumber = Number(amount)
-  const canSave = amountNumber > 0 && !!date
+  const canSave = amountNumber > 0 && !!date && (!locations || (!!fromLocation && !!toLocation))
   // UAT follow-up (2026-09-05, Adam-reported): dims Save when nothing's
   // actually changed — this form is shared by the Transfer pill's own
   // edit row as well as any other simple amount/date/note entity, so
   // this one fix covers both "transaction" and "transfer" edit rows.
-  const dirty = amountNumber !== transaction.amount || date !== transaction.date || note.trim() !== (transaction.note ?? '')
+  const dirty =
+    amountNumber !== transaction.amount ||
+    date !== transaction.date ||
+    note.trim() !== (transaction.note ?? '') ||
+    (!!locations && (!locationsEqual(fromLocation, transaction.fromLocation) || !locationsEqual(toLocation, transaction.toLocation)))
+
+  if (locations && pickingSide) {
+    const otherKey = pickingSide === 'from' ? (toLocation ? transferLocationKey(toLocation) : undefined) : fromLocation ? transferLocationKey(fromLocation) : undefined
+    return (
+      <div className="p-3 pt-0 border-t" style={{ borderColor: 'var(--color-track)' }}>
+        <LocationStep
+          title={pickingSide === 'from' ? 'From' : 'To'}
+          options={locations.options}
+          excludeKey={otherKey}
+          onPick={(o) => {
+            if (pickingSide === 'from') setFromLocation(o.location)
+            else setToLocation(o.location)
+            setPickingSide(null)
+          }}
+          onCancel={() => setPickingSide(null)}
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="p-3 pt-0 flex flex-col gap-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
+      {locations && fromLocation && toLocation && (
+        <div className="flex items-center gap-2">
+          <button onClick={() => setPickingSide('from')} className="flex-1 min-w-0 text-left px-3 py-2 rounded-xl text-sm truncate" style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)' }}>
+            {transferLocationLabel(fromLocation, locations.savingsPots, locations.pots)}
+          </button>
+          <button
+            onClick={() => {
+              setFromLocation(toLocation)
+              setToLocation(fromLocation)
+            }}
+            className="shrink-0 p-2 rounded-full"
+            style={{ background: 'var(--color-bg-elevated)' }}
+            aria-label="Swap From and To"
+          >
+            <ArrowLeftRight size={16} className="text-[var(--color-ink-muted)]" />
+          </button>
+          <button onClick={() => setPickingSide('to')} className="flex-1 min-w-0 text-left px-3 py-2 rounded-xl text-sm truncate" style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)' }}>
+            {transferLocationLabel(toLocation, locations.savingsPots, locations.pots)}
+          </button>
+        </div>
+      )}
       {extraFields}
       {transaction.sourceType === 'salary_sort' && (
         <p className="text-xs text-[var(--color-ink-faint)] -mt-1">Changing the amount updates the salary sort too. Changing the date detaches this from the sort.</p>
@@ -189,7 +242,11 @@ function EditSimpleTransactionForm({
         <EditField label="Date" type="date" value={date} onChange={setDate} />
       </div>
       <EditField label="Note (optional)" type="text" value={note} onChange={setNote} />
-      <FormButtonRow onCancel={onCancel} onSave={() => onSave({ amount: amountNumber, date, note: note.trim() || undefined })} saveDisabled={!canSave || !dirty} />
+      <FormButtonRow
+        onCancel={onCancel}
+        onSave={() => onSave({ amount: amountNumber, date, note: note.trim() || undefined, ...(locations ? { fromLocation, toLocation } : {}) })}
+        saveDisabled={!canSave || !dirty}
+      />
     </div>
   )
 }
@@ -257,6 +314,11 @@ export function Expenses() {
     .filter((t) => t.kind === 'transfer')
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name))
+
+  // UAT 2026-09-07 (bug 2.2): shared options list for editing an
+  // already-saved transfer's From/To — same scheme TransferForm's
+  // creation wizard already uses.
+  const transferLocationOptions = buildTransferLocationOptions(data.savingsPots, data.pots, !!data.jointAccount, data.primaryPersonId)
 
   // The Transfer pill only appears once there's somewhere to transfer TO
   // — a savings pot, the joint account, or a pot — same "invisible until
@@ -419,6 +481,7 @@ export function Expenses() {
                 template={template}
                 savingsPots={data.savingsPots}
                 pots={data.pots}
+                locationOptions={transferLocationOptions}
                 onUpdate={(u) => updateRecurringTemplate(template.id, u)}
                 onRemove={() => removeRecurringTemplate(template.id)}
               />
@@ -435,6 +498,7 @@ export function Expenses() {
                   t={t}
                   savingsPots={data.savingsPots}
                   pots={data.pots}
+                  locationOptions={transferLocationOptions}
                   onUpdate={(u) => updateTransaction(t.id, u)}
                   onRemove={() => removeTransaction(t.id)}
                 />
@@ -837,12 +901,13 @@ function TransferForm({
   }
 
   function commitSave() {
-    if (!fromOption || !toOption || !freqChoice) return
+    if (!fromOption || !toOption) return
     const from = fromOption.location
     const to = toOption.location
     if (mode === 'one_off') {
       onSaveOneOff(from, to, amountNumber, date, note.trim() || undefined)
     } else {
+      if (!freqChoice) return
       const resolved = resolveTransferFrequencyChoice(freqChoice)
       onSaveRecurring({
         name: name.trim(),
@@ -1040,20 +1105,20 @@ function TransferRowItem({
   t,
   savingsPots,
   pots,
+  locationOptions,
   onUpdate,
   onRemove,
 }: {
   t: Transaction
   savingsPots: SavingsPot[]
   pots: Pot[]
-  onUpdate: (updates: Partial<Pick<Transaction, 'amount' | 'date' | 'note'>>) => void
+  locationOptions: TransferLocationOption[]
+  onUpdate: (updates: Partial<Pick<Transaction, 'amount' | 'date' | 'note' | 'fromLocation' | 'toLocation'>>) => void
   onRemove: () => void
 }) {
   const [isEditing, setIsEditing] = useState(false)
   const touchesPersonal = t.fromLocation?.type === 'personal' || t.toLocation?.type === 'personal'
   const isWithdrawal = t.toLocation?.type === 'personal'
-  const otherLocation = isWithdrawal ? t.fromLocation : t.toLocation
-  const otherLabel = transferLocationLabel(otherLocation, savingsPots, pots)
   // A direct transfer with no personal leg at all (Pot ↔ Pot, etc., 2026-09
   // UAT session) doesn't fit "Deposit"/"Withdrawal" — neither side is MY
   // personal balance — so it shows both endpoints instead, and its amount
@@ -1061,25 +1126,34 @@ function TransferRowItem({
   // cash either way.
   const fromLabel = transferLocationLabel(t.fromLocation, savingsPots, pots)
   const toLabel = transferLocationLabel(t.toLocation, savingsPots, pots)
+  const isSalarySort = t.sourceType === 'salary_sort'
 
   return (
-    <SwipeToDelete onDelete={onRemove} confirmLabel={touchesPersonal ? otherLabel : `${fromLabel} → ${toLabel}`}>
+    <SwipeToDelete onDelete={onRemove} confirmLabel={`${fromLabel} → ${toLabel}`}>
       <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
         <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center justify-between p-3 text-left">
           <div className="min-w-0">
-            <p className="text-sm font-medium text-[var(--color-ink)] truncate flex items-center gap-1">
-              {t.sourceType === 'salary_sort' ? (
+            <p className="text-sm font-medium text-[var(--color-ink)] truncate flex items-center gap-1.5">
+              {isSalarySort ? (
                 <>
                   <ArrowRight size={13} className="text-[var(--color-coral)] shrink-0" />
-                  Salary Sort · {otherLabel}
-                </>
-              ) : touchesPersonal ? (
-                <>
-                  {isWithdrawal ? 'Withdrawal' : 'Deposit'} · {otherLabel}
+                  Salary Sort · {isWithdrawal ? fromLabel : toLabel}
                 </>
               ) : (
                 <>
                   {fromLabel} → {toLabel}
+                  {touchesPersonal && (
+                    <span
+                      className="px-1.5 py-0.5 rounded-full text-[10px] font-medium shrink-0"
+                      style={{
+                        background: 'var(--color-surface-raised)',
+                        border: '1px solid var(--color-track)',
+                        color: isWithdrawal ? 'var(--color-positive)' : 'var(--color-negative)',
+                      }}
+                    >
+                      {isWithdrawal ? 'Withdrawal' : 'Deposit'}
+                    </span>
+                  )}
                 </>
               )}
             </p>
@@ -1095,6 +1169,7 @@ function TransferRowItem({
         {isEditing && (
           <EditSimpleTransactionForm
             transaction={t}
+            locations={isSalarySort ? undefined : { options: locationOptions, savingsPots, pots }}
             onCancel={() => setIsEditing(false)}
             onSave={(updates) => {
               onUpdate(updates)
@@ -1120,22 +1195,28 @@ function TransferRecurringRow({
   template,
   savingsPots,
   pots,
+  locationOptions,
   onUpdate,
   onRemove,
 }: {
   template: RecurringTemplate
   savingsPots: SavingsPot[]
   pots: Pot[]
+  locationOptions: TransferLocationOption[]
   onUpdate: (updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemove: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [amount, setAmount] = useState(String(template.amount))
+  const [transferFrom, setTransferFrom] = useState(template.transferFrom)
+  const [transferTo, setTransferTo] = useState(template.transferTo)
+  const [pickingSide, setPickingSide] = useState<'from' | 'to' | null>(null)
 
   const touchesPersonal = template.transferFrom?.type === 'personal' || template.transferTo?.type === 'personal'
   const isWithdrawal = template.transferTo?.type === 'personal'
   const fromLabel = transferLocationLabel(template.transferFrom, savingsPots, pots)
   const toLabel = transferLocationLabel(template.transferTo, savingsPots, pots)
+  const locationsDirty = !locationsEqual(transferFrom, template.transferFrom) || !locationsEqual(transferTo, template.transferTo)
 
   const windowDates = scheduledTemplateDates(template, new Date(), addYearsLocal(new Date(), 1))
   const currentlyPaused = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && windowDates.includes(o.originalDate)).map((o) => o.originalDate))
@@ -1146,8 +1227,20 @@ function TransferRecurringRow({
       <div className="relative rounded-2xl px-4 py-3" style={{ background: 'var(--color-surface)' }}>
         <button className="w-full flex items-start justify-between gap-2 text-left" onClick={() => setOpen(!open)}>
           <div className="min-w-0">
-            <p className="font-body text-sm text-[var(--color-ink)] truncate">
-              {touchesPersonal ? `${fromLabel} · ${isWithdrawal ? 'Withdrawal' : 'Deposit'} · ${toLabel}` : `${fromLabel} → ${toLabel}`}
+            <p className="font-body text-sm text-[var(--color-ink)] truncate flex items-center gap-1.5">
+              {fromLabel} → {toLabel}
+              {touchesPersonal && (
+                <span
+                  className="px-1.5 py-0.5 rounded-full text-[10px] font-medium shrink-0"
+                  style={{
+                    background: 'var(--color-surface-raised)',
+                    border: '1px solid var(--color-track)',
+                    color: isWithdrawal ? 'var(--color-positive)' : 'var(--color-negative)',
+                  }}
+                >
+                  {isWithdrawal ? 'Withdrawal' : 'Deposit'}
+                </span>
+              )}
             </p>
             <p className="text-xs text-[var(--color-ink-faint)]">
               {RECURRING_FREQUENCY_LABELS[template.frequency as RecurringFrequency] ?? template.frequency}
@@ -1161,19 +1254,61 @@ function TransferRecurringRow({
             {open ? <ChevronUp size={14} className="text-[var(--color-ink-faint)]" /> : <ChevronDown size={14} className="text-[var(--color-ink-faint)]" />}
           </div>
         </button>
-        {open && (
+        {open && pickingSide && (
+          <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
+            <LocationStep
+              title={pickingSide === 'from' ? 'From' : 'To'}
+              options={locationOptions}
+              excludeKey={pickingSide === 'from' ? (transferTo ? transferLocationKey(transferTo) : undefined) : transferFrom ? transferLocationKey(transferFrom) : undefined}
+              onPick={(o) => {
+                if (pickingSide === 'from') setTransferFrom(o.location)
+                else setTransferTo(o.location)
+                setPickingSide(null)
+              }}
+              onCancel={() => setPickingSide(null)}
+            />
+          </div>
+        )}
+        {open && !pickingSide && (
           <div className="mt-3 pt-3 border-t flex flex-col gap-2" style={{ borderColor: 'var(--color-track)' }}>
+            {transferFrom && transferTo && (
+              <div className="flex items-center gap-2">
+                <button onClick={() => setPickingSide('from')} className="flex-1 min-w-0 text-left px-3 py-2 rounded-xl text-sm truncate" style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)' }}>
+                  {transferLocationLabel(transferFrom, savingsPots, pots)}
+                </button>
+                <button
+                  onClick={() => {
+                    setTransferFrom(transferTo)
+                    setTransferTo(transferFrom)
+                  }}
+                  className="shrink-0 p-2 rounded-full"
+                  style={{ background: 'var(--color-bg-elevated)' }}
+                  aria-label="Swap From and To"
+                >
+                  <ArrowLeftRight size={16} className="text-[var(--color-ink-muted)]" />
+                </button>
+                <button onClick={() => setPickingSide('to')} className="flex-1 min-w-0 text-left px-3 py-2 rounded-xl text-sm truncate" style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)' }}>
+                  {transferLocationLabel(transferTo, savingsPots, pots)}
+                </button>
+              </div>
+            )}
             <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
             <button
               onClick={() => {
                 const amountNumber = Number(amount)
-                if (amountNumber > 0) onUpdate({ amount: amountNumber })
+                const updates: Partial<Omit<RecurringTemplate, 'id'>> = {}
+                if (amountNumber > 0 && amountNumber !== template.amount) updates.amount = amountNumber
+                if (locationsDirty && transferFrom && transferTo) {
+                  updates.transferFrom = transferFrom
+                  updates.transferTo = transferTo
+                }
+                if (Object.keys(updates).length > 0) onUpdate(updates)
               }}
               className="text-xs self-start disabled:opacity-40"
               style={{ color: 'var(--color-coral)' }}
-              disabled={!(Number(amount) > 0) || Number(amount) === template.amount}
+              disabled={(!(Number(amount) > 0) || Number(amount) === template.amount) && !locationsDirty}
             >
-              Save amount
+              Save {locationsDirty ? 'changes' : 'amount'}
             </button>
             <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
               <input
