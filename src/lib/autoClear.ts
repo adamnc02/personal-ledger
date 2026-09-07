@@ -123,15 +123,40 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
   }
 
   // Step 2 — materialize newly-due GENERATED occurrences that have never existed as a real transaction at all.
+  //
+  // BUGFIX (2026-09-07, Adam-reported — "duplicate transaction after
+  // moving a bill's location back and forth"): dedupeKey already uniquely
+  // keys each occurrence by sourceType:sourceId:date "regardless of which
+  // entities are on either end" — Step 4 below has always said so in its
+  // own comment — but Steps 2 and 3 used to each build their OWN
+  // existingKeys set scoped to a single location (`location === 'personal'`
+  // for Step 2, `potId === pot.id` for Step 3), rather than sharing one
+  // global set. That's exactly the gap this bug fell into: reassigning a
+  // bill's location with an effective-from date in the PAST (on/before an
+  // already-materialized occurrence) rewrites that stored transaction's
+  // `location`/`potId` fields via reassignTransactionsForLocationChange,
+  // but if anything about that rewrite didn't apply this pass (e.g. a
+  // re-render's autoClear runs before vs. after the rewrite lands, or two
+  // reassignments happen in quick succession), the existing transaction
+  // could momentarily sit under a location this specific loop wasn't
+  // scanning — invisible to that loop's own narrow existingKeys, so it
+  // materialized a SECOND real transaction for the same occurrence,
+  // rather than recognizing the first one (wherever it currently lives)
+  // as already covering it. One shared `globalExistingKeys` set, built
+  // once from every stored transaction regardless of location/pot/owner
+  // and updated as each step materializes new ones, makes "this
+  // occurrence has already been materialized" a single global fact,
+  // matching the same principle Step 4's transfers already rely on,
+  // rather than three independently-scoped, mutually-blind approximations
+  // of it.
+  const globalExistingKeys = new Set(result.transactions.map(dedupeKey).filter((k): k is string => k !== null))
+
   for (const person of result.people) {
     const payCycle = result.payCycles.find((pc) => pc.personId === person.id)
     if (!payCycle) continue
 
     const rangeStart = new Date(payCycle.openingBalanceDate)
     if (rangeStart > asOf) continue // nothing before the visibility floor is ever due
-
-    const stored = result.transactions.filter((t) => t.location === 'personal' && t.ownerId === person.id)
-    const existingKeys = new Set(stored.map(dedupeKey).filter((k): k is string => k !== null))
 
     const candidates: Omit<Transaction, 'id'>[] = []
     for (const template of result.recurringTemplates.filter((t) => t.location === 'personal' && t.ownerId === person.id)) {
@@ -199,39 +224,38 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
     for (const candidate of candidates) {
       if (candidate.date > asOfIso) continue // safety net — generators are already range-bounded to asOf, but never settle a future-dated one
       const key = dedupeKey(candidate)
-      if (key && existingKeys.has(key)) continue // already materialized (or logged by hand) — don't duplicate
+      if (key && globalExistingKeys.has(key)) continue // already materialized (or logged by hand) — don't duplicate, wherever it currently lives
 
       const real: Transaction = { ...candidate, id: nanoid(8), status: 'cleared' }
       result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
-      if (key) existingKeys.add(key)
+      if (key) globalExistingKeys.add(key)
       changed = true
     }
 
     // Step 3 — settle this person's own due pot-funded bill/loan
     // payments. Entirely separate from the candidates pass above: these
-    // carry location: 'pot', not 'personal', so they're never part of
-    // `stored`/`existingKeys` there (deliberately — see potLedger.ts's
-    // file header, "purely internal to the pot"). Scoped by potId rather
-    // than folded into the personal existingKeys set, for the same
-    // reason the savings-pot/joint loops above are scoped by their own
-    // entity rather than one global pass. Nested inside this person's own
+    // carry location: 'pot', not 'personal' (deliberately — see
+    // potLedger.ts's file header, "purely internal to the pot") — but now
+    // shares the SAME `globalExistingKeys` set as Step 2 (2026-09-07
+    // bugfix, see this function's own comment above `globalExistingKeys`),
+    // rather than its own independently-scoped one, so an occurrence
+    // already materialized under one location can never be re-
+    // materialized again under the other. Nested inside this person's own
     // iteration (rather than a separate top-level loop over every pot)
     // simply so it can reuse this person's own rangeStart/payCycle — a
     // pot always belongs to exactly one person, so there's no case where
     // it needs a different one.
     for (const pot of (result.pots ?? []).filter((p) => p.personId === person.id)) {
-      const potStored = result.transactions.filter((t) => t.potId === pot.id)
-      const potExistingKeys = new Set(potStored.map(dedupeKey).filter((k): k is string => k !== null))
       const potCandidates = generatePotOutgoingTransactions(result, pot, rangeStart, asOf)
 
       for (const candidate of potCandidates) {
         if (candidate.date > asOfIso) continue
         const key = dedupeKey(candidate)
-        if (key && potExistingKeys.has(key)) continue
+        if (key && globalExistingKeys.has(key)) continue
 
         const real: Transaction = { ...candidate, id: nanoid(8), status: 'cleared' }
         result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
-        if (key) potExistingKeys.add(key)
+        if (key) globalExistingKeys.add(key)
         changed = true
       }
     }
@@ -255,19 +279,16 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
     const primaryPayCycle = result.payCycles.find((pc) => pc.personId === result.primaryPersonId)
     const transferRangeStart = primaryPayCycle ? new Date(primaryPayCycle.openingBalanceDate) : new Date(0)
     if (transferRangeStart <= asOf) {
-      const transferStored = result.transactions.filter((t) => t.type === 'transfer' && t.sourceType === 'recurring_template')
-      const transferExistingKeys = new Set(transferStored.map(dedupeKey).filter((k): k is string => k !== null))
-
       for (const template of nonPersonalTransferTemplates) {
         const candidates = generateTransactionsForTemplate(template, transferRangeStart, asOf, primaryPayCycle)
         for (const candidate of candidates) {
           if (candidate.date > asOfIso) continue
           const key = dedupeKey(candidate)
-          if (key && transferExistingKeys.has(key)) continue
+          if (key && globalExistingKeys.has(key)) continue
 
           const real: Transaction = { ...candidate, id: nanoid(8), status: 'cleared' }
           result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
-          if (key) transferExistingKeys.add(key)
+          if (key) globalExistingKeys.add(key)
           changed = true
         }
       }
