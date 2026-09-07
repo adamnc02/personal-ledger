@@ -2222,6 +2222,21 @@ export function Salary() {
   const [expandedBillsPotId, setExpandedBillsPotId] = useState<string | null>(null)
   const [peopleModalOpen, setPeopleModalOpen] = useState(false)
   const [followingPickerOpen, setFollowingPickerOpen] = useState(false)
+  // Batch 5 (2026-09-07, bug 2) — each section's own open/closed state,
+  // lifted up from CollapsibleSection so its "+" can force it open even
+  // while empty (previously: an empty section defaulted to collapsed,
+  // hiding the picker-first add form that "+" was supposed to reveal).
+  // Seeded once from the exact same "empty defaults to collapsed" rule
+  // each section already used as its old `defaultOpen`, then only ever
+  // changed by explicit action (a "+" tap, or cancelling out of adding
+  // the very first item back to empty) — never recomputed from `data`
+  // on every render, or a save elsewhere (e.g. a Pension added from a
+  // future different flow) would unexpectedly snap the section open/shut
+  // under the user.
+  const [salarySectionOpen, setSalarySectionOpen] = useState(data.people.some(hasSalaryConfigured))
+  const [pensionsSectionOpen, setPensionsSectionOpen] = useState(data.pensions.length > 0)
+  const [savingsSectionOpen, setSavingsSectionOpen] = useState(data.savingsPots.length > 0)
+  const [potsSectionOpen, setPotsSectionOpen] = useState(data.pots.length > 0)
 
   // All three sections (Salary, Pensions, Savings) always render, each
   // with its own "+", matching Borrowing's Loans/Credit Cards layout —
@@ -2301,11 +2316,14 @@ export function Salary() {
         title="Salary"
         className="mb-8"
         defaultOpen={anyoneHasSalary}
+        open={salarySectionOpen}
+        onOpenChange={setSalarySectionOpen}
         headerExtra={
           <div className="flex items-center gap-2">
             {anyoneHasSalary && anyoneHasMultipleIncomeSources && <FollowingPickerButton onClick={() => setFollowingPickerOpen(true)} />}
             <AddButton
               onClick={() => {
+                setSalarySectionOpen(true)
                 if (peopleEligibleForNewSalary.length === 0) {
                   setShowNoEligibleSalaryMessage(true)
                   return
@@ -2340,7 +2358,10 @@ export function Salary() {
               if (person && hasSalaryConfigured(person)) setStartingNewJobFor(id)
               setPickingSalaryPerson(false)
             }}
-            onCancel={() => setPickingSalaryPerson(false)}
+            onCancel={() => {
+              setPickingSalaryPerson(false)
+              if (!anyoneHasSalary) setSalarySectionOpen(false)
+            }}
           />
         )}
         <div className="flex flex-col gap-3">
@@ -2372,7 +2393,15 @@ export function Salary() {
                 </div>
 
                 <button
-                  onClick={() => setExpandedPersonId(isOpen ? null : person.id)}
+                  onClick={() => {
+                    setExpandedPersonId(isOpen ? null : person.id)
+                    // Closing this row without ever having saved a salary
+                    // (bug 2's "cancel out of creating the first item" —
+                    // there's no dedicated Cancel button here, this row's
+                    // own collapse IS the cancel) re-collapses the whole
+                    // section if it's still empty afterward.
+                    if (isOpen && !hasSalary && !anyoneHasSalary) setSalarySectionOpen(false)
+                  }}
                   className="w-full flex items-center justify-between text-left py-1"
                 >
                   <SalaryRowSummary person={person} payCycle={payCycle} hasSalary={hasSalary} />
@@ -2468,11 +2497,14 @@ export function Salary() {
         title="Pensions"
         className="mb-8"
         defaultOpen={data.pensions.length > 0}
+        open={pensionsSectionOpen}
+        onOpenChange={setPensionsSectionOpen}
         headerExtra={
           <div className="flex items-center gap-2">
             {!anyoneHasSalary && anyoneHasMultipleIncomeSources && <FollowingPickerButton onClick={() => setFollowingPickerOpen(true)} />}
             <AddButton
               onClick={() => {
+                setPensionsSectionOpen(true)
                 if (data.people.length === 1) {
                   setPensionDefaultPersonId(data.people[0].id)
                   setAddingPension(true)
@@ -2492,14 +2524,20 @@ export function Salary() {
               setPickingPensionPerson(false)
               setAddingPension(true)
             }}
-            onCancel={() => setPickingPensionPerson(false)}
+            onCancel={() => {
+              setPickingPensionPerson(false)
+              if (data.pensions.length === 0) setPensionsSectionOpen(false)
+            }}
           />
         )}
         {addingPension && (
           <PensionForm
             people={data.people}
             defaultPersonId={pensionDefaultPersonId}
-            onCancel={() => setAddingPension(false)}
+            onCancel={() => {
+              setAddingPension(false)
+              if (data.pensions.length === 0) setPensionsSectionOpen(false)
+            }}
             onSave={(personId, fields) => {
               const id = addPension(personId, newPension({ personId, ...fields }))
               setAddingPension(false)
@@ -2534,9 +2572,12 @@ export function Salary() {
         title="Savings"
         className="mb-8"
         defaultOpen={data.savingsPots.length > 0}
+        open={savingsSectionOpen}
+        onOpenChange={setSavingsSectionOpen}
         headerExtra={
           <AddButton
             onClick={() => {
+              setSavingsSectionOpen(true)
               if (data.people.length === 1) setAddingSavingsFor(data.people[0].id)
               else setPickingSavingsPerson(true)
             }}
@@ -2550,14 +2591,20 @@ export function Salary() {
               setAddingSavingsFor(id)
               setPickingSavingsPerson(false)
             }}
-            onCancel={() => setPickingSavingsPerson(false)}
+            onCancel={() => {
+              setPickingSavingsPerson(false)
+              if (data.savingsPots.length === 0) setSavingsSectionOpen(false)
+            }}
           />
         )}
         {addingSavingsFor && (
           <SavingsPotForm
             people={data.people}
             defaultPersonId={addingSavingsFor}
-            onCancel={() => setAddingSavingsFor(null)}
+            onCancel={() => {
+              setAddingSavingsFor(null)
+              if (data.savingsPots.length === 0) setSavingsSectionOpen(false)
+            }}
             onSave={(personId, fields) => {
               const id = addSavingsPot(
                 personId,
@@ -2643,9 +2690,12 @@ export function Salary() {
         title="Pots"
         className="mb-8"
         defaultOpen={data.pots.length > 0}
+        open={potsSectionOpen}
+        onOpenChange={setPotsSectionOpen}
         headerExtra={
           <AddButton
             onClick={() => {
+              setPotsSectionOpen(true)
               if (data.people.length === 1) setAddingBillsPotFor(data.people[0].id)
               else setPickingBillsPotPerson(true)
             }}
@@ -2659,13 +2709,19 @@ export function Salary() {
               setAddingBillsPotFor(id)
               setPickingBillsPotPerson(false)
             }}
-            onCancel={() => setPickingBillsPotPerson(false)}
+            onCancel={() => {
+              setPickingBillsPotPerson(false)
+              if (data.pots.length === 0) setPotsSectionOpen(false)
+            }}
           />
         )}
         {addingBillsPotFor && (
           <PotForm
             eligibleBills={data.recurringTemplates.filter((t) => t.ownerId === addingBillsPotFor && t.location === 'personal')}
-            onCancel={() => setAddingBillsPotFor(null)}
+            onCancel={() => {
+              setAddingBillsPotFor(null)
+              if (data.pots.length === 0) setPotsSectionOpen(false)
+            }}
             onSave={({ name, openingBalance, openingDate, billIdsToMoveIn, effectiveFrom }) => {
               const personId = addingBillsPotFor
               const id = addPot(personId, newPot({ personId, name, openingBalance, openingDate }))
