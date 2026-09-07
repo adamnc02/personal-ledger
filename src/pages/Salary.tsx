@@ -286,7 +286,7 @@ function PensionForm({
       <label className="flex items-center gap-2 mt-2.5">
         <input type="checkbox" checked={cycleStartFollowsPayday} onChange={(e) => setCycleStartFollowsPayday(e.target.checked)} />
         <span className="text-xs text-[var(--color-ink-muted)]">
-          Start the budgeting cycle on this payment itself, weekend/BH adjustment included — only takes effect while this pension is the one "Following" (see the calendar icon)
+          Start the budgeting cycle on this payment itself, weekend/BH adjustment included — only takes effect once this pension is the one marked "Following" (set from the calendar-clock icon in the section header, once you have 2+ income sources)
         </span>
       </label>
       <div className="flex gap-2 mt-4">
