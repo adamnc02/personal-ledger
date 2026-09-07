@@ -16,6 +16,7 @@ import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
+import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { peopleWithIncomeCount } from '../lib/household'
 import { shouldOfferLocationPicker } from '../lib/pickerFirst'
 import { recentAndUpcomingOccurrences, applyTemplateAmountChange, scheduledTemplateDates, setPausedTemplateOccurrences, resolveTemplateAmount, templateOccurrencePreviews } from '../lib/schedule'
@@ -492,6 +493,16 @@ function draftFromTemplate(template: RecurringTemplate): BillDraft {
   return rest
 }
 
+/** Shared display label for a BillLocation, for the "changes take effect
+ * from" confirmation modal's LOCATION row (Batch 7, Bug 8) — matches the
+ * exact wording BillEffectiveDateModal's own description already used
+ * inline for a new location, just also usable for the OLD one. */
+function billLocationLabel(location: BillLocation, potId: string | undefined, pots: Pot[]): string {
+  if (location === 'pot') return pots.find((p) => p.id === potId)?.name ?? 'a pot'
+  if (location === 'joint') return 'Joint Account'
+  return 'Current Account'
+}
+
 function BillEditPanel({
   template,
   people,
@@ -515,6 +526,12 @@ function BillEditPanel({
 }) {
   const [draft, setDraft] = useState<BillDraft>(() => draftFromTemplate(template))
   const [choosingEffectiveDate, setChoosingEffectiveDate] = useState<'amount' | 'location' | null>(null)
+  // Batch 7 (2026-09-07, Bug 8) — a second confirmation step, shown after
+  // picking the effective date, listing exactly what's changing (current
+  // → new) before committing. Holds the effectiveFrom already chosen plus
+  // a closure that actually commits, so onConfirm doesn't need to
+  // re-derive which branch (amount/location/both) it came from.
+  const [pendingConfirm, setPendingConfirm] = useState<{ effectiveFrom: string; changes: RecurringChangeField[]; commit: () => void } | null>(null)
   // Same 2-months-back/12-months-forward window Salary.tsx's pause
   // pickers use — see PausedOccurrencesControl's own comment.
   const pauseWindowStart = addMonths(new Date(), -2)
@@ -570,6 +587,22 @@ function BillEditPanel({
     onSave(draft)
   }
 
+  if (pendingConfirm) {
+    return (
+      <RecurringChangeConfirmModal
+        effectiveFrom={pendingConfirm.effectiveFrom}
+        changes={pendingConfirm.changes}
+        affectsClearedBalance={pendingConfirm.effectiveFrom <= todayIso()}
+        onCancel={() => setPendingConfirm(null)}
+        onConfirm={() => {
+          pendingConfirm.commit()
+          setPendingConfirm(null)
+          setChoosingEffectiveDate(null)
+        }}
+      />
+    )
+  }
+
   if (choosingEffectiveDate) {
     return (
       <BillEffectiveDateModal
@@ -581,21 +614,40 @@ function BillEditPanel({
         }
         onCancel={() => setChoosingEffectiveDate(null)}
         onChoose={(effectiveFrom) => {
+          // Batch 7 (2026-09-07, Bug 8) — rather than committing straight
+          // away, build the "are you sure?" diff and let the confirm
+          // modal above be the thing that actually commits — this is
+          // also the guard against re-triggering the same commit twice
+          // (e.g. an accidental double-tap on the date picker) that Bug
+          // 8.1's duplicate-transaction fix doesn't cover on its own.
+          const changes: RecurringChangeField[] = []
           if (choosingEffectiveDate === 'amount') {
-            const amountPatch = applyTemplateAmountChange(template, draft.amount, effectiveFrom)
-            if (locationChanged) {
-              // Both changed — apply the amount patch immediately, then
-              // the location reassignment separately (it carries its own
-              // retroactive transaction rewrite, which a plain onSave
-              // patch can't do — see this component's own comment above).
-              onSave({ ...draft, ...amountPatch })
-              onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
-            } else {
-              onSave({ ...draft, ...amountPatch })
-            }
-          } else {
-            onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+            changes.push({ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(draft.amount)}` })
           }
+          if (locationChanged) {
+            changes.push({ label: 'Location', from: billLocationLabel(template.location, template.potId, pots), to: billLocationLabel(draft.location, draft.potId, pots) })
+          }
+          setPendingConfirm({
+            effectiveFrom,
+            changes,
+            commit: () => {
+              if (choosingEffectiveDate === 'amount') {
+                const amountPatch = applyTemplateAmountChange(template, draft.amount, effectiveFrom)
+                if (locationChanged) {
+                  // Both changed — apply the amount patch immediately, then
+                  // the location reassignment separately (it carries its own
+                  // retroactive transaction rewrite, which a plain onSave
+                  // patch can't do — see this component's own comment above).
+                  onSave({ ...draft, ...amountPatch })
+                  onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+                } else {
+                  onSave({ ...draft, ...amountPatch })
+                }
+              } else {
+                onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+              }
+            },
+          })
         }}
       />
     )

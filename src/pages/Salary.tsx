@@ -16,6 +16,7 @@ import { SwipeToDelete } from '../components/SwipeToDelete'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow } from '../components/FormButtons'
+import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfirmModal'
 import { SavedFlashOverlay } from '../components/SavedFlash'
 import { NumberInput } from '../components/NumberInput'
 import { CollapsibleSection } from '../components/CollapsibleSection'
@@ -1723,8 +1724,22 @@ function PotEditForm({
 }) {
   const [name, setName] = useState(pot.name)
   const items = potEligibleItems(pot, templates, loans)
+  // Batch 7 (2026-09-07, Bug 8) — Adam's own spec: "immediately after
+  // unticking/ticking an item, the same changes take effect from
+  // follow-up modal that appears in bills appears... The changes to the
+  // ticking/unticking should not class as isDirty to trigger the change
+  // in colour of the save button, only the pot name change should on
+  // this form." So a tick/untick no longer batches into this form's own
+  // Save — it commits immediately (via onAssignTemplateLocation/
+  // onAssignLoanLocation) as soon as its own effective-date + confirm
+  // flow is confirmed, exactly like a location change on the Bills page
+  // now does. `checked` only tracks the OPTIMISTIC UI state of a tap
+  // still awaiting that confirmation — it always reverts to the real
+  // `item.inPot` on Cancel, and once confirmed, `item.inPot` itself is
+  // what's true from then on (fed back in via the pot's own re-render).
   const [checked, setChecked] = useState<Set<string>>(new Set(items.filter((i) => i.inPot).map((i) => i.key)))
-  const [effectiveFrom, setEffectiveFrom] = useState(todayIso())
+  const [pendingToggle, setPendingToggle] = useState<{ item: (typeof items)[number]; nowChecked: boolean; effectiveFrom: string } | null>(null)
+  const [pendingToggleConfirm, setPendingToggleConfirm] = useState<{ item: (typeof items)[number]; nowChecked: boolean; effectiveFrom: string } | null>(null)
   // Locked items (recurring withdrawals) are never part of the draft —
   // their checked state always reflects the real data (always `true`,
   // by construction), never the stale `checked` Set from whenever this
@@ -1732,32 +1747,43 @@ function PotEditForm({
   // form stayed open (e.g. via "+ Add a recurring transfer" just below)
   // rendered unticked until the pot row was collapsed and reopened.
   const isChecked = (item: (typeof items)[number]) => (item.locked ? item.inPot : checked.has(item.key))
-  const checklistDirty = items.some((i) => !i.locked && checked.has(i.key) !== i.inPot)
   const nameDirty = name.trim() !== pot.name
   // UAT follow-up (2026-09-04, Adam-reported): Save used to gate on
   // `!name.trim()` alone — always false (so always enabled) for an
-  // already-named pot, regardless of whether the name or the checklist
-  // had actually changed.
-  const dirty = nameDirty || checklistDirty
+  // already-named pot, regardless of whether the name had actually
+  // changed. Batch 7 (2026-09-07, Bug 8): checklist ticks are
+  // deliberately excluded now — see this component's own comment above.
+  const dirty = nameDirty
 
-  function toggle(key: string) {
+  function toggle(item: (typeof items)[number]) {
+    const nowChecked = !checked.has(item.key)
     setChecked((prev) => {
       const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
+      if (next.has(item.key)) next.delete(item.key)
+      else next.add(item.key)
       return next
     })
+    setPendingToggle({ item, nowChecked, effectiveFrom: todayIso() })
+  }
+
+  function revertPendingToggle() {
+    if (!pendingToggle) return
+    setChecked((prev) => {
+      const next = new Set(prev)
+      if (pendingToggle.item.inPot) next.add(pendingToggle.item.key)
+      else next.delete(pendingToggle.item.key)
+      return next
+    })
+    setPendingToggle(null)
+  }
+
+  function commitToggle(item: (typeof items)[number], nowChecked: boolean, effectiveFrom: string) {
+    if (item.kind === 'template') onAssignTemplateLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
+    else onAssignLoanLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
   }
 
   function handleSave() {
     onSave({ name: name.trim() })
-    for (const item of items) {
-      if (item.kind === 'withdrawal') continue // locked — its location comes from the transfer's own from/to, not reassignable here
-      const nowChecked = checked.has(item.key)
-      if (nowChecked === item.inPot) continue // untouched — nothing to do
-      if (item.kind === 'template') onAssignTemplateLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
-      else onAssignLoanLocation(item.id, nowChecked ? 'pot' : 'personal', effectiveFrom, nowChecked ? pot.id : undefined)
-    }
   }
 
   return (
@@ -1773,6 +1799,12 @@ function PotEditForm({
         </Field>
       </div>
 
+      {/* Batch 7 (2026-09-07, Bug 8): moved directly below the Name field,
+          per Adam's own spec — makes it clear this Save only ever governs
+          the name now, not the checklist below (which commits on its own,
+          immediately, per item). */}
+      <FormButtonRow onCancel={onCancel} onSave={handleSave} saveDisabled={!name.trim() || !dirty} />
+
       {items.length > 0 && (
         <div className="mt-4">
           <span className="text-xs font-medium text-[var(--color-ink)]">What this pot pays</span>
@@ -1783,7 +1815,7 @@ function PotEditForm({
                   type="checkbox"
                   checked={isChecked(item)}
                   disabled={item.locked}
-                  onChange={() => toggle(item.key)}
+                  onChange={() => toggle(item)}
                   className="accent-[var(--color-coral)] disabled:opacity-50"
                 />
                 <span className="flex-1 text-sm text-[var(--color-ink)] truncate">
@@ -1794,16 +1826,87 @@ function PotEditForm({
               </label>
             ))}
           </div>
-          {checklistDirty && (
-            <div className="mt-3">
-              <EditField label="Changes take effect from" type="date" value={effectiveFrom} onChange={setEffectiveFrom} />
-            </div>
-          )}
         </div>
       )}
 
-      <FormButtonRow onCancel={onCancel} onSave={handleSave} saveDisabled={!name.trim() || !dirty} />
+      {pendingToggle && (
+        <PotChecklistDateModal
+          itemName={pendingToggle.item.name}
+          nowChecked={pendingToggle.nowChecked}
+          effectiveFrom={pendingToggle.effectiveFrom}
+          onChangeEffectiveFrom={(effectiveFrom) => setPendingToggle({ ...pendingToggle, effectiveFrom })}
+          onCancel={revertPendingToggle}
+          onContinue={() => {
+            setPendingToggleConfirm(pendingToggle)
+            setPendingToggle(null)
+          }}
+        />
+      )}
+
+      {pendingToggleConfirm && (
+        <RecurringChangeConfirmModal
+          effectiveFrom={pendingToggleConfirm.effectiveFrom}
+          changes={[
+            {
+              label: pendingToggleConfirm.item.name,
+              from: pendingToggleConfirm.nowChecked ? 'Current Account' : pot.name,
+              to: pendingToggleConfirm.nowChecked ? pot.name : 'Current Account',
+            },
+          ]}
+          affectsClearedBalance={pendingToggleConfirm.effectiveFrom <= todayIso()}
+          onCancel={() => {
+            setPendingToggle(pendingToggleConfirm)
+            setPendingToggleConfirm(null)
+          }}
+          onConfirm={() => {
+            commitToggle(pendingToggleConfirm.item, pendingToggleConfirm.nowChecked, pendingToggleConfirm.effectiveFrom)
+            setPendingToggleConfirm(null)
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+/** First step of the pot checklist's tick/untick flow (Batch 7, 2026-09-07,
+ * Bug 8) — picks the effective date before handing off to the shared
+ * RecurringChangeConfirmModal's diff/confirm step, same two-step shape as
+ * Bills.tsx's BillEffectiveDateModal → RecurringChangeConfirmModal, just
+ * without an occurrence list to pick from (a pot has no per-occurrence
+ * picker infrastructure — a plain date field, defaulting to today, is
+ * proportionate here exactly as it already was for this same field before
+ * this batch). */
+function PotChecklistDateModal({
+  itemName,
+  nowChecked,
+  effectiveFrom,
+  onChangeEffectiveFrom,
+  onCancel,
+  onContinue,
+}: {
+  itemName: string
+  nowChecked: boolean
+  effectiveFrom: string
+  onChangeEffectiveFrom: (v: string) => void
+  onCancel: () => void
+  onContinue: () => void
+}) {
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onCancel}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-1">Apply this change from…</h3>
+        <p className="text-sm text-[var(--color-ink-muted)] mb-4">
+          {itemName} is {nowChecked ? 'moving to this pot' : 'moving back to Current Account'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.
+        </p>
+        <EditField label="Changes take effect from" type="date" value={effectiveFrom} onChange={onChangeEffectiveFrom} />
+        <FormButtonRow onCancel={onCancel} onSave={onContinue} saveLabel="Continue" />
+      </div>
+    </div>,
+    document.body,
   )
 }
 

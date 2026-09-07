@@ -33,6 +33,7 @@ import { SwipeToDelete } from '../components/SwipeToDelete'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
+import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { peopleWithIncomeCount } from '../lib/household'
@@ -682,6 +683,17 @@ function draftFromLoan(loan: Loan): LoanDraft {
   return rest
 }
 
+/** Shared display label for a BillLocation, matching Bills.tsx's
+ * billLocationLabel (Batch 7, Bug 8's confirmation modal) — kept as a
+ * separate small copy here rather than a cross-file import, same
+ * proportionate-duplication call as this file's own pattern elsewhere
+ * (e.g. LoggedPaymentList/LumpPaymentList). */
+function loanLocationLabel(location: BillLocation, potId: string | undefined, pots: Pot[]): string {
+  if (location === 'pot') return pots.find((p) => p.id === potId)?.name ?? 'a pot'
+  if (location === 'joint') return 'Joint Account'
+  return 'Current Account'
+}
+
 function LoanEditPanel({
   loan,
   categories,
@@ -744,6 +756,14 @@ function LoanEditPanel({
   // default to today," so this stays proportionate rather than building
   // a parallel picker UI for one field.
   const [locationEffectiveFrom, setLocationEffectiveFrom] = useState(todayIso())
+  // Batch 7 (2026-09-07, Bug 8 app-wide sweep) — same "are you sure, here's
+  // what's changing" confirmation Bills.tsx's BillEditPanel now shows
+  // before a location reassignment commits, extended to loans per Adam's
+  // own spec ("used for anything RECURRING... relating to bills /
+  // transactions / loans / transfers"). Holds a closure that performs the
+  // exact same commit this Save button always did, so it's the confirm
+  // modal — not this button — that actually applies the change.
+  const [pendingLocationConfirm, setPendingLocationConfirm] = useState<{ changes: RecurringChangeField[]; commit: () => void } | null>(null)
 
   // Prefill only needs to seed the initial draft/form state above — once
   // this panel has mounted with it, tell the parent to forget it so a
@@ -878,14 +898,32 @@ function LoanEditPanel({
         <CalibrationModal loanName={loan.name} existingLinesCount={loan.statementCalibrationLines?.length ?? 0} onCalibrate={onCalibrate} onClose={() => setCalibratingLoan(false)} />
       )}
 
+      {pendingLocationConfirm && (
+        <RecurringChangeConfirmModal
+          effectiveFrom={locationEffectiveFrom}
+          changes={pendingLocationConfirm.changes}
+          affectsClearedBalance={locationEffectiveFrom <= todayIso()}
+          onCancel={() => setPendingLocationConfirm(null)}
+          onConfirm={() => {
+            pendingLocationConfirm.commit()
+            setPendingLocationConfirm(null)
+          }}
+        />
+      )}
+
       <button
         disabled={!dirty}
         onClick={() => {
           const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
           if (locationChanged) {
-            onAssignLocation(draft.location, locationEffectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
-            const { location: _l, potId: _p, ...rest } = draft
-            onSave(rest)
+            setPendingLocationConfirm({
+              changes: [{ label: 'Location', from: loanLocationLabel(loan.location, loan.potId, pots), to: loanLocationLabel(draft.location, draft.potId, pots) }],
+              commit: () => {
+                onAssignLocation(draft.location, locationEffectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+                const { location: _l, potId: _p, ...rest } = draft
+                onSave(rest)
+              },
+            })
           } else {
             onSave(draft)
           }
