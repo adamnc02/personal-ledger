@@ -235,7 +235,7 @@ function EditSimpleTransactionForm({
       )}
       {extraFields}
       {transaction.sourceType === 'salary_sort' && (
-        <p className="text-xs text-[var(--color-ink-faint)] -mt-1">Changing the amount updates the salary sort too. Changing the date detaches this from the sort.</p>
+        <p className="text-xs text-[var(--color-ink-faint)] mt-3">Changing the amount updates the salary sort too. Changing the date detaches this from the sort.</p>
       )}
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
