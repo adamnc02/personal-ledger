@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency, formatFullDate } from '../lib/format'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Plus, Trash2, ChevronDown, ChevronUp, X } from 'lucide-react'
+import { Plus, ChevronDown, ChevronUp, X } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { BILLS_CATEGORY_ID } from '../types/ledger'
 import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, Pot } from '../types/ledger'
@@ -14,7 +14,6 @@ import { visibleCategoriesFor } from '../lib/categories'
 import { CategoryManagerButton } from '../components/CategoryManagerModal'
 import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
-import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { peopleWithIncomeCount } from '../lib/household'
@@ -385,7 +384,11 @@ function BillRow({
   const pot = template.location === 'pot' ? pots.find((p) => p.id === template.potId) : undefined
 
   return (
-    <SwipeToDelete onDelete={onRemove} confirmLabel={template.name}>
+    <SwipeToDelete
+      onDelete={onRemove}
+      confirmLabel={template.name}
+      confirmDescription="Already-cleared payments stay in the ledger as historic fact — only future, not-yet-happened ones are removed."
+    >
       {/* A paused bill is dimmed with a SOLID darker background and
           struck-through text, never with `opacity` — a translucent row let
           the red delete button sitting behind it (SwipeToDelete) bleed
@@ -459,7 +462,6 @@ function BillRow({
               triggerFlash()
             }}
             onCancel={() => setOpen(false)}
-            onDelete={onRemove}
           />
         )}
 
@@ -492,7 +494,6 @@ function BillEditPanel({
   onSave,
   onAssignLocation,
   onCancel,
-  onDelete,
 }: {
   template: RecurringTemplate
   people: { id: string; name: string }[]
@@ -503,11 +504,9 @@ function BillEditPanel({
   onSave: (u: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onAssignLocation: (location: BillLocation, effectiveFrom: string, potId?: string) => void
   onCancel: () => void
-  onDelete: () => void
 }) {
   const [draft, setDraft] = useState<BillDraft>(() => draftFromTemplate(template))
   const [choosingEffectiveDate, setChoosingEffectiveDate] = useState<'amount' | 'location' | null>(null)
-  const [confirmingDelete, setConfirmingDelete] = useState(false)
   // Same 2-months-back/12-months-forward window Salary.tsx's pause
   // pickers use — see PausedOccurrencesControl's own comment.
   const pauseWindowStart = addMonths(new Date(), -2)
@@ -632,23 +631,6 @@ function BillEditPanel({
           onSave={(pausedDates) => onSave(setPausedTemplateOccurrences(template, pauseWindowDates, pausedDates))}
         />
       </div>
-
-      <button onClick={() => setConfirmingDelete(true)} className="col-span-2 flex items-center gap-1 text-xs justify-self-start mt-1" style={{ color: 'var(--color-negative)' }}>
-        <Trash2 size={13} /> Delete bill
-      </button>
-      {confirmingDelete && (
-        <ConfirmModal
-          title={`Delete ${template.name}?`}
-          description="Already-cleared payments stay in the ledger as historic fact — only future, not-yet-happened ones are removed."
-          confirmLabel="Delete"
-          tone="danger"
-          onConfirm={() => {
-            setConfirmingDelete(false)
-            onDelete()
-          }}
-          onCancel={() => setConfirmingDelete(false)}
-        />
-      )}
 
       <div className="col-span-2 mt-1">
         <FormButtonRow onCancel={onCancel} onSave={handleSaveClick} saveDisabled={!dirty} />
