@@ -1186,6 +1186,30 @@ function SavingsPotRow({
 
         {isOpen && (
           <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
+            {/* Phase 5 (2026-09 session) — same "+ Log a payment" pattern
+                Loans.tsx gives a loan, right on the pot's own row. Writes
+                through logTransfer (Batch 4: now location-aware) — a
+                second entry point onto the same data the Transactions
+                page's Transfer pill uses, not a parallel mechanism.
+                Batch 6 (2026-09-07 UAT): moved above the edit form to
+                match Joint Account's card ordering. */}
+            <LogTransferButton fixedLocation={{ type: 'savings', savingsPotId: pot.id }} locationOptions={locationOptions} onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
+
+            {/* Transfer pill (2026-09-04 session) — same discoverable,
+                Loan-style entry point as before, now creating/editing a
+                RecurringTemplate (kind: 'transfer') instead of this
+                pot's own legacy fields, so it shows up in the
+                Transactions page's Transfer pill too. */}
+            <RecurringTransferEditor
+              location={{ type: 'savings', savingsPotId: pot.id }}
+              defaultName={pot.name}
+              templates={recurringTemplates}
+              locationOptions={locationOptions}
+              onAdd={onAddRecurringTransfer}
+              onUpdate={onUpdateRecurringTemplate}
+              onRemove={onRemoveRecurringTemplate}
+            />
+
             <SavingsPotForm
               people={people}
               defaultPersonId={pot.personId}
@@ -1220,28 +1244,6 @@ function SavingsPotRow({
                 })
                 onToggle()
               }}
-            />
-
-            {/* Phase 5 (2026-09 session) — same "+ Log a payment" pattern
-                Loans.tsx gives a loan, right on the pot's own row. Writes
-                through logTransfer (Batch 4: now location-aware) — a
-                second entry point onto the same data the Transactions
-                page's Transfer pill uses, not a parallel mechanism. */}
-            <LogTransferButton fixedLocation={{ type: 'savings', savingsPotId: pot.id }} locationOptions={locationOptions} onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
-
-            {/* Transfer pill (2026-09-04 session) — same discoverable,
-                Loan-style entry point as before, now creating/editing a
-                RecurringTemplate (kind: 'transfer') instead of this
-                pot's own legacy fields, so it shows up in the
-                Transactions page's Transfer pill too. */}
-            <RecurringTransferEditor
-              location={{ type: 'savings', savingsPotId: pot.id }}
-              defaultName={pot.name}
-              templates={recurringTemplates}
-              locationOptions={locationOptions}
-              onAdd={onAddRecurringTransfer}
-              onUpdate={onUpdateRecurringTemplate}
-              onRemove={onRemoveRecurringTemplate}
             />
           </div>
         )}
@@ -1885,16 +1887,10 @@ function PotRow({
                 (2026-09-04 UAT): the bills/loans checklist used to be its
                 own red-inline-button-gated card here too — now folded
                 permanently into PotEditForm itself, see its own comment. */}
-            <PotEditForm
-              pot={pot}
-              templates={templates}
-              loans={loans}
-              onCancel={onToggle}
-              onSave={(updates) => { onSave(updates); onToggle() }}
-              onAssignTemplateLocation={onAssignTemplateLocation}
-              onAssignLoanLocation={onAssignLoanLocation}
-            />
-
+            {/* Batch 6 (2026-09-07 UAT): action buttons moved above the
+                edit form to match Joint Account's card ordering — these
+                stay visible/reachable the instant the card expands,
+                rather than being pushed below the fields. */}
             <LogTransferButton fixedLocation={{ type: 'pot', potId: pot.id }} locationOptions={locationOptions} onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
             <RecurringTransferEditor
               location={{ type: 'pot', potId: pot.id }}
@@ -1904,6 +1900,16 @@ function PotRow({
               onAdd={onAddRecurringTransfer}
               onUpdate={onUpdateRecurringTemplate}
               onRemove={onRemoveRecurringTemplate}
+            />
+
+            <PotEditForm
+              pot={pot}
+              templates={templates}
+              loans={loans}
+              onCancel={onToggle}
+              onSave={(updates) => { onSave(updates); onToggle() }}
+              onAssignTemplateLocation={onAssignTemplateLocation}
+              onAssignLoanLocation={onAssignLoanLocation}
             />
           </div>
         )}

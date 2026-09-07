@@ -752,6 +752,55 @@ function LoanEditPanel({
 
   return (
     <div className="mt-4 flex flex-col gap-3">
+      {/* Batch 6 (2026-09-07 UAT): action buttons (log/recurring overpayment,
+          Settle this loan) moved above the edit-form fields to match Joint
+          Account's card ordering — visible immediately on expand, not
+          pushed below the fields grid. */}
+      {/* Editable, matching how a credit card's logged lump payments appear — each overpayment is its own row, tappable to edit or delete, not just a rolled-up summary line. */}
+      <LoggedPaymentList payments={loan.overpayments} onUpdate={onUpdateOverpayment} onRemove={onRemoveOverpayment} />
+      {!loggingOverpayment ? (
+        <button onClick={() => setLoggingOverpayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+          + Log an overpayment
+        </button>
+      ) : (
+        <LoanOverpaymentForm
+          loan={{ ...loan, ...draft }}
+          initialAmount={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.amount : undefined}
+          initialDate={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.date : undefined}
+          onLog={(amount, date, note, recastMode) => {
+            onLogOverpayment(amount, date, note, recastMode)
+            setLoggingOverpayment(false)
+          }}
+        />
+      )}
+
+      <RecurringOverpaymentEditor loan={{ ...loan, ...draft }} pots={pots} value={draft.recurringOverpayment} onChange={(recurringOverpayment) => update({ recurringOverpayment })} />
+
+      {loan.active ? (
+        <>
+          <button onClick={() => setSettlingLoan(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+            Settle this loan
+          </button>
+          {settlingLoan && (
+            <SettleLoanModal
+              loanName={loan.name}
+              estimatedSettlement={estimateSettlementFigure({ ...loan, ...draft })}
+              trueOutstandingBalance={previewSummary.remainingBalance}
+              onSettle={(amount, date, note) => {
+                onSettle(amount, date, note)
+                setSettlingLoan(false)
+              }}
+              onClose={() => setSettlingLoan(false)}
+            />
+          )}
+        </>
+      ) : (
+        <p className="text-xs text-[var(--color-ink-faint)]">
+          Settled for £{formatCurrency(loan.settledAmount ?? 0)}
+          {loan.closedDate ? ` on ${loan.closedDate}` : ''}
+        </p>
+      )}
+
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Lender (optional)" value={draft.lender ?? ''} onChange={(v) => update({ lender: v || undefined })} />
@@ -812,53 +861,8 @@ function LoanEditPanel({
         <EditField label="Location change takes effect from" type="date" value={locationEffectiveFrom} onChange={setLocationEffectiveFrom} />
       )}
 
-      {/* Editable, matching how a credit card's logged lump payments appear — each overpayment is its own row, tappable to edit or delete, not just a rolled-up summary line. */}
-      <LoggedPaymentList payments={loan.overpayments} onUpdate={onUpdateOverpayment} onRemove={onRemoveOverpayment} />
-      {!loggingOverpayment ? (
-        <button onClick={() => setLoggingOverpayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-          + Log an overpayment
-        </button>
-      ) : (
-        <LoanOverpaymentForm
-          loan={{ ...loan, ...draft }}
-          initialAmount={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.amount : undefined}
-          initialDate={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.date : undefined}
-          onLog={(amount, date, note, recastMode) => {
-            onLogOverpayment(amount, date, note, recastMode)
-            setLoggingOverpayment(false)
-          }}
-        />
-      )}
-
-      <RecurringOverpaymentEditor loan={{ ...loan, ...draft }} pots={pots} value={draft.recurringOverpayment} onChange={(recurringOverpayment) => update({ recurringOverpayment })} />
-
       {calibratingLoan && (
         <CalibrationModal loanName={loan.name} existingLinesCount={loan.statementCalibrationLines?.length ?? 0} onCalibrate={onCalibrate} onClose={() => setCalibratingLoan(false)} />
-      )}
-
-      {loan.active ? (
-        <>
-          <button onClick={() => setSettlingLoan(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-            Settle this loan
-          </button>
-          {settlingLoan && (
-            <SettleLoanModal
-              loanName={loan.name}
-              estimatedSettlement={estimateSettlementFigure({ ...loan, ...draft })}
-              trueOutstandingBalance={previewSummary.remainingBalance}
-              onSettle={(amount, date, note) => {
-                onSettle(amount, date, note)
-                setSettlingLoan(false)
-              }}
-              onClose={() => setSettlingLoan(false)}
-            />
-          )}
-        </>
-      ) : (
-        <p className="text-xs text-[var(--color-ink-faint)]">
-          Settled for £{formatCurrency(loan.settledAmount ?? 0)}
-          {loan.closedDate ? ` on ${loan.closedDate}` : ''}
-        </p>
       )}
 
       <button
@@ -944,6 +948,26 @@ function CreditCardEditPanel({
 
   return (
     <div className="mt-4 flex flex-col gap-3">
+      {/* Batch 6 (2026-09-07 UAT): "+ Log a payment" moved above the
+          edit-form fields to match Joint Account's card ordering —
+          visible immediately on expand, not pushed below the fields grid. */}
+      <LumpPaymentList payments={card.lumpPayments} onUpdate={onUpdateLumpPayment} onRemove={onRemoveLumpPayment} />
+      {!loggingPayment ? (
+        <button onClick={() => setLoggingPayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+          + Log a payment
+        </button>
+      ) : (
+        <OverpaymentForm
+          label="Log a payment"
+          initialAmount={overpaymentPrefill?.amount}
+          initialDate={overpaymentPrefill?.date}
+          onLog={(amount, date, note) => {
+            onLogLumpPayment(amount, date, note)
+            setLoggingPayment(false)
+          }}
+        />
+      )}
+
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Interest rate (% APR)" type="number" value={draft.interestRatePercent} onChange={(v) => update({ interestRatePercent: Number(v) })} />
@@ -1017,23 +1041,6 @@ function CreditCardEditPanel({
             ))}
           </select>
         </label>
-      )}
-
-      <LumpPaymentList payments={card.lumpPayments} onUpdate={onUpdateLumpPayment} onRemove={onRemoveLumpPayment} />
-      {!loggingPayment ? (
-        <button onClick={() => setLoggingPayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-          + Log a payment
-        </button>
-      ) : (
-        <OverpaymentForm
-          label="Log a payment"
-          initialAmount={overpaymentPrefill?.amount}
-          initialDate={overpaymentPrefill?.date}
-          onLog={(amount, date, note) => {
-            onLogLumpPayment(amount, date, note)
-            setLoggingPayment(false)
-          }}
-        />
       )}
 
       <button
