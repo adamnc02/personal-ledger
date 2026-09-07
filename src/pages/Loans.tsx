@@ -1016,6 +1016,7 @@ function CreditCardEditPanel({
             onLogLumpPayment(amount, date, note)
             setLoggingPayment(false)
           }}
+          onCancel={() => setLoggingPayment(false)}
         />
       )}
 
@@ -1561,11 +1562,18 @@ function OverpaymentForm({
   initialAmount,
   initialDate,
   onLog,
+  onCancel,
 }: {
   label?: string
   initialAmount?: number
   initialDate?: string
   onLog: (amount: number, date: string, note?: string) => void
+  // Batch 8 (2026-09-07, Bug 9.3, Adam-reported) — this form used to have
+  // no way to cancel out of it at all, and its own small right-aligned
+  // "Log" button didn't match the Save/Cancel pair used everywhere else
+  // in the app. Optional only because a caller mid-migration could omit
+  // it, but every current call site supplies one.
+  onCancel?: () => void
 }) {
   const [amount, setAmount] = useState(initialAmount != null ? String(initialAmount) : '')
   const [date, setDate] = useState(initialDate ?? todayIso())
@@ -1580,18 +1588,16 @@ function OverpaymentForm({
         <EditField label="Date" type="date" value={date} onChange={setDate} />
       </div>
       <EditField label="Note (optional)" value={note} onChange={setNote} />
-      <button
-        disabled={!(amountNumber > 0 && date)}
-        onClick={() => {
+      <FormButtonRow
+        onCancel={onCancel ?? (() => {})}
+        onSave={() => {
           onLog(amountNumber, date, note || undefined)
           setAmount('')
           setNote('')
         }}
-        className="self-end px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Log
-      </button>
+        saveDisabled={!(amountNumber > 0 && date)}
+        saveLabel="Log"
+      />
     </div>
   )
 }
