@@ -1032,7 +1032,7 @@ function TransferForm({
         excludeKey={fromOption?.key}
         onPick={(o) => {
           setToOption(o)
-          setStep(mode === 'recurring' ? 'frequency' : 'final')
+          setStep(mode === 'recurring' ? 'frequency' : 'date')
         }}
         onCancel={reset}
       />
