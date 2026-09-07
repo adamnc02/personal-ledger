@@ -1093,7 +1093,7 @@ function TransferForm({
             setPendingConflicts(null)
             commitSave()
           }}
-          onCancel={() => setPendingConflicts(null)}
+          onCancel={reset}
         />
       )}
     </div>
