@@ -23,6 +23,25 @@ import { CREDIT_CARD_CATEGORY_ID, CREDIT_CARD_COLORS, type CreditCard, type Cred
 const round2 = (n: number) => Math.round(n * 100) / 100
 import { toLocalIsoDate as toIso } from './date'
 
+// BUGFIX (Batch 8, 2026-09-07, Bug 9.2, Adam-reported): a percent_of_balance
+// minimum payment is mathematically a fraction of whatever's left, so a
+// balance approaching zero shrinks GEOMETRICALLY (£0.79 -> £0.75 -> £0.71
+// -> ...) rather than ever landing on exactly zero — round2 alone doesn't
+// help, since each of those figures rounds to a perfectly normal-looking
+// non-zero penny amount in its own right. Concretely: Adam logged a
+// payment for the FULL balance due on the card's own payment day, which
+// correctly zeroed the balance for that cycle — but the interest accrual
+// due the NEXT cycle (a fraction of a still-technically-positive
+// leftover) kept reintroducing a few pence, and a percent-of-balance
+// minimum kept charging a few pence of THAT, forever, despite the card
+// being genuinely "cleared" from a real person's point of view. Once a
+// balance is this negligible, treat it as paid off outright — no further
+// interest compounds on it, and no further minimum charge gets generated
+// for it — rather than let the two rules perpetuate a shrinking-but-
+// never-quite-zero trail indefinitely. Matches Adam's own "below £0.02"
+// description of the residue exactly.
+const NEGLIGIBLE_BALANCE = 0.02
+
 /**
  * The monthly rate that compounds to the given APR over a year — NOT a
  * simple APR/12 division, which understates it. E.g. 22.9% APR compounds
@@ -38,7 +57,7 @@ export function monthlyInterestRate(interestRatePercent: number): number {
 
 /** One cycle's interest, applied to a balance. Deliberately simplified — no daily accrual, no interest-free grace period on new purchases, interest just compounds monthly against whatever the balance is at each billing cycle. Same "clearly-scoped approximation" philosophy as the tax engine's own documented simplifications elsewhere in this app. */
 export function applyMonthlyInterest(balance: number, interestRatePercent: number): number {
-  if (balance <= 0) return balance
+  if (balance <= NEGLIGIBLE_BALANCE) return 0
   return round2(balance * (1 + monthlyInterestRate(interestRatePercent)))
 }
 
@@ -49,7 +68,7 @@ export function applyMonthlyInterest(balance: number, interestRatePercent: numbe
  * the What-if page's card payoff/overpayment simulation).
  */
 export function minimumPaymentForBalance(minimumPayment: CreditCard['minimumPayment'], balance: number): number {
-  if (balance <= 0) return 0
+  if (balance <= NEGLIGIBLE_BALANCE) return 0
   if (minimumPayment.type === 'fixed') return round2(Math.min(minimumPayment.amount, balance))
   return round2((balance * minimumPayment.percent) / 100)
 }
