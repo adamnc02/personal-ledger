@@ -623,11 +623,21 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
     case 'credit_card': {
       const stored = data.creditCards.find((c) => c.id === entry.cardId)
       if (!stored) return null
+      // BUGFIX (Batch 8, 2026-09-07, Bug 9.1, Adam-reported): this used to
+      // always derive the balance as of TODAY regardless of `horizon` —
+      // correct for "This cycle" but silently wrong for "Next 3 cycles"
+      // (a purchase dated later this cycle, or in a future cycle within
+      // the horizon, never showed up here at all). Same fix shape as the
+      // Savings pot hero card's own 2026-09-03 bugfix just below —
+      // horizonRangeEnd is the SAME function computeProjection uses for
+      // Personal's hero card, so this now genuinely varies with the
+      // toggle the way every other hero card already does.
+      const cardAsOf = horizon === 'three_cycles' ? horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()) : new Date()
       // Derived balance, not the stored anchor — see cardBalanceAsOf.
       // The minimum due has to be computed against the live figure too,
       // or a percent-of-balance card would quote a minimum for a debt
       // that's already been partly paid off.
-      const card = withLiveBalance(stored, data.transactions)
+      const card = withLiveBalance(stored, data.transactions, cardAsOf)
       // Same shared generator the Summary page uses, so an overridden
       // charge shows the overridden figure here too rather than the
       // un-overridden computed one. See nextMinimumChargeAmount.
@@ -642,7 +652,9 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       )
     }
     case 'credit_cards_combined': {
-      const myCards = withLiveBalances(data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active), data.transactions)
+      // Same horizon-awareness fix as the single-card case just above.
+      const combinedAsOf = horizon === 'three_cycles' ? horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()) : new Date()
+      const myCards = withLiveBalances(data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active), data.transactions, combinedAsOf)
       const totalOutstanding = round2(myCards.reduce((s, c) => s + c.currentBalance, 0))
       return (
         <BankCard variant="dark" bankLabel="All Cards" accountLabel={`${myCards.length} cards`} icon={<Layers size={18} strokeWidth={1.5} style={{ color: 'var(--color-coral)' }} />}>
@@ -721,10 +733,10 @@ function DeckDetail(props: {
       return <HouseholdDetail {...props} />
     case 'credit_card': {
       const card = data.creditCards.find((c) => c.id === entry.cardId)
-      return card ? <CreditCardDetail card={card} data={data} /> : null
+      return card ? <CreditCardDetail card={card} data={data} horizon={props.horizon} /> : null
     }
     case 'credit_cards_combined':
-      return <CreditCardsCombinedDetail data={data} />
+      return <CreditCardsCombinedDetail data={data} horizon={props.horizon} />
     case 'savings_pot': {
       const pot = data.savingsPots.find((p) => p.id === entry.potId)
       return pot ? <SavingsPotDetail pot={pot} data={data} horizon={props.horizon} /> : null
@@ -1852,14 +1864,20 @@ function CardActivityRow({ t }: { t: Transaction }) {
   )
 }
 
-function CreditCardDetail({ card: storedCard, data }: { card: CreditCard; data: AppDataV2 }) {
+function CreditCardDetail({ card: storedCard, data, horizon }: { card: CreditCard; data: AppDataV2; horizon: ProjectionHorizon }) {
   // Both halves of this ring are now derived from the same transaction
-  // list under the same on-or-before-today rule: `paid` from the payment
+  // list under the same on-or-before-<asOf> rule: `paid` from the payment
   // transactions, `currentBalance` by replaying them against the anchor.
   // They previously came from two different mechanisms (transactions vs
   // a separately-mutated stored total) and could disagree — which is
   // what made the chart look half-updated after a payment.
-  const card = withLiveBalance(storedCard, data.transactions)
+  //
+  // BUGFIX (Batch 8, 2026-09-07, Bug 9.1, Adam-reported): this used to
+  // always derive as of TODAY regardless of `horizon`, same bug as the
+  // hero card above — a purchase dated later in the horizon never showed
+  // up in this pie chart either.
+  const asOf = horizon === 'three_cycles' ? horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()) : new Date()
+  const card = withLiveBalance(storedCard, data.transactions, asOf)
   const paid = totalPaidForCard(card.id, data.transactions)
   const percentPaid = paid + card.currentBalance > 0 ? (paid / (paid + card.currentBalance)) * 100 : 0
   const activity = data.transactions
@@ -1903,8 +1921,10 @@ function CreditCardDetail({ card: storedCard, data }: { card: CreditCard; data: 
   )
 }
 
-function CreditCardsCombinedDetail({ data }: { data: AppDataV2 }) {
-  const myCards = withLiveBalances(data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active), data.transactions)
+function CreditCardsCombinedDetail({ data, horizon }: { data: AppDataV2; horizon: ProjectionHorizon }) {
+  // Same horizon-awareness fix as CreditCardDetail just above.
+  const asOf = horizon === 'three_cycles' ? horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()) : new Date()
+  const myCards = withLiveBalances(data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active), data.transactions, asOf)
   const totalOutstanding = round2(myCards.reduce((s, c) => s + c.currentBalance, 0))
   const totalPaid = myCards.reduce((s, c) => s + totalPaidForCard(c.id, data.transactions), 0)
   const percentPaid = totalPaid + totalOutstanding > 0 ? (totalPaid / (totalPaid + totalOutstanding)) * 100 : 0

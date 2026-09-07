@@ -7,7 +7,8 @@
 import { summarizeLoan } from '../src/lib/ledgerLoans'
 import { computeProjection, horizonRangeEnd, THREE_CYCLES_AHEAD } from '../src/lib/projection'
 import { monthlyAmountForEntry } from '../src/lib/savings'
-import type { AppDataV2, Loan, Person, PayCycleConfig } from '../src/types/ledger'
+import { withLiveBalance } from '../src/lib/creditCards'
+import type { AppDataV2, CreditCard, Loan, Person, PayCycleConfig, Transaction } from '../src/types/ledger'
 import { defaultLedgerData } from '../src/lib/ledgerStorage'
 import { toLocalIsoDate } from '../src/lib/date'
 
@@ -106,5 +107,62 @@ check('Projected total is comfortably under the £2000 target (percent calc will
 // since toISOString() converts to UTC first. threeCycleEnd itself was
 // always correct; only this comparison's own formatting was broken.
 check('Horizon end used for the loan check and the savings check is the same kind of date (three_cycles)', toLocalIsoDate(threeCycleEnd), projection.horizonEnd)
+
+// ── Credit card: Home page hero card / pie chart, "Next 3 cycles" (Batch 8, 2026-09-07, Bug 9.1) ──
+// The bug: a purchase dated LATER in the current cycle (or in a future
+// cycle within the horizon) never showed up in the Home page's "Next 3
+// cycles" balance/pie for a credit card — withLiveBalance was always
+// called with its default asOfDate (today), never the horizon's own end
+// date, unlike every other hero card on this page (Savings pot got this
+// exact fix on 2026-09-03; the credit card cases were simply never
+// updated to match).
+const card: CreditCard = {
+  id: 'card-1',
+  name: 'Visa',
+  categoryId: 'cat-cc',
+  color: '#8b5cf6',
+  interestRatePercent: 20,
+  currentBalance: 0,
+  balanceAsOfDate: '2026-09-06',
+  minimumPayment: { type: 'fixed', amount: 25 },
+  paymentDayOfMonth: 14,
+  statementStartDay: 19,
+  statementEndDay: 18,
+  ownerId: 'adam',
+  lumpPayments: [],
+  active: true,
+}
+const fuelPurchase: Transaction = {
+  id: 'txn-fuel',
+  type: 'credit_card_spend',
+  amount: 50,
+  date: '2026-09-12',
+  categoryId: 'cat-cc',
+  paymentMethod: 'card',
+  status: 'cleared',
+  direction: 'out',
+  location: 'personal',
+  ownerId: 'adam',
+  creditCardId: 'card-1',
+}
+const cardTransactions = [fuelPurchase]
+
+// asOf "today" (06 Sept, before the 12 Sept purchase) correctly shows £0 —
+// this transaction is dated in the future relative to that asOf.
+check('Balance as of 6 Sept (before the purchase) is still £0', withLiveBalance(card, cardTransactions, new Date('2026-09-06')).currentBalance, 0)
+
+// asOf the "Next 3 cycles" horizon end (reaches well past 12 Sept) must
+// show the £50 purchase — this is exactly what Home.tsx's DeckHero/
+// CreditCardDetail/CreditCardsCombinedDetail now compute via
+// horizonRangeEnd(data, primaryPersonId, 'three_cycles', new Date()).
+const ccData: AppDataV2 = { ...defaultLedgerData(), creditCards: [card], transactions: cardTransactions, primaryPersonId: 'adam' }
+const threeCycleEndForCard = horizonRangeEnd(ccData, 'adam', 'three_cycles', new Date('2026-09-06'))
+check('Horizon end (three cycles from 6 Sept) reaches past the 12 Sept purchase date', toLocalIsoDate(threeCycleEndForCard) >= '2026-09-12', true)
+// >= the raw £50 purchase, not exactly it — cardBalanceAsOf also accrues
+// interest month to month over a 3-cycle horizon (this card carries a
+// 20% APR), so the true figure is £50 plus whatever interest has accrued
+// since — the point of this check is that it's no longer £0, not the
+// exact accrued total.
+check('Balance as of the three-cycle horizon end includes (at least) the £50 purchase', withLiveBalance(card, cardTransactions, threeCycleEndForCard).currentBalance >= 50, true)
 
 console.log(process.exitCode ? '\nSome checks FAILED.' : '\nAll projected-pie checks passed.')
