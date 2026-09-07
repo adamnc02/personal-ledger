@@ -3749,7 +3749,9 @@ function SalarySortModal({
                       if (hasSavedTarget) setConfirmingClearLocation(d.location)
                       else setDrafts((prev) => ({ ...prev, [key]: '' }))
                     }}
-                    className="text-xs text-[var(--color-ink-faint)]"
+                    className="text-xs font-medium disabled:opacity-40"
+                    style={{ color: (drafts[key] ?? '').trim() ? 'var(--color-negative)' : 'var(--color-ink-faint)' }}
+                    disabled={!(drafts[key] ?? '').trim()}
                   >
                     Clear
                   </button>
@@ -3770,11 +3772,14 @@ function SalarySortModal({
 
         <FormButtonRow onCancel={onClose} onSave={handleSaveClick} saveDisabled={!dirty} />
 
-        {existingSort && (
-          <button onClick={() => setConfirmingClearAll(true)} className="w-full text-center py-2 mt-3 text-xs font-medium" style={{ color: 'var(--color-negative)' }}>
-            Clear this sort
-          </button>
-        )}
+        <button
+          onClick={() => setConfirmingClearAll(true)}
+          className="w-full text-center py-2 mt-3 text-xs font-medium disabled:opacity-40"
+          style={{ color: existingSort ? 'var(--color-negative)' : 'var(--color-ink-faint)' }}
+          disabled={!existingSort}
+        >
+          Clear this sort
+        </button>
 
         {confirmingClearLocation && (
           <ConfirmModal
