@@ -617,6 +617,19 @@ function LoanRow({
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
             onCancel={() => isOpen && onToggle()}
+            // UAT 2026-09-08 (followup-confirm-loan-recurring-overpayment-
+            // location retest) — a recurring overpayment configured while
+            // the card is collapsed used to only land in LoanEditPanel's
+            // own local draft (never actually persisted), so it vanished
+            // the moment the card next collapsed and the draft got reset
+            // back to real, unconfigured data. Persists straight to the
+            // real loan, bypassing the fields-grid draft entirely — this
+            // action has its own Save/Cancel now (RecurringOverpaymentEditor
+            // itself), it doesn't need to piggyback on the loan's main one.
+            onSaveRecurringOverpayment={(recurringOverpayment) => {
+              onSave({ recurringOverpayment })
+              triggerFlash()
+            }}
           />
 
         <SavedFlashOverlay active={flashActive} message={flashMessage} />
@@ -777,6 +790,7 @@ function LoanEditPanel({
   overpaymentPrefill,
   onPrefillConsumed,
   onCancel,
+  onSaveRecurringOverpayment,
 }: {
   loan: Loan
   /** UAT 2026-09-08 (6-bug4-loans) — gates only the Name/Amount/etc.
@@ -804,6 +818,12 @@ function LoanEditPanel({
   /** UAT 2026-09-08 (7-bug8.2-confirm-loans note) — this fields form had
    * no Cancel at all; collapses the card without saving. */
   onCancel: () => void
+  /** UAT 2026-09-08 (followup-confirm-loan-recurring-overpayment-location
+   * retest) — persists a recurring overpayment change straight to the
+   * real loan, bypassing this panel's own fields-grid draft (which only
+   * commits via the main Save button and would otherwise silently lose
+   * a recurring-overpayment edit made while the card is collapsed). */
+  onSaveRecurringOverpayment: (v: LoanRecurringOverpayment | undefined) => void
 }) {
   // A 'recurring' prefill (from the What-if page's "Make this a real
   // recurring overpayment" button) seeds the draft's recurringOverpayment
@@ -915,7 +935,19 @@ function LoanEditPanel({
         />
       )}
 
-      <RecurringOverpaymentEditor loan={{ ...loan, ...draft }} pots={pots} value={draft.recurringOverpayment} onChange={(recurringOverpayment) => update({ recurringOverpayment })} />
+      <RecurringOverpaymentEditor
+        loan={{ ...loan, ...draft }}
+        pots={pots}
+        value={draft.recurringOverpayment}
+        onChange={(recurringOverpayment) => {
+          // Keep the local draft in sync too, purely so `loan={{ ...loan,
+          // ...draft }}` above stays correct for any recast preview
+          // computed before the real `loan` prop itself re-renders with
+          // the persisted change.
+          update({ recurringOverpayment })
+          onSaveRecurringOverpayment(recurringOverpayment)
+        }}
+      />
 
       {loan.active ? (
         <>

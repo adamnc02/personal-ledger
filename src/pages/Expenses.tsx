@@ -1787,14 +1787,12 @@ function RecurringTransactionEditPanel({
   categories,
   onAddCategory,
   onSave,
-  onDelete,
   onCancel,
 }: {
   template: RecurringTemplate
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<RecurringTemplate, 'id'>>) => void
-  onDelete: () => void
   /** UAT 2026-09-08 (followup-confirm-recurring-tx-amount note) — this
    * form had a Save button but no way to back out; collapses the row
    * without saving, matching every other edit form in the app. */
@@ -1905,10 +1903,6 @@ function RecurringTransactionEditPanel({
         <input type="checkbox" checked={draft.active} onChange={(e) => update({ active: e.target.checked })} />
         <span className="text-xs text-[var(--color-ink-muted)]">Active (paused recurring transactions stop generating new entries)</span>
       </label>
-
-      <button onClick={onDelete} className="col-span-2 flex items-center gap-1 text-xs justify-self-start mt-1" style={{ color: 'var(--color-negative)' }}>
-        <Trash2 size={13} /> Delete recurring transaction
-      </button>
 
       <div className="col-span-2 mt-1">
         <FormButtonRow onCancel={onCancel} onSave={handleSaveClick} saveDisabled={!dirty} />
@@ -2066,7 +2060,6 @@ function RecurringTransactionRow({
                 triggerFlash()
                 setOpen(false)
               }}
-              onDelete={onRemove}
               onCancel={() => setOpen(false)}
             />
 

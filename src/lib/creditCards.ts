@@ -383,6 +383,16 @@ export function generateMinimumPaymentTransactions(
     // the fix generalises to any such balance, not just ones below a
     // fixed pence threshold.
     const statementBalanceBeforeInterest = statementBalance
+    // UAT 2026-09-08, second retest — a statement-window card
+    // (statementStartDay/statementEndDay set) can leave workingBalance
+    // and statementBalance permanently diverged: a spend lands in
+    // workingBalance immediately but statementBalance only picks it up
+    // once its own window closes, so the minimum — always sized off
+    // statementBalance — can be too small to even cover the interest
+    // accruing on the LARGER true workingBalance, which then deadlocks
+    // on its own, independently of statementBalance's own (possibly
+    // still-progressing) figure. Both must be checked.
+    const workingBalanceBeforeInterest = workingBalance
 
     // Interest for this cycle posts first, against the balance as it
     // stood going into the cycle — THEN any lump payments logged within
@@ -420,15 +430,23 @@ export function generateMinimumPaymentTransactions(
       // month.
       const override = card.minimumPaymentOverrides?.find((o) => o.date === paymentDateIso)
       const computedMinimum = minimumPaymentForBalance(card.minimumPayment, statementBalance)
-      // Deadlock guard: if this cycle's computed minimum wouldn't leave
-      // the balance any lower than it stood BEFORE this cycle's interest
-      // was even applied, the payment isn't keeping pace with interest —
-      // pay the whole remaining balance off this cycle instead of
-      // perpetuating a residue that just regrows every month. An explicit
-      // override is left untouched (it's a deliberate figure, not the
-      // computed one this guard exists to correct).
-      const deadlocked = !override && computedMinimum > 0 && round2(statementBalance - computedMinimum) >= statementBalanceBeforeInterest
-      const amount = override ? override.amount : deadlocked ? statementBalance : computedMinimum
+      // Deadlock guard: if paying this cycle's computed minimum wouldn't
+      // leave EITHER balance any lower than it stood BEFORE this cycle's
+      // interest was even applied, the payment isn't keeping pace with
+      // interest — pay off the larger of the two remaining balances
+      // instead of perpetuating a residue that just regrows every month.
+      // Checking statementBalance alone isn't enough on a statement-
+      // window card (see workingBalanceBeforeInterest's own comment
+      // above) — the minimum is sized off statementBalance, but
+      // workingBalance is the TRUE debt, and it can be deadlocked even
+      // while statementBalance is still (very slowly) progressing. An
+      // explicit override is left untouched (a deliberate figure, not
+      // the computed one this guard exists to correct).
+      const deadlocked =
+        !override &&
+        computedMinimum > 0 &&
+        (round2(statementBalance - computedMinimum) >= statementBalanceBeforeInterest || round2(workingBalance - computedMinimum) >= workingBalanceBeforeInterest)
+      const amount = override ? override.amount : deadlocked ? Math.max(statementBalance, workingBalance) : computedMinimum
       if (amount > 0) {
         results.push({
           date: paymentDateIso,

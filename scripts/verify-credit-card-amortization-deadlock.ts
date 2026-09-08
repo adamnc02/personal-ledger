@@ -25,8 +25,23 @@
 // generator behind every ledger/projection minimum-charge row) and
 // computeMinimumPaymentAmount (the single-point "what's due" query).
 
-import { generateMinimumPaymentTransactions, computeMinimumPaymentAmount, cardBalanceAsOf } from '../src/lib/creditCards'
-import type { CreditCard } from '../src/types/ledger'
+// UAT 2026-09-08, second retest — Adam reproduced a DIFFERENT deadlock on
+// a statement-window card (statementStartDay/statementEndDay set): a spend
+// lands in the true running balance (workingBalance) immediately, but the
+// figure the minimum is actually sized off (statementBalance) only picks
+// it up once its own window closes — the two can permanently diverge, and
+// workingBalance can deadlock on its own even while statementBalance is
+// still (very slowly) shrinking, since the original guard only ever
+// checked statementBalance. Exact repro: a card with statementStartDay 19/
+// statementEndDay 18/paymentDayOfMonth 14, a £20 spend, then a same-amount
+// overpayment — workingBalance got stuck oscillating at 60-61p forever
+// (£0.60 minus a 1p minimum, regrown back to £0.61 by interest) while
+// statementBalance alone crept down 1p/month, decades from zero. Fixed by
+// checking BOTH balances' own before-interest progress, and paying off
+// whichever is larger when either deadlocks.
+
+import { generateMinimumPaymentTransactions, computeMinimumPaymentAmount, cardBalanceAsOf, recordCreditCardSpend, recordCreditCardLumpPayment } from '../src/lib/creditCards'
+import type { CreditCard, Transaction } from '../src/types/ledger'
 
 let failures = 0
 function check(label: string, actual: unknown, expected: unknown) {
@@ -65,7 +80,37 @@ check('cardBalanceAsOf reaches exactly £0 once the deadlocked balance is resolv
 // ---- 4. computeMinimumPaymentAmount (the single-point query) has the same guard ----
 check('computeMinimumPaymentAmount pays off the whole £0.50 (post-interest) rather than a non-progressing £0.01', computeMinimumPaymentAmount(deadlockedCard), 0.5)
 
-// ---- 5. Regression guard — a genuinely progressing percent-of-balance minimum is unaffected ----
+// ---- 5a. The statement-window divergence repro ----
+let windowCard: CreditCard = {
+  id: 'card-2',
+  name: 'Statement Window Visa',
+  categoryId: 'cat-cc',
+  color: '#8b5cf6',
+  interestRatePercent: 20,
+  currentBalance: 0,
+  balanceAsOfDate: '2026-09-01',
+  minimumPayment: { type: 'percent_of_balance', percent: 5 },
+  paymentDayOfMonth: 14,
+  statementStartDay: 19,
+  statementEndDay: 18,
+  ownerId: 'adam',
+  lumpPayments: [],
+  active: true,
+}
+let windowTransactions: (Omit<Transaction, 'id'> & { id: string })[] = []
+const spend = recordCreditCardSpend(windowCard, 20, '2026-09-09', 'test spend')
+windowCard = spend.updatedCard
+windowTransactions.push({ ...spend.transaction, id: 't0' })
+const overpay = recordCreditCardLumpPayment(windowCard, 20, '2026-10-14', 'overpayment')
+windowCard = overpay.updatedCard
+windowTransactions.push({ ...overpay.transaction, id: 't1' })
+
+const windowCharges = generateMinimumPaymentTransactions(windowCard, new Date(2026, 8, 1), new Date(2031, 8, 1), windowTransactions)
+check('A statement-window card with a matching overpayment does NOT generate 60 straight monthly minimum charges', windowCharges.length < 60, true)
+const windowAllTx = [...windowTransactions, ...windowCharges.map((t, i) => ({ ...t, id: `gen-${i}`, status: 'cleared' as const }))]
+check('...and its real balance reaches exactly £0', cardBalanceAsOf(windowCard, windowAllTx, new Date(2031, 8, 1)), 0)
+
+// ---- 5b. Regression guard — a genuinely progressing percent-of-balance minimum is unaffected ----
 const healthyCard: CreditCard = { ...deadlockedCard, currentBalance: 500, minimumPayment: { type: 'percent_of_balance', percent: 5 } }
 check('A real £500 balance with a real 5% minimum still pays the computed minimum, not the full balance', computeMinimumPaymentAmount(healthyCard) < 500, true)
 
