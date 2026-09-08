@@ -1880,8 +1880,22 @@ function CreditCardDetail({ card: storedCard, data, horizon }: { card: CreditCar
   const card = withLiveBalance(storedCard, data.transactions, asOf)
   const paid = totalPaidForCard(card.id, data.transactions)
   const percentPaid = paid + card.currentBalance > 0 ? (paid / (paid + card.currentBalance)) * 100 : 0
+  // UAT 2026-09-08 (8-bug9.1-home-balance note) — the pie/balance above
+  // already respect the horizon toggle, but this ledger list didn't: it
+  // showed every activity row ever regardless of "This cycle"/"Next 3
+  // cycles", so a future-dated purchase (correctly reflected in the pie)
+  // showed here even under "This cycle." Same cycleStart/horizonEnd
+  // window SavingsPotDetail's own activity list already filters to.
+  const cycleStart = toLocalIsoDate(resolveCycleBounds(data, data.primaryPersonId, new Date()).start)
+  const horizonEndIso = toLocalIsoDate(horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()))
   const activity = data.transactions
-    .filter((t) => t.creditCardId === card.id && (t.type === 'credit_card_spend' || t.type === 'credit_card_payment'))
+    .filter(
+      (t) =>
+        t.creditCardId === card.id &&
+        (t.type === 'credit_card_spend' || t.type === 'credit_card_payment') &&
+        t.date >= cycleStart &&
+        t.date <= horizonEndIso,
+    )
     .sort((a, b) => b.date.localeCompare(a.date))
   // The card's own colour overrides the category's colour for display
   // (types/ledger.ts: "categoryId: for icon; colour below overrides the
@@ -1928,8 +1942,19 @@ function CreditCardsCombinedDetail({ data, horizon }: { data: AppDataV2; horizon
   const totalOutstanding = round2(myCards.reduce((s, c) => s + c.currentBalance, 0))
   const totalPaid = myCards.reduce((s, c) => s + totalPaidForCard(c.id, data.transactions), 0)
   const percentPaid = totalPaid + totalOutstanding > 0 ? (totalPaid / (totalPaid + totalOutstanding)) * 100 : 0
+  // UAT 2026-09-08 (8-bug9.1-home-balance note) — same fix as
+  // CreditCardDetail's own activity list just above.
+  const cycleStart = toLocalIsoDate(resolveCycleBounds(data, data.primaryPersonId, new Date()).start)
+  const horizonEndIso = toLocalIsoDate(horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()))
   const activity = data.transactions
-    .filter((t) => t.creditCardId && myCards.some((c) => c.id === t.creditCardId) && (t.type === 'credit_card_spend' || t.type === 'credit_card_payment'))
+    .filter(
+      (t) =>
+        t.creditCardId &&
+        myCards.some((c) => c.id === t.creditCardId) &&
+        (t.type === 'credit_card_spend' || t.type === 'credit_card_payment') &&
+        t.date >= cycleStart &&
+        t.date <= horizonEndIso,
+    )
     .sort((a, b) => b.date.localeCompare(a.date))
 
   return (

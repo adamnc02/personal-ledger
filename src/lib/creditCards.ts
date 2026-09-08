@@ -90,7 +90,14 @@ export function minimumPaymentForBalance(minimumPayment: CreditCard['minimumPaym
  */
 export function computeMinimumPaymentAmount(card: CreditCard): number {
   const balanceWithInterest = applyMonthlyInterest(card.currentBalance, card.interestRatePercent)
-  return minimumPaymentForBalance(card.minimumPayment, balanceWithInterest)
+  const computedMinimum = minimumPaymentForBalance(card.minimumPayment, balanceWithInterest)
+  // UAT 2026-09-08 (8-bug9.2-minimum-charges-stop) — same amortisation-
+  // deadlock guard as generateMinimumPaymentTransactions: if the computed
+  // minimum wouldn't leave the balance any lower than it stood before
+  // this cycle's interest, it's not keeping pace with interest — the
+  // whole remaining balance is due instead of perpetuating a residue.
+  if (computedMinimum > 0 && round2(balanceWithInterest - computedMinimum) >= card.currentBalance) return balanceWithInterest
+  return computedMinimum
 }
 
 /**
@@ -366,6 +373,17 @@ export function generateMinimumPaymentTransactions(
       statementSpendIndex++
     }
 
+    // UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, retest): the
+    // NEGLIGIBLE_BALANCE snap only catches a balance that's ALREADY tiny
+    // — it never fires for a percent-of-balance minimum stuck on a small
+    // but not-tiny balance (e.g. a few tens of pence) where the payment,
+    // rounded to the nearest penny, doesn't even cover the interest this
+    // cycle accrues on what's left. That's a genuine amortisation
+    // deadlock, not a rounding artefact close to zero — captured here so
+    // the fix generalises to any such balance, not just ones below a
+    // fixed pence threshold.
+    const statementBalanceBeforeInterest = statementBalance
+
     // Interest for this cycle posts first, against the balance as it
     // stood going into the cycle — THEN any lump payments logged within
     // it reduce the balance, THEN the minimum is calculated against
@@ -401,7 +419,16 @@ export function generateMinimumPaymentTransactions(
       // than silently reverting to the un-overridden trajectory next
       // month.
       const override = card.minimumPaymentOverrides?.find((o) => o.date === paymentDateIso)
-      const amount = override ? override.amount : minimumPaymentForBalance(card.minimumPayment, statementBalance)
+      const computedMinimum = minimumPaymentForBalance(card.minimumPayment, statementBalance)
+      // Deadlock guard: if this cycle's computed minimum wouldn't leave
+      // the balance any lower than it stood BEFORE this cycle's interest
+      // was even applied, the payment isn't keeping pace with interest —
+      // pay the whole remaining balance off this cycle instead of
+      // perpetuating a residue that just regrows every month. An explicit
+      // override is left untouched (it's a deliberate figure, not the
+      // computed one this guard exists to correct).
+      const deadlocked = !override && computedMinimum > 0 && round2(statementBalance - computedMinimum) >= statementBalanceBeforeInterest
+      const amount = override ? override.amount : deadlocked ? statementBalance : computedMinimum
       if (amount > 0) {
         results.push({
           date: paymentDateIso,
