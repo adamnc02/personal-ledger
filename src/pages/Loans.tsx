@@ -571,9 +571,13 @@ function LoanRow({
           <div className="h-full rounded-full" style={{ width: `${progress.percentPaid}%`, background: 'var(--color-coral)' }} />
         </div>
 
-        {isOpen && (
-          <LoanEditPanel
+        {/* UAT 2026-09-08 (6-bug4-loans): this panel now always mounts —
+            its own `isOpen` prop gates just the Name/Amount/etc. fields
+            grid, so the log/recurring-overpayment and Settle actions stay
+            visible on the collapsed card too, matching Joint Account. */}
+        <LoanEditPanel
             loan={loan}
+            isOpen={isOpen}
             categories={categories}
             people={people}
             pots={pots}
@@ -590,22 +594,29 @@ function LoanRow({
               triggerFlash()
             }}
             onLogOverpayment={(amount, date, note, recastMode) => {
+              // UAT 2026-09-08 (followup-loan-overpayment-ui): this was
+              // the one action here that flashed but left the whole loan
+              // card expanded, unlike Save/Settle above. Guarded on isOpen
+              // now that this action is reachable from a collapsed card
+              // too — must never OPEN the card, only collapse it if it
+              // was already open.
               onLogOverpayment(amount, date, note, recastMode)
+              if (isOpen) onToggle()
               triggerFlash()
             }}
             onUpdateOverpayment={onUpdateOverpayment}
             onRemoveOverpayment={onRemoveOverpayment}
             onSettle={(amount, date, note) => {
               onSettle(amount, date, note)
-              onToggle()
+              if (isOpen) onToggle()
               triggerFlash('Loan settled')
             }}
             onCalibrate={onCalibrate}
             onCalibrated={() => triggerFlash('Calibration saved')}
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
+            onCancel={() => isOpen && onToggle()}
           />
-        )}
 
         <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
@@ -691,10 +702,12 @@ function CreditCardRow({
 
         {ledgerOpen && <CreditCardLedgerModal card={card} transactions={transactions} onUpdateMinimumCharge={onUpdateMinimumCharge} onClose={() => setLedgerOpen(false)} />}
 
-        {isOpen && (
-          <CreditCardEditPanel
+        {/* UAT 2026-09-08 (6-bug4-cards): always mounted now — see
+            LoanEditPanel's own comment on the same pattern. */}
+        <CreditCardEditPanel
             storedCard={storedCard}
             card={card}
+            isOpen={isOpen}
             transactions={transactions}
             people={people}
             categories={categories}
@@ -707,13 +720,17 @@ function CreditCardRow({
             onUpdateLumpPayment={onUpdateLumpPayment}
             onRemoveLumpPayment={onRemoveLumpPayment}
             onLogLumpPayment={(amount, date, note) => {
+              // UAT 2026-09-08 (followup-loan-overpayment-ui, same root
+              // cause on the credit card's analogous action). Guarded on
+              // isOpen now that this is reachable from a collapsed card.
               onLogLumpPayment(amount, date, note)
+              if (isOpen) onToggle()
               triggerFlash()
             }}
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
+            onCancel={() => isOpen && onToggle()}
           />
-        )}
 
         <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
@@ -742,6 +759,7 @@ function loanLocationLabel(location: BillLocation, potId: string | undefined, po
 
 function LoanEditPanel({
   loan,
+  isOpen,
   categories,
   people,
   pots,
@@ -757,8 +775,15 @@ function LoanEditPanel({
   onCalibrated,
   overpaymentPrefill,
   onPrefillConsumed,
+  onCancel,
 }: {
   loan: Loan
+  /** UAT 2026-09-08 (6-bug4-loans) — gates only the Name/Amount/etc.
+   * fields grid + its own Save button; the action buttons/lists above it
+   * (log/recurring overpayment, Settle) render regardless, matching Joint
+   * Account's always-visible action buttons. This panel is now always
+   * mounted once expandable at all — see LoanRow's own call site. */
+  isOpen: boolean
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   people: { id: string; name: string }[]
   pots: Pot[]
@@ -775,6 +800,9 @@ function LoanEditPanel({
   onCalibrated?: () => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
+  /** UAT 2026-09-08 (7-bug8.2-confirm-loans note) — this fields form had
+   * no Cancel at all; collapses the card without saving. */
+  onCancel: () => void
 }) {
   // A 'recurring' prefill (from the What-if page's "Make this a real
   // recurring overpayment" button) seeds the draft's recurringOverpayment
@@ -791,6 +819,15 @@ function LoanEditPanel({
   const [loggingOverpayment, setLoggingOverpayment] = useState(overpaymentPrefill?.mode === 'payoff')
   const [settlingLoan, setSettlingLoan] = useState(false)
   const [calibratingLoan, setCalibratingLoan] = useState(false)
+  // UAT 2026-09-08 (6-bug4-loans): this panel now stays mounted while the
+  // card is collapsed (see `isOpen`'s own comment) rather than unmounting
+  // and losing its draft the way it used to — so an abandoned field edit
+  // (Cancel, or just tapping the header to collapse without saving) needs
+  // an explicit reset instead of relying on a fresh mount to provide one.
+  useEffect(() => {
+    if (!isOpen) setDraft(draftFromLoan(loan))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
   // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
   // when nothing's changed — this panel's Save was a plain always-on
   // button with no dirty/validity gating at all before this.
@@ -884,6 +921,8 @@ function LoanEditPanel({
         </p>
       )}
 
+      {isOpen && (
+        <>
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Lender (optional)" value={draft.lender ?? ''} onChange={(v) => update({ lender: v || undefined })} />
@@ -967,9 +1006,10 @@ function LoanEditPanel({
         />
       )}
 
-      <button
-        disabled={!dirty}
-        onClick={() => {
+      <FormButtonRow
+        onCancel={onCancel}
+        saveDisabled={!dirty}
+        onSave={() => {
           const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
           if (locationChanged) {
             setPendingLocationConfirm({
@@ -984,11 +1024,9 @@ function LoanEditPanel({
             onSave(draft)
           }
         }}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
-      </button>
+      />
+        </>
+      )}
     </div>
   )
 }
@@ -1013,6 +1051,8 @@ function CreditCardEditPanel({
   onLogLumpPayment,
   overpaymentPrefill,
   onPrefillConsumed,
+  isOpen,
+  onCancel,
 }: {
   card: CreditCard // live — used for the derived-balance caption only
   storedCard: CreditCard // as persisted — what the draft is seeded from and saved back to
@@ -1026,6 +1066,13 @@ function CreditCardEditPanel({
   onLogLumpPayment: (amount: number, date: string, note?: string) => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
+  /** UAT 2026-09-08 (6-bug4-cards) — see LoanEditPanel's own comment on
+   * the identical prop. */
+  isOpen: boolean
+  /** UAT 2026-09-08 (7-bug8.2-confirm-loans note) — this fields form had
+   * no Cancel at all; collapses the card without saving, matching every
+   * other card's edit form. */
+  onCancel: () => void
 }) {
   // Seeded from the STORED card, never the live one. This distinction is
   // the whole point of the fix: the editable field is the stated anchor,
@@ -1048,6 +1095,12 @@ function CreditCardEditPanel({
     if (overpaymentPrefill) onPrefillConsumed()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // UAT 2026-09-08 (6-bug4-cards) — see LoanEditPanel's identical comment.
+  useEffect(() => {
+    if (!isOpen) setDraft(draftFromCard(storedCard))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
 
   function update(patch: Partial<CreditCardDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
@@ -1076,6 +1129,8 @@ function CreditCardEditPanel({
         />
       )}
 
+      {isOpen && (
+        <>
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Interest rate (% APR)" type="number" value={draft.interestRatePercent} onChange={(v) => update({ interestRatePercent: Number(v) })} />
@@ -1151,14 +1206,9 @@ function CreditCardEditPanel({
         </label>
       )}
 
-      <button
-        disabled={!dirty}
-        onClick={() => onSave(draft)}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
-      </button>
+      <FormButtonRow onCancel={onCancel} onSave={() => onSave(draft)} saveDisabled={!dirty} />
+        </>
+      )}
     </div>
   )
 }

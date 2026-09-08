@@ -1231,39 +1231,43 @@ function SavingsPotRow({
 
         {ledgerOpen && <SavingsPotLedgerModal pot={pot} transactions={transactions} onOverrideInterest={onOverrideInterest} onClose={() => setLedgerOpen(false)} />}
 
-        {isOpen && (
-          <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
-            {/* Phase 5 (2026-09 session) — same "+ Log a payment" pattern
-                Loans.tsx gives a loan, right on the pot's own row. Writes
-                through logTransfer (Batch 4: now location-aware) — a
-                second entry point onto the same data the Transactions
-                page's Transfer pill uses, not a parallel mechanism.
-                Batch 6 (2026-09-07 UAT): moved above the edit form to
-                match Joint Account's card ordering. */}
-            <LogTransferButton
-              fixedLocation={{ type: 'savings', savingsPotId: pot.id }}
-              locationOptions={locationOptions}
-              onLogDeposit={onLogDeposit}
-              onLogWithdrawal={onLogWithdrawal}
-              onLogged={triggerFlash}
-            />
+        {/* UAT 2026-09-08 (6-bug4-savings): these two action buttons now
+            render regardless of isOpen, matching Joint Account's own
+            always-visible buttons — only the Name/fields form below stays
+            gated behind expanding the card. */}
+        <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
+          {/* Phase 5 (2026-09 session) — same "+ Log a payment" pattern
+              Loans.tsx gives a loan, right on the pot's own row. Writes
+              through logTransfer (Batch 4: now location-aware) — a
+              second entry point onto the same data the Transactions
+              page's Transfer pill uses, not a parallel mechanism.
+              Batch 6 (2026-09-07 UAT): moved above the edit form to
+              match Joint Account's card ordering. */}
+          <LogTransferButton
+            fixedLocation={{ type: 'savings', savingsPotId: pot.id }}
+            locationOptions={locationOptions}
+            onLogDeposit={onLogDeposit}
+            onLogWithdrawal={onLogWithdrawal}
+            onLogged={triggerFlash}
+          />
 
-            {/* Transfer pill (2026-09-04 session) — same discoverable,
-                Loan-style entry point as before, now creating/editing a
-                RecurringTemplate (kind: 'transfer') instead of this
-                pot's own legacy fields, so it shows up in the
-                Transactions page's Transfer pill too. */}
-            <RecurringTransferEditor
-              location={{ type: 'savings', savingsPotId: pot.id }}
-              defaultName={pot.name}
-              templates={recurringTemplates}
-              locationOptions={locationOptions}
-              onAdd={onAddRecurringTransfer}
-              onUpdate={onUpdateRecurringTemplate}
-              onRemove={onRemoveRecurringTemplate}
-              onSaved={triggerFlash}
-            />
+          {/* Transfer pill (2026-09-04 session) — same discoverable,
+              Loan-style entry point as before, now creating/editing a
+              RecurringTemplate (kind: 'transfer') instead of this
+              pot's own legacy fields, so it shows up in the
+              Transactions page's Transfer pill too. */}
+          <RecurringTransferEditor
+            location={{ type: 'savings', savingsPotId: pot.id }}
+            defaultName={pot.name}
+            templates={recurringTemplates}
+            locationOptions={locationOptions}
+            onAdd={onAddRecurringTransfer}
+            onUpdate={onUpdateRecurringTemplate}
+            onRemove={onRemoveRecurringTemplate}
+            onSaved={triggerFlash}
+          />
 
+          {isOpen && (
             <SavingsPotForm
               people={people}
               defaultPersonId={pot.personId}
@@ -1300,8 +1304,8 @@ function SavingsPotRow({
                 triggerFlash()
               }}
             />
-          </div>
-        )}
+          )}
+        </div>
         <SavedFlashOverlay active={flashActive} />
       </div>
     </SwipeToDelete>
@@ -2057,39 +2061,43 @@ function PotRow({
           <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
         </button>
 
-        {isOpen && (
-          <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
-            {/* Batch 3 addendum (2026-09-04 UAT): fields sit on a darker
-                --color-bg-elevated card, in a 2-column grid, with the
-                Cancel/Save pair INSIDE that card, matching
-                SavingsPotRow's own expanded form (SavingsPotForm) — the
-                red inline text buttons (Log a deposit/withdrawal,
-                recurring deposit) stay outside it, below. Batch 4
-                (2026-09-04 UAT): the bills/loans checklist used to be its
-                own red-inline-button-gated card here too — now folded
-                permanently into PotEditForm itself, see its own comment. */}
-            {/* Batch 6 (2026-09-07 UAT): action buttons moved above the
-                edit form to match Joint Account's card ordering — these
-                stay visible/reachable the instant the card expands,
-                rather than being pushed below the fields. */}
-            <LogTransferButton
-              fixedLocation={{ type: 'pot', potId: pot.id }}
-              locationOptions={locationOptions}
-              onLogDeposit={onLogDeposit}
-              onLogWithdrawal={onLogWithdrawal}
-              onLogged={triggerFlash}
-            />
-            <RecurringTransferEditor
-              location={{ type: 'pot', potId: pot.id }}
-              defaultName={pot.name}
-              templates={templates}
-              locationOptions={locationOptions}
-              onAdd={onAddRecurringTransfer}
-              onUpdate={onUpdateRecurringTemplate}
-              onRemove={onRemoveRecurringTemplate}
-              onSaved={triggerFlash}
-            />
+        {/* UAT 2026-09-08 (6-bug4-pots): these two action buttons now
+            render regardless of isOpen, matching Joint Account's own
+            always-visible buttons — only PotEditForm below stays gated
+            behind expanding the card. */}
+        <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
+          {/* Batch 3 addendum (2026-09-04 UAT): fields sit on a darker
+              --color-bg-elevated card, in a 2-column grid, with the
+              Cancel/Save pair INSIDE that card, matching
+              SavingsPotRow's own expanded form (SavingsPotForm) — the
+              red inline text buttons (Log a deposit/withdrawal,
+              recurring deposit) stay outside it, below. Batch 4
+              (2026-09-04 UAT): the bills/loans checklist used to be its
+              own red-inline-button-gated card here too — now folded
+              permanently into PotEditForm itself, see its own comment. */}
+          {/* Batch 6 (2026-09-07 UAT): action buttons moved above the
+              edit form to match Joint Account's card ordering — these
+              stay visible/reachable the instant the card expands,
+              rather than being pushed below the fields. */}
+          <LogTransferButton
+            fixedLocation={{ type: 'pot', potId: pot.id }}
+            locationOptions={locationOptions}
+            onLogDeposit={onLogDeposit}
+            onLogWithdrawal={onLogWithdrawal}
+            onLogged={triggerFlash}
+          />
+          <RecurringTransferEditor
+            location={{ type: 'pot', potId: pot.id }}
+            defaultName={pot.name}
+            templates={templates}
+            locationOptions={locationOptions}
+            onAdd={onAddRecurringTransfer}
+            onUpdate={onUpdateRecurringTemplate}
+            onRemove={onRemoveRecurringTemplate}
+            onSaved={triggerFlash}
+          />
 
+          {isOpen && (
             <PotEditForm
               pot={pot}
               templates={templates}
@@ -2099,8 +2107,8 @@ function PotRow({
               onAssignTemplateLocation={onAssignTemplateLocation}
               onAssignLoanLocation={onAssignLoanLocation}
             />
-          </div>
-        )}
+          )}
+        </div>
         <SavedFlashOverlay active={flashActive} />
       </div>
     </SwipeToDelete>
