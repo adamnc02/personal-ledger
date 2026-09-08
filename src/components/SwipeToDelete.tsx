@@ -95,6 +95,19 @@ export function SwipeToDelete({ children, onDelete, confirmLabel, confirmDescrip
       e.preventDefault()
       e.stopPropagation()
       draggedPastThreshold.current = false
+      return
+    }
+    // UAT 2026-09-08 (bug 5-bug5-single-delete): the trash button is
+    // revealed but the row itself is still a full-width, unchanged
+    // disclosure button underneath — a plain tap on it (no drag) used to
+    // fall straight through to that button's own onClick, expanding the
+    // row while leaving the trash button revealed. The first tap while
+    // revealed should just re-hide the trash button instead, matching the
+    // "tap elsewhere to dismiss" pattern this affordance implies.
+    if (offset !== 0) {
+      e.preventDefault()
+      e.stopPropagation()
+      setOffset(0)
     }
   }
 

@@ -1157,6 +1157,8 @@ function SavingsPotRow({
   onAddRecurringTransfer,
   onUpdateRecurringTemplate,
   onRemoveRecurringTemplate,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   pot: SavingsPot
   people: Person[]
@@ -1183,6 +1185,12 @@ function SavingsPotRow({
   onAddRecurringTransfer: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
   onUpdateRecurringTemplate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemoveRecurringTemplate: (id: string) => void
+  /** UAT 2026-09-08 (9-wallet-pot-savings-joint) — new-savings-pot
+   * creation never wired a flash-on-mount, unlike Pensions/Bills/Loans/
+   * Credit Cards, which all flash their still-collapsed row this same
+   * way right after creation. */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
   const owner = people.find((p) => p.id === pot.personId)
   const balance = savingsPotBalanceAsOf(pot, transactions, new Date())
@@ -1192,6 +1200,13 @@ function SavingsPotRow({
   // Save, its "+ Log a deposit or withdrawal", and its "+ Add a recurring
   // transfer" — all three show "Saved".
   const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash()
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
@@ -1975,6 +1990,8 @@ function PotRow({
   onAddRecurringTransfer,
   onUpdateRecurringTemplate,
   onRemoveRecurringTemplate,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   pot: Pot
   people: Person[]
@@ -1993,6 +2010,10 @@ function PotRow({
   onAddRecurringTransfer: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
   onUpdateRecurringTemplate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemoveRecurringTemplate: (id: string) => void
+  /** UAT 2026-09-08 (9-wallet-pot-savings-joint) — see SavingsPotRow's
+   * own comment on the same prop. */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
   const owner = people.find((p) => p.id === pot.personId)
   const balance = potBalanceAsOf(pot, transactions, new Date())
@@ -2007,6 +2028,13 @@ function PotRow({
   // Save, its "+ Log a deposit or withdrawal", and its "+ Add a recurring
   // transfer" — all three show "Saved".
   const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash()
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
@@ -2367,6 +2395,17 @@ export function Salary() {
   // Log/Recurring" pattern as PotRow/SavingsPotRow, for the Joint Account
   // card (which lives inline in this component rather than its own row).
   const { active: jointFlashActive, trigger: triggerJointFlash } = useSavedFlash()
+  // UAT 2026-09-08 (9-wallet-pot-savings-joint): the very first Joint
+  // Account creation goes through AppGuards' own app-wide modal (see
+  // needsJointAccountSetup), not anything in this component, so there's
+  // no click handler here to hang a flash off. Detect the account
+  // actually appearing (mirrors every other card's "flash once, right
+  // after creation" behaviour) instead of watching for a specific action.
+  const jointAccountExistedRef = useRef(!!data.jointAccount)
+  useEffect(() => {
+    if (data.jointAccount && !jointAccountExistedRef.current) triggerJointFlash()
+    jointAccountExistedRef.current = !!data.jointAccount
+  }, [data.jointAccount, triggerJointFlash])
   const [editingDeduction, setEditingDeduction] = useState<{ personId: string; deductionId: string } | null>(null)
   const [settingsOpenFor, setSettingsOpenFor] = useState<string | null>(null)
   // Which person's Salary row / which Pension's row is expanded — one at
@@ -2378,6 +2417,8 @@ export function Salary() {
   // Batch 9 (2026-09-07, Bug 11) — see PensionRow's own comment on why a
   // brand-new pension flashes on MOUNT rather than at save time.
   const [justCreatedPensionId, setJustCreatedPensionId] = useState<string | null>(null)
+  const [justCreatedSavingsPotId, setJustCreatedSavingsPotId] = useState<string | null>(null)
+  const [justCreatedPotId, setJustCreatedPotId] = useState<string | null>(null)
   const [addingPension, setAddingPension] = useState(false)
   const [pickingPensionPerson, setPickingPensionPerson] = useState(false)
   const [pensionDefaultPersonId, setPensionDefaultPersonId] = useState(data.primaryPersonId)
@@ -2740,9 +2781,14 @@ export function Salary() {
               if (data.pensions.length === 0) setPensionsSectionOpen(false)
             }}
             onSave={(personId, fields) => {
+              // UAT 2026-09-08 (9-wallet-pension): used to force this row
+              // open (setExpandedPensionId) so the flash had something to
+              // show against — but that left it expanded after saving,
+              // unlike every other "new X" flash (Bills/Loans/Credit
+              // Cards), which flash their still-collapsed row on mount via
+              // shouldFlashOnMount instead. Matched that pattern here too.
               const id = addPension(personId, newPension({ personId, ...fields }))
               setAddingPension(false)
-              setExpandedPensionId(id)
               setJustCreatedPensionId(id)
             }}
           />
@@ -2830,6 +2876,7 @@ export function Salary() {
                 })
               }
               setAddingSavingsFor(null)
+              setJustCreatedSavingsPotId(id)
               // BUGFIX (Adam-reported, 2026-09 session — "I have to click
               // Looks good twice before the modal disappears and
               // collapses the card"). Traced this thoroughly: there's
@@ -2874,6 +2921,8 @@ export function Salary() {
               onAddRecurringTransfer={addRecurringTransfer}
               onUpdateRecurringTemplate={updateRecurringTemplate}
               onRemoveRecurringTemplate={removeRecurringTemplate}
+              shouldFlashOnMount={justCreatedSavingsPotId === pot.id}
+              onFlashedOnMount={() => setJustCreatedSavingsPotId(null)}
             />
           ))}
           {data.savingsPots.length === 0 && !addingSavingsFor && (
@@ -2931,7 +2980,11 @@ export function Salary() {
               const id = addPot(personId, newPot({ personId, name, openingBalance, openingDate }))
               for (const billId of billIdsToMoveIn) assignRecurringTemplateLocation(billId, 'pot', effectiveFrom, { potId: id })
               setAddingBillsPotFor(null)
-              setExpandedBillsPotId(id)
+              // UAT 2026-09-08 (9-wallet-pot-savings-joint): used to force
+              // this row open (setExpandedBillsPotId) — same fix as the
+              // Pension/Savings-Pot cases above, matched to the
+              // collapsed-row-flashes-on-mount pattern instead.
+              setJustCreatedPotId(id)
             }}
           />
         )}
@@ -2956,6 +3009,8 @@ export function Salary() {
               onAddRecurringTransfer={addRecurringTransfer}
               onUpdateRecurringTemplate={updateRecurringTemplate}
               onRemoveRecurringTemplate={removeRecurringTemplate}
+              shouldFlashOnMount={justCreatedPotId === pot.id}
+              onFlashedOnMount={() => setJustCreatedPotId(null)}
             />
           ))}
           {data.pots.length === 0 && !addingBillsPotFor && <p className="text-sm text-[var(--color-ink-muted)] text-center py-8">No pots yet.</p>}
@@ -3865,7 +3920,15 @@ function PayPeriodRow({
           onSaveAllFuture={onSaveAllFuture}
           editingDeduction={editingDeduction}
           setEditingDeduction={setEditingDeduction}
-          onFlash={triggerOwnFlash}
+          onFlash={(message) => {
+            // UAT 2026-09-08 (9-wallet-bonus/9-wallet-netpay): these two
+            // inline actions used to flash but leave the row expanded,
+            // unlike every other save action on this page (Salary Sort's
+            // own modal closing counts as its own "collapse"). Collapse
+            // the row here too, matching that pattern.
+            triggerOwnFlash(message)
+            onToggle()
+          }}
         />
       )}
       {sortOpen && (
