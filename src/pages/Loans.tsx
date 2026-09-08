@@ -853,6 +853,7 @@ function LoanEditPanel({
             onLogOverpayment(amount, date, note, recastMode)
             setLoggingOverpayment(false)
           }}
+          onCancel={() => setLoggingOverpayment(false)}
         />
       )}
 
@@ -1561,11 +1562,18 @@ function LoanOverpaymentForm({
   initialAmount,
   initialDate,
   onLog,
+  onCancel,
 }: {
   loan: Loan
   initialAmount?: number
   initialDate?: string
   onLog: (amount: number, date: string, note: string | undefined, recastMode: 'reduce_term' | 'reduce_payment') => void
+  // UAT follow-up (2026-09-08) — same Batch 8/Bug 9.3 fix already applied
+  // to the credit card's OverpaymentForm, extended to this loan
+  // equivalent: no way to cancel out of logging an overpayment, and a
+  // bespoke small right-aligned "Continue" button instead of the shared
+  // Save/Cancel pair used everywhere else in the app.
+  onCancel: () => void
 }) {
   const [amount, setAmount] = useState(initialAmount != null ? String(initialAmount) : '')
   const [date, setDate] = useState(initialDate ?? todayIso())
@@ -1614,14 +1622,7 @@ function LoanOverpaymentForm({
         <EditField label="Date" type="date" value={date} onChange={setDate} />
       </div>
       <EditField label="Note (optional)" value={note} onChange={setNote} />
-      <button
-        disabled={!canContinue}
-        onClick={() => setStep('choose')}
-        className="self-end px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Continue
-      </button>
+      <FormButtonRow onCancel={onCancel} onSave={() => setStep('choose')} saveDisabled={!canContinue} saveLabel="Continue" />
     </div>
   )
 }
