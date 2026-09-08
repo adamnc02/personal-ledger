@@ -149,13 +149,13 @@ interface LedgerContextValue {
   removeCategory: (id: string) => void
 
   /** Plain ad-hoc expense/income — never touches a credit card. Status defaults to 'cleared' if dated today or earlier, 'pending' if dated in the future. A bonus is NOT logged this way — see addSalaryOverride, which folds it into the relevant pay period instead. */
-  addAdHocTransaction: (input: AdHocInput) => void
+  addAdHocTransaction: (input: AdHocInput) => string
   /** Edits any transaction in place — used for correcting/renaming an ad-hoc entry after the fact. Does NOT re-run the credit-card-balance side effects that logCreditCardSpend/logCreditCardLumpPayment apply on creation — editing the amount of an already-recorded card transaction does not retroactively adjust that card's currentBalance. Delete and re-log if the card balance itself needs correcting. */
   updateTransaction: (id: string, updates: Partial<Omit<Transaction, 'id'>>) => void
   removeTransaction: (id: string) => void
 
   /** A purchase charged to a specific credit card — creates a credit_card_spend transaction and bumps that card's currentBalance, per the confirmed design (see types/ledger.ts). */
-  logCreditCardSpend: (cardId: string, amount: number, date: string, note?: string) => void
+  logCreditCardSpend: (cardId: string, amount: number, date: string, note?: string) => string
   /** An ad-hoc/lump payment toward a card, made right now — reduces that card's currentBalance and creates the matching negative-on-Personal-card transaction. */
   logCreditCardLumpPayment: (cardId: string, amount: number, date: string, note?: string) => void
   /** Removes a logged lump payment entirely — the log record AND its transaction. If that transaction had already cleared (balance already reduced), correctly reverses that reduction first. */
@@ -410,6 +410,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
       note: input.note,
     }
     setDataState((prev) => ({ ...prev, transactions: [...prev.transactions, transaction] }))
+    return transaction.id
   }
 
   // Salary Sort two-way sync (2026-09 session — see SalarySort's own
@@ -470,6 +471,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
   }
 
   const logCreditCardSpend: LedgerContextValue['logCreditCardSpend'] = (cardId, amount, date, note) => {
+    const id = nanoid(8)
     setDataState((prev) => {
       const card = prev.creditCards.find((c) => c.id === cardId)
       if (!card) return prev
@@ -477,9 +479,10 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
       return {
         ...prev,
         creditCards: prev.creditCards.map((c) => (c.id === cardId ? updatedCard : c)),
-        transactions: [...prev.transactions, { ...transaction, id: nanoid(8) }],
+        transactions: [...prev.transactions, { ...transaction, id }],
       }
     })
+    return id
   }
 
   const logCreditCardLumpPayment: LedgerContextValue['logCreditCardLumpPayment'] = (cardId, amount, date, note) => {

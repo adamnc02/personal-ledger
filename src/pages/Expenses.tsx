@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency, formatFullDate, formatMonthYear } from '../lib/format'
 import { Plus, Trash2, X, ChevronDown, ChevronUp, ArrowRight, ArrowLeftRight } from 'lucide-react'
@@ -269,6 +269,15 @@ export function Expenses() {
   } = useLedgerData()
   const [mode, setMode] = useState<PageMode>('transactions')
   const [adding, setAdding] = useState(false)
+  // Batch 9 (2026-09-07, Bug 11) — a brand-new ad-hoc transaction/
+  // recurring transaction/transfer has no row to flash at the moment its
+  // own Save fires (the row only mounts on the NEXT render) — same
+  // "flash on mount instead" handoff used elsewhere in this sweep
+  // (Bills.tsx's new bill, Loans.tsx's new loan/card, Salary.tsx's new
+  // pension).
+  const [justCreatedTransactionId, setJustCreatedTransactionId] = useState<string | null>(null)
+  const [justCreatedRecurringId, setJustCreatedRecurringId] = useState<string | null>(null)
+  const [justCreatedTransferId, setJustCreatedTransferId] = useState<string | null>(null)
 
   // Entries this page owns: things logged directly here, as opposed to
   // generated bill/loan/credit-card-payment/recurring-transaction
@@ -362,19 +371,19 @@ export function Expenses() {
             <ExpenseForm
               onCancel={() => setAdding(false)}
               onSave={(entry) => {
-                if (entry.type === 'expense' && entry.paymentMethod === 'card' && entry.creditCardId) {
-                  logCreditCardSpend(entry.creditCardId, entry.amount, entry.date, entry.note || undefined)
-                } else {
-                  addAdHocTransaction({
-                    type: entry.type,
-                    amount: entry.amount,
-                    date: entry.date,
-                    categoryId: entry.categoryId,
-                    paymentMethod: entry.paymentMethod,
-                    personId: entry.personId,
-                    note: entry.note || undefined,
-                  })
-                }
+                const id =
+                  entry.type === 'expense' && entry.paymentMethod === 'card' && entry.creditCardId
+                    ? logCreditCardSpend(entry.creditCardId, entry.amount, entry.date, entry.note || undefined)
+                    : addAdHocTransaction({
+                        type: entry.type,
+                        amount: entry.amount,
+                        date: entry.date,
+                        categoryId: entry.categoryId,
+                        paymentMethod: entry.paymentMethod,
+                        personId: entry.personId,
+                        note: entry.note || undefined,
+                      })
+                setJustCreatedTransactionId(id)
                 setAdding(false)
               }}
               onAddCategory={addCategory}
@@ -395,6 +404,8 @@ export function Expenses() {
                 onAddCategory={addCategory}
                 onUpdate={(updates) => updateTransaction(t.id, updates)}
                 onRemove={() => removeTransaction(t.id)}
+                shouldFlashOnMount={justCreatedTransactionId === t.id}
+                onFlashedOnMount={() => setJustCreatedTransactionId(null)}
               />
             )}
           />
@@ -408,7 +419,8 @@ export function Expenses() {
               onAddCategory={addCategory}
               onCancel={() => setAdding(false)}
               onSave={(template) => {
-                addRecurringTemplate(template)
+                const id = addRecurringTemplate(template)
+                setJustCreatedRecurringId(id)
                 setAdding(false)
               }}
             />
@@ -423,6 +435,8 @@ export function Expenses() {
                 onAddCategory={addCategory}
                 onUpdate={(u) => updateRecurringTemplate(template.id, u)}
                 onRemove={() => removeRecurringTemplate(template.id)}
+                shouldFlashOnMount={justCreatedRecurringId === template.id}
+                onFlashedOnMount={() => setJustCreatedRecurringId(null)}
               />
             ))}
             {/* Phase 5 (2026-09 session) — a pot with a recurring deposit
@@ -464,11 +478,13 @@ export function Expenses() {
               data={data}
               onCancel={() => setAdding(false)}
               onSaveOneOff={(from, to, amount, date, note) => {
-                logTransfer(from, to, amount, date, note)
+                const id = logTransfer(from, to, amount, date, note)
+                setJustCreatedTransferId(id)
                 setAdding(false)
               }}
               onSaveRecurring={(template) => {
-                addRecurringTransfer(template)
+                const id = addRecurringTransfer(template)
+                setJustCreatedTransferId(id)
                 setAdding(false)
               }}
             />
@@ -484,6 +500,8 @@ export function Expenses() {
                 locationOptions={transferLocationOptions}
                 onUpdate={(u) => updateRecurringTemplate(template.id, u)}
                 onRemove={() => removeRecurringTemplate(template.id)}
+                shouldFlashOnMount={justCreatedTransferId === template.id}
+                onFlashedOnMount={() => setJustCreatedTransferId(null)}
               />
             ))}
 
@@ -501,6 +519,8 @@ export function Expenses() {
                   locationOptions={transferLocationOptions}
                   onUpdate={(u) => updateTransaction(t.id, u)}
                   onRemove={() => removeTransaction(t.id)}
+                  shouldFlashOnMount={justCreatedTransferId === t.id}
+                  onFlashedOnMount={() => setJustCreatedTransferId(null)}
                 />
               )}
             />
@@ -520,21 +540,37 @@ function AdHocTransactionRow({
   onAddCategory,
   onUpdate,
   onRemove,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   t: Transaction
   data: ReturnType<typeof useLedgerData>['data']
   onAddCategory: (name: string) => { id: string }
   onUpdate: (updates: Partial<Omit<Transaction, 'id'>>) => void
   onRemove: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — true for exactly one render right
+   * after this transaction was newly created, so it can flash "Transaction
+   * saved." on mount (no row exists yet at the moment a brand-new ad-hoc
+   * transaction's own save button is clicked). */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
   const [isEditing, setIsEditing] = useState(false)
   const category = data.categories.find((c) => c.id === t.categoryId)
   const card = t.creditCardId ? data.creditCards.find((c) => c.id === t.creditCardId) : undefined
   const isPositive = t.direction === 'in'
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash('Transaction updated.')
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash('Transaction saved.')
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={t.note || category?.name || 'this entry'}>
-      <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
+      <div className="relative rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
         <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center gap-3 p-3 text-left">
           <CategoryIcon category={category} />
           <div className="flex-1 min-w-0">
@@ -560,9 +596,11 @@ function AdHocTransactionRow({
             onSave={(updates) => {
               onUpdate(updates)
               setIsEditing(false)
+              triggerFlash()
             }}
           />
         )}
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
     </SwipeToDelete>
   )
@@ -1108,6 +1146,8 @@ function TransferRowItem({
   locationOptions,
   onUpdate,
   onRemove,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   t: Transaction
   savingsPots: SavingsPot[]
@@ -1115,8 +1155,22 @@ function TransferRowItem({
   locationOptions: TransferLocationOption[]
   onUpdate: (updates: Partial<Pick<Transaction, 'amount' | 'date' | 'note' | 'fromLocation' | 'toLocation'>>) => void
   onRemove: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — true for exactly one render right
+   * after this transfer was newly created, so it can flash "Transfer
+   * saved." on mount (no row exists yet at the moment a brand-new
+   * transfer's own save button is clicked). */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
   const [isEditing, setIsEditing] = useState(false)
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash('Transfer updated.')
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash('Transfer saved.')
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const touchesPersonal = t.fromLocation?.type === 'personal' || t.toLocation?.type === 'personal'
   const isWithdrawal = t.toLocation?.type === 'personal'
   // A direct transfer with no personal leg at all (Pot ↔ Pot, etc., 2026-09
@@ -1130,7 +1184,7 @@ function TransferRowItem({
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={`${fromLabel} → ${toLabel}`}>
-      <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
+      <div className="relative rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
         <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center justify-between p-3 text-left">
           <div className="min-w-0">
             <p className="text-sm font-medium text-[var(--color-ink)] truncate flex items-center gap-1.5">
@@ -1174,9 +1228,11 @@ function TransferRowItem({
             onSave={(updates) => {
               onUpdate(updates)
               setIsEditing(false)
+              triggerFlash()
             }}
           />
         )}
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
     </SwipeToDelete>
   )
@@ -1198,6 +1254,8 @@ function TransferRecurringRow({
   locationOptions,
   onUpdate,
   onRemove,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   template: RecurringTemplate
   savingsPots: SavingsPot[]
@@ -1205,8 +1263,25 @@ function TransferRecurringRow({
   locationOptions: TransferLocationOption[]
   onUpdate: (updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemove: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — true for exactly one render right
+   * after this recurring transfer was newly created, so it can flash
+   * "Transfer saved." on mount (no row exists yet at save time). */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
   const [open, setOpen] = useState(false)
+  // Batch 9 (2026-09-07, Bug 11) — the "Save changes"/"Save amount" button
+  // below always edits an EXISTING recurring transfer, so "updated" is
+  // always the right wording for it; a brand-new one flashes "Transfer
+  // saved." on mount instead.
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash('Transfer updated.')
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash('Transfer saved.')
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const [amount, setAmount] = useState(String(template.amount))
   const [transferFrom, setTransferFrom] = useState(template.transferFrom)
   const [transferTo, setTransferTo] = useState(template.transferTo)
@@ -1302,7 +1377,10 @@ function TransferRecurringRow({
                   updates.transferFrom = transferFrom
                   updates.transferTo = transferTo
                 }
-                if (Object.keys(updates).length > 0) onUpdate(updates)
+                if (Object.keys(updates).length > 0) {
+                  onUpdate(updates)
+                  triggerFlash()
+                }
               }}
               className="text-xs self-start disabled:opacity-40"
               style={{ color: 'var(--color-coral)' }}
@@ -1339,6 +1417,7 @@ function TransferRecurringRow({
             />
           </div>
         )}
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
     </SwipeToDelete>
   )
@@ -1694,7 +1773,10 @@ function OccurrenceRow({
   const [open, setOpen] = useState(false)
   const [amount, setAmount] = useState(String(occurrence.amount))
   const [date, setDate] = useState(occurrence.date)
-  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  // Batch 9 (2026-09-07, Bug 11) — this always edits an EXISTING occurrence
+  // of an already-configured recurring transaction, so "updated" is
+  // always the right wording.
+  const { active: flashActive, trigger: triggerFlash } = useSavedFlash('Transaction updated.')
   const isAdjusted = occurrence.date !== occurrence.originalDate
 
   return (
@@ -1730,7 +1812,7 @@ function OccurrenceRow({
           </button>
         </div>
       )}
-      <SavedFlashOverlay active={flashActive} />
+      <SavedFlashOverlay active={flashActive} message="Transaction updated." />
     </div>
   )
 }
@@ -1741,16 +1823,30 @@ function RecurringTransactionRow({
   onAddCategory,
   onUpdate,
   onRemove,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   template: RecurringTemplate
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
   onUpdate: (u: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemove: () => void
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const category = categories.find((c) => c.id === template.categoryId)
-  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  // Batch 9 (2026-09-07, Bug 11) — this row is always an EXISTING
+  // recurring transaction (a brand-new one flashes "Transaction saved."
+  // on mount instead — see the parent list's own justCreatedId comment).
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash('Transaction updated.')
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash('Transaction saved.')
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const isIncome = template.recurringTransactionType === 'income'
 
   // Next 12 upcoming occurrences, freshly recomputed on every render so a
@@ -1829,7 +1925,7 @@ function RecurringTransactionRow({
           </>
         )}
 
-        <SavedFlashOverlay active={flashActive} />
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
     </SwipeToDelete>
   )
