@@ -1903,6 +1903,22 @@ function RecurringOverpaymentEditor({
   // than a fact about a specific past payment"), so this confirms then
   // applies immediately, it doesn't ask for a date to anchor to.
   const [pendingOverpaymentLocationConfirm, setPendingOverpaymentLocationConfirm] = useState<{ changes: RecurringChangeField[]; commit: () => void } | null>(null)
+  // UAT 2026-09-08 (followup-confirm-loan-recurring-overpayment-location
+  // note) — this editor's fields (amount, Paid from, payment date, end
+  // date) used to write straight through onChange on every keystroke,
+  // with no Save/Cancel at all; the "Paid from" dropdown alone got a
+  // confirm modal, but nothing actually gated committing to it. Now a
+  // real draft-then-save card, collapsed by default, matching every
+  // other editable card in the app — Remove/Change-recast/paused-dates
+  // stay as their own immediate actions below, unaffected.
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [fieldsDraft, setFieldsDraft] = useState<{
+    amount: LoanRecurringOverpayment['amount']
+    location: 'personal' | 'pot' | undefined
+    potId: string | undefined
+    startDate: string
+    endDate: string | undefined
+  } | null>(null)
   // Held separately from `value` itself: the amount has to be chosen
   // BEFORE a LoanRecurringOverpayment is created at all — confirmed as a
   // real bug that the old flow skipped straight to the recast-choice
@@ -2110,6 +2126,8 @@ function RecurringOverpaymentEditor({
           onClick={() => {
             onChange(undefined)
             setShowEndDate(false)
+            setEditorOpen(false)
+            setFieldsDraft(null)
           }}
           className="text-xs"
           style={{ color: 'var(--color-negative)' }}
@@ -2124,100 +2142,140 @@ function RecurringOverpaymentEditor({
         </button>
       </div>
 
-      <div className="flex gap-2">
-        <button
-          onClick={() => onChange({ ...value, amount: value.amount.type === 'fixed' ? value.amount : { type: 'fixed', amount: 50 } })}
-          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-          style={{ background: value.amount.type === 'fixed' ? 'var(--color-coral)' : 'var(--color-surface)', color: value.amount.type === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
-        >
-          Fixed amount
-        </button>
-        <button
-          onClick={() => onChange({ ...value, amount: value.amount.type === 'percent_of_balance' ? value.amount : { type: 'percent_of_balance', percent: 5 } })}
-          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-          style={{
-            background: value.amount.type === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-surface)',
-            color: value.amount.type === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
-          }}
-        >
-          % of remaining balance
-        </button>
-      </div>
-
-      {value.amount.type === 'fixed' ? (
-        <EditField label="Amount (£)" type="number" value={value.amount.amount} onChange={(v) => onChange({ ...value, amount: { type: 'fixed', amount: Number(v) } })} />
-      ) : (
-        <EditField
-          label="Percent (%)"
-          type="number"
-          value={value.amount.percent}
-          onChange={(v) => onChange({ ...value, amount: { type: 'percent_of_balance', percent: Number(v) } })}
-        />
-      )}
-
-      {/* Pots backlog item (2026-09 session) — independent of the loan's
-          OWN location (Adam-specified: "if a loan is tagged to a pot,
-          that means ONLY the monthly payment is paid from the pot, not
-          necessarily recurring overpayments"). Absent/'Follows loan' is
-          the field's own documented default (see
-          LoanRecurringOverpayment.location in types/ledger.ts) — nothing
-          is lost by leaving this alone, it just means "same place as the
-          regular payment," exactly what already happened before this
-          field existed. A flat overwrite, not effective-dated — see that
-          same type comment for why. */}
-      {/* UAT follow-up (2026-09-05, Adam-reported): used to be gated on
-          `ownerPots.length > 0` too — "Follows the loan's own location"
-          and "Personal" are real choices even with no pot, so this field
-          always shows now, matching the creation wizard's own fix. */}
-      <label className="flex flex-col gap-1">
-        <span className="text-xs text-[var(--color-ink-muted)]">Paid from</span>
-        <select
-          value={value.location === 'pot' ? `pot:${value.potId ?? ''}` : (value.location ?? '')}
-          onChange={(e) => {
-            const raw = e.target.value
-            const next: { location: 'personal' | 'pot' | undefined; potId: string | undefined } =
-              raw === '' ? { location: undefined, potId: undefined } : raw === 'personal' ? { location: 'personal', potId: undefined } : { location: 'pot', potId: raw.slice(4) }
-            setPendingOverpaymentLocationConfirm({
-              changes: [{ label: 'Paid from', from: overpaymentLocationLabel(value.location, value.potId), to: overpaymentLocationLabel(next.location, next.potId) }],
-              commit: () => onChange({ ...value, location: next.location, potId: next.potId }),
-            })
-          }}
-          className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-        >
-          <option value="" style={{ color: '#000' }}>
-            Follows the loan's own location
-          </option>
-          <option value="personal" style={{ color: '#000' }}>
-            Personal
-          </option>
-          {ownerPots.map((p) => (
-            <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <div className="grid grid-cols-2 gap-2">
-        <EditField label="Payment date" type="date" value={value.startDate} onChange={(v) => onChange({ ...value, startDate: v })} />
-        {showEndDate ? (
-          <EditField label="End date" type="date" value={value.endDate ?? ''} onChange={(v) => onChange({ ...value, endDate: v || undefined })} />
-        ) : (
-          <button onClick={() => setShowEndDate(true)} className="self-end text-xs font-medium pb-1" style={{ color: 'var(--color-coral)' }}>
-            + Set an end date
-          </button>
-        )}
-      </div>
-      {showEndDate && value.endDate && (
+      {/* UAT 2026-09-08 (followup-confirm-loan-recurring-overpayment-
+          location note) — amount/Paid from/dates used to write straight
+          through onChange live; now a collapsed summary that opens into a
+          real draft with its own Save/Cancel, matching every other
+          editable card. */}
+      {!editorOpen ? (
         <button
           onClick={() => {
-            onChange({ ...value, endDate: undefined })
-            setShowEndDate(false)
+            setFieldsDraft({ amount: value.amount, location: value.location, potId: value.potId, startDate: value.startDate, endDate: value.endDate })
+            setEditorOpen(true)
           }}
-          className="self-start text-xs text-[var(--color-ink-muted)]"
+          className="w-full text-left px-3 py-2 rounded-xl text-xs"
+          style={{ background: 'var(--color-surface)', color: 'var(--color-ink)' }}
         >
-          Clear end date (run indefinitely)
+          {value.amount.type === 'fixed' ? `£${formatCurrency(value.amount.amount)}` : `${value.amount.percent}% of balance`} · {overpaymentLocationLabel(value.location, value.potId)} · from{' '}
+          {value.startDate}
+          {value.endDate ? ` to ${value.endDate}` : ''}
         </button>
+      ) : (
+        fieldsDraft && (
+          <div className="flex flex-col gap-2">
+            <div className="flex gap-2">
+              <button
+                onClick={() => setFieldsDraft((d) => (d ? { ...d, amount: d.amount.type === 'fixed' ? d.amount : { type: 'fixed', amount: 50 } } : d))}
+                className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+                style={{ background: fieldsDraft.amount.type === 'fixed' ? 'var(--color-coral)' : 'var(--color-surface)', color: fieldsDraft.amount.type === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
+              >
+                Fixed amount
+              </button>
+              <button
+                onClick={() => setFieldsDraft((d) => (d ? { ...d, amount: d.amount.type === 'percent_of_balance' ? d.amount : { type: 'percent_of_balance', percent: 5 } } : d))}
+                className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+                style={{
+                  background: fieldsDraft.amount.type === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-surface)',
+                  color: fieldsDraft.amount.type === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
+                }}
+              >
+                % of remaining balance
+              </button>
+            </div>
+
+            {fieldsDraft.amount.type === 'fixed' ? (
+              <EditField
+                label="Amount (£)"
+                type="number"
+                value={fieldsDraft.amount.amount}
+                onChange={(v) => setFieldsDraft((d) => (d ? { ...d, amount: { type: 'fixed', amount: Number(v) } } : d))}
+              />
+            ) : (
+              <EditField
+                label="Percent (%)"
+                type="number"
+                value={fieldsDraft.amount.percent}
+                onChange={(v) => setFieldsDraft((d) => (d ? { ...d, amount: { type: 'percent_of_balance', percent: Number(v) } } : d))}
+              />
+            )}
+
+            {/* Pots backlog item (2026-09 session) — independent of the
+                loan's OWN location (Adam-specified: "if a loan is tagged
+                to a pot, that means ONLY the monthly payment is paid from
+                the pot, not necessarily recurring overpayments").
+                Absent/'Follows loan' is the field's own documented
+                default (see LoanRecurringOverpayment.location in
+                types/ledger.ts) — a flat overwrite, not effective-dated —
+                see that same type comment for why. */}
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--color-ink-muted)]">Paid from</span>
+              <select
+                value={fieldsDraft.location === 'pot' ? `pot:${fieldsDraft.potId ?? ''}` : (fieldsDraft.location ?? '')}
+                onChange={(e) => {
+                  const raw = e.target.value
+                  const next: { location: 'personal' | 'pot' | undefined; potId: string | undefined } =
+                    raw === '' ? { location: undefined, potId: undefined } : raw === 'personal' ? { location: 'personal', potId: undefined } : { location: 'pot', potId: raw.slice(4) }
+                  setFieldsDraft((d) => (d ? { ...d, ...next } : d))
+                }}
+                className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+              >
+                <option value="" style={{ color: '#000' }}>
+                  Follows the loan's own location
+                </option>
+                <option value="personal" style={{ color: '#000' }}>
+                  Personal
+                </option>
+                {ownerPots.map((p) => (
+                  <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="grid grid-cols-2 gap-2">
+              <EditField label="Payment date" type="date" value={fieldsDraft.startDate} onChange={(v) => setFieldsDraft((d) => (d ? { ...d, startDate: v } : d))} />
+              {showEndDate ? (
+                <EditField label="End date" type="date" value={fieldsDraft.endDate ?? ''} onChange={(v) => setFieldsDraft((d) => (d ? { ...d, endDate: v || undefined } : d))} />
+              ) : (
+                <button onClick={() => setShowEndDate(true)} className="self-end text-xs font-medium pb-1" style={{ color: 'var(--color-coral)' }}>
+                  + Set an end date
+                </button>
+              )}
+            </div>
+            {showEndDate && fieldsDraft.endDate && (
+              <button onClick={() => setFieldsDraft((d) => (d ? { ...d, endDate: undefined } : d))} className="self-start text-xs text-[var(--color-ink-muted)]">
+                Clear end date (run indefinitely)
+              </button>
+            )}
+
+            <FormButtonRow
+              onCancel={() => {
+                setFieldsDraft(null)
+                setShowEndDate(!!value.endDate)
+                setEditorOpen(false)
+              }}
+              saveDisabled={JSON.stringify(fieldsDraft) === JSON.stringify({ amount: value.amount, location: value.location, potId: value.potId, startDate: value.startDate, endDate: value.endDate })}
+              onSave={() => {
+                const draft = fieldsDraft
+                const locationChanged = draft.location !== value.location || (draft.location === 'pot' && draft.potId !== value.potId)
+                const commit = () => {
+                  onChange({ ...value, amount: draft.amount, location: draft.location, potId: draft.potId, startDate: draft.startDate, endDate: draft.endDate })
+                  setFieldsDraft(null)
+                  setEditorOpen(false)
+                }
+                if (locationChanged) {
+                  setPendingOverpaymentLocationConfirm({
+                    changes: [{ label: 'Paid from', from: overpaymentLocationLabel(value.location, value.potId), to: overpaymentLocationLabel(draft.location, draft.potId) }],
+                    commit,
+                  })
+                } else {
+                  commit()
+                }
+              }}
+            />
+          </div>
+        )
       )}
 
       {/* Ad-hoc individual skips (Phase 4) — distinct from the end date

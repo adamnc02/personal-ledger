@@ -1312,6 +1312,19 @@ function TransferRecurringRow({
   // payment.
   const [pendingConfirm, setPendingConfirm] = useState<{ effectiveFrom: string; changes: RecurringChangeField[]; commit: () => void } | null>(null)
 
+  // UAT 2026-09-08 (followup-confirm-recurring-transfer, same fix as
+  // Bills.tsx's own cancelEverything) — Cancel on the effective-date
+  // picker or the confirm modal must fully discard the edit and collapse
+  // the row, not just step back to the previous screen.
+  function cancelEverything() {
+    setAmount(String(template.amount))
+    setTransferFrom(template.transferFrom)
+    setTransferTo(template.transferTo)
+    setChoosingEffectiveDate(false)
+    setPendingConfirm(null)
+    setOpen(false)
+  }
+
   const touchesPersonal = template.transferFrom?.type === 'personal' || template.transferTo?.type === 'personal'
   const isWithdrawal = template.transferTo?.type === 'personal'
   const fromLabel = transferLocationLabel(template.transferFrom, savingsPots, pots)
@@ -1352,6 +1365,7 @@ function TransferRecurringRow({
       }
       onUpdate(updates)
       triggerFlash()
+      setOpen(false)
       return
     }
     // Location-only change — no amountHistory-style mechanism exists for
@@ -1365,6 +1379,7 @@ function TransferRecurringRow({
         commit: () => {
           onUpdate({ transferFrom, transferTo })
           triggerFlash()
+          setOpen(false)
         },
       })
     }
@@ -1377,7 +1392,7 @@ function TransferRecurringRow({
           <RecurringEffectiveDateModal
             template={template}
             newAmount={Number(amount)}
-            onCancel={() => setChoosingEffectiveDate(false)}
+            onCancel={cancelEverything}
             onChoose={(effectiveFrom) => {
               const changes: RecurringChangeField[] = [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(Number(amount))}` }]
               if (locationsDirty) changes.push(...locationChangeFields())
@@ -1392,6 +1407,7 @@ function TransferRecurringRow({
                   }
                   onUpdate(updates)
                   triggerFlash()
+                  setOpen(false)
                 },
               })
               setChoosingEffectiveDate(false)
@@ -1403,7 +1419,7 @@ function TransferRecurringRow({
             effectiveFrom={pendingConfirm.effectiveFrom}
             changes={pendingConfirm.changes}
             affectsClearedBalance={pendingConfirm.effectiveFrom <= todayIso()}
-            onCancel={() => setPendingConfirm(null)}
+            onCancel={cancelEverything}
             onConfirm={() => {
               pendingConfirm.commit()
               setPendingConfirm(null)
@@ -1478,14 +1494,21 @@ function TransferRecurringRow({
               </div>
             )}
             <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
-            <button
-              onClick={handleSaveClick}
-              className="text-xs self-start disabled:opacity-40"
-              style={{ color: 'var(--color-coral)' }}
-              disabled={!amountDirty && !locationsDirty}
-            >
-              Save {locationsDirty ? 'changes' : 'amount'}
-            </button>
+            {/* UAT 2026-09-08 (followup-confirm-recurring-transfer note) —
+                was a bespoke inline text button whose label flip-flopped
+                between "Save amount"/"Save changes"; now the same
+                full-width Save/Cancel pair every other edit form in the
+                app uses, dimmed the same way via the same dirty check. */}
+            <FormButtonRow
+              onCancel={() => {
+                setAmount(String(template.amount))
+                setTransferFrom(template.transferFrom)
+                setTransferTo(template.transferTo)
+                setOpen(false)
+              }}
+              onSave={handleSaveClick}
+              saveDisabled={!amountDirty && !locationsDirty}
+            />
             <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
               <input
                 type="checkbox"
@@ -1765,12 +1788,17 @@ function RecurringTransactionEditPanel({
   onAddCategory,
   onSave,
   onDelete,
+  onCancel,
 }: {
   template: RecurringTemplate
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onDelete: () => void
+  /** UAT 2026-09-08 (followup-confirm-recurring-tx-amount note) — this
+   * form had a Save button but no way to back out; collapses the row
+   * without saving, matching every other edit form in the app. */
+  onCancel: () => void
 }) {
   const [draft, setDraft] = useState<RecurringTxDraft>(() => draftFromRecurringTemplate(template))
   const [choosingEffectiveDate, setChoosingEffectiveDate] = useState(false)
@@ -1790,6 +1818,17 @@ function RecurringTransactionEditPanel({
     setDraft((d) => ({ ...d, ...patch }))
   }
 
+  // UAT 2026-09-08 (followup-confirm-recurring-tx-amount, same fix as
+  // Bills.tsx's own cancelEverything) — Cancel on the effective-date
+  // picker or the confirm modal must fully discard the edit and collapse
+  // the row, not just step back to the previous screen.
+  function cancelEverything() {
+    setDraft(draftFromRecurringTemplate(template))
+    setChoosingEffectiveDate(false)
+    setPendingConfirm(null)
+    onCancel()
+  }
+
   function handleSaveClick() {
     // Same gate as Bills.tsx: a genuine STANDING amount change is routed
     // through "which payment should this apply from" — every other field
@@ -1807,7 +1846,7 @@ function RecurringTransactionEditPanel({
         effectiveFrom={pendingConfirm.effectiveFrom}
         changes={pendingConfirm.changes}
         affectsClearedBalance={pendingConfirm.effectiveFrom <= todayIso()}
-        onCancel={() => setPendingConfirm(null)}
+        onCancel={cancelEverything}
         onConfirm={() => {
           pendingConfirm.commit()
           setPendingConfirm(null)
@@ -1822,7 +1861,7 @@ function RecurringTransactionEditPanel({
       <RecurringEffectiveDateModal
         template={template}
         newAmount={draft.amount}
-        onCancel={() => setChoosingEffectiveDate(false)}
+        onCancel={cancelEverything}
         onChoose={(effectiveFrom) => {
           setPendingConfirm({
             effectiveFrom,
@@ -1871,9 +1910,9 @@ function RecurringTransactionEditPanel({
         <Trash2 size={13} /> Delete recurring transaction
       </button>
 
-      <button disabled={!dirty} onClick={handleSaveClick} className="col-span-2 w-full py-2.5 rounded-full text-sm font-semibold text-white mt-1 disabled:opacity-40" style={{ background: 'var(--color-coral)' }}>
-        Save
-      </button>
+      <div className="col-span-2 mt-1">
+        <FormButtonRow onCancel={onCancel} onSave={handleSaveClick} saveDisabled={!dirty} />
+      </div>
     </div>
   )
 }
@@ -2025,8 +2064,10 @@ function RecurringTransactionRow({
               onSave={(patch) => {
                 onUpdate(patch)
                 triggerFlash()
+                setOpen(false)
               }}
               onDelete={onRemove}
+              onCancel={() => setOpen(false)}
             />
 
             <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
