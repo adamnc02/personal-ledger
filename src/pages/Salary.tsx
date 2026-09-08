@@ -17,7 +17,7 @@ import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl
 import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow } from '../components/FormButtons'
 import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfirmModal'
-import { SavedFlashOverlay } from '../components/SavedFlash'
+import { SavedFlashOverlay, useSavedFlash } from '../components/SavedFlash'
 import { NumberInput } from '../components/NumberInput'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { EditField } from '../components/EditField'
@@ -3748,6 +3748,12 @@ function PayPeriodRow({
   const netPay = computeNetPayForPeriod(person, dateIso)
   const existingOverride = person.salaryOverrides.find((o) => o.payPeriodDate === dateIso)
   const [sortOpen, setSortOpen] = useState(false)
+  // Batch 9 (2026-09-07, Bug 11) — Salary Sort / Bonus / Override-net-pay
+  // all flash THIS Pay Pill with their own specific message, separate
+  // from the parent-controlled `flashing` prop (which covers the plain
+  // salary-edit Save, generic "Saved"). Both are merged into one overlay
+  // below since a row only ever shows one flash at a time in practice.
+  const { active: ownFlashActive, message: ownFlashMessage, trigger: triggerOwnFlash } = useSavedFlash()
   // Hidden entirely with no pots/savings pots/joint account to sort into
   // (Adam's explicit 2026-09 call) — canSort itself already restricts
   // this to the primary person's Most-recent/Upcoming rows only, per the
@@ -3787,6 +3793,7 @@ function PayPeriodRow({
           onSaveAllFuture={onSaveAllFuture}
           editingDeduction={editingDeduction}
           setEditingDeduction={setEditingDeduction}
+          onFlash={triggerOwnFlash}
         />
       )}
       {sortOpen && (
@@ -3797,6 +3804,7 @@ function PayPeriodRow({
           onSave={(targets) => {
             saveSalarySort(dateIso, targets)
             setSortOpen(false)
+            triggerOwnFlash('Salary sort saved.')
           }}
           onClearTarget={(location) => clearSalarySortTarget(dateIso, location)}
           onClearAll={() => {
@@ -3806,7 +3814,7 @@ function PayPeriodRow({
           onClose={() => setSortOpen(false)}
         />
       )}
-      <SavedFlashOverlay active={flashing} />
+      <SavedFlashOverlay active={flashing || ownFlashActive} message={ownFlashActive ? ownFlashMessage : 'Saved'} />
     </div>
   )
 }
@@ -4031,6 +4039,7 @@ function PeriodEditor({
   onSaveAllFuture,
   editingDeduction,
   setEditingDeduction,
+  onFlash,
 }: {
   person: Person
   dateIso: string
@@ -4040,6 +4049,12 @@ function PeriodEditor({
   onSaveAllFuture: (fields: SalaryDraftFields) => void
   editingDeduction: { personId: string; deductionId: string } | null
   setEditingDeduction: (v: { personId: string; deductionId: string } | null) => void
+  /** Batch 9 (2026-09-07, Bug 11) — flashes the Pay Pill (PayPeriodRow's
+   * own overlay) with a specific message, for the Bonus/Override-net-pay
+   * actions nested inside this editor — separate from onSaveJustThis/
+   * onSaveAllFuture's own generic flash, which the parent row already
+   * triggers itself. */
+  onFlash: (message: string) => void
 }) {
   const applicableSnapshot = findApplicableSnapshot(person, dateIso)
   const [draft, setDraft] = useState<SalaryDraftFields>(() =>
@@ -4286,10 +4301,16 @@ function PeriodEditor({
         )}
       </div>
 
-      <NetPayOverrideControl personId={person.id} dateIso={dateIso} snapshotNetPay={netPayWithBonus} existingOverride={existingOverride} />
+      <NetPayOverrideControl
+        personId={person.id}
+        dateIso={dateIso}
+        snapshotNetPay={netPayWithBonus}
+        existingOverride={existingOverride}
+        onSaved={() => onFlash('Net pay updated.')}
+      />
 
       <div className="flex justify-end">
-        <AttachBonusButton personId={person.id} fixedDate={dateIso} existingOverride={existingOverride} />
+        <AttachBonusButton personId={person.id} fixedDate={dateIso} existingOverride={existingOverride} onSaved={() => onFlash('Bonus saved.')} />
       </div>
 
       <button
@@ -4343,11 +4364,15 @@ function NetPayOverrideControl({
   dateIso,
   snapshotNetPay,
   existingOverride,
+  onSaved,
 }: {
   personId: string
   dateIso: string
   snapshotNetPay: number
   existingOverride?: Person['salaryOverrides'][number]
+  /** Batch 9 (2026-09-07, Bug 11) — fired after the "Set" button actually
+   * commits an override (not on Remove). */
+  onSaved?: () => void
 }) {
   const { addSalaryOverride, updateSalaryOverride, removeSalaryOverride } = useLedgerData()
   const [editing, setEditing] = useState(false)
@@ -4397,6 +4422,7 @@ function NetPayOverrideControl({
     if (existingOverride) updateSalaryOverride(personId, existingOverride.id, { netPayOverride: numeric, reason, bonusGrossAmount: undefined })
     else addSalaryOverride(personId, { payPeriodDate: dateIso, netPayOverride: numeric, reason })
     setEditing(false)
+    onSaved?.()
   }
 
   return (
