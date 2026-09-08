@@ -626,9 +626,9 @@ function LoanRow({
             // real loan, bypassing the fields-grid draft entirely — this
             // action has its own Save/Cancel now (RecurringOverpaymentEditor
             // itself), it doesn't need to piggyback on the loan's main one.
-            onSaveRecurringOverpayment={(recurringOverpayment) => {
+            onSaveRecurringOverpayment={(recurringOverpayment, options) => {
               onSave({ recurringOverpayment })
-              triggerFlash()
+              if (!options?.silent) triggerFlash()
             }}
           />
 
@@ -714,7 +714,19 @@ function CreditCardRow({
           </button>
         </div>
 
-        {ledgerOpen && <CreditCardLedgerModal card={card} transactions={transactions} onUpdateMinimumCharge={onUpdateMinimumCharge} onClose={() => setLedgerOpen(false)} />}
+        {ledgerOpen && (
+          <CreditCardLedgerModal
+            card={card}
+            transactions={transactions}
+            onUpdateMinimumCharge={onUpdateMinimumCharge}
+            onClearBalance={(date, amount) => {
+              onLogLumpPayment(amount, date, 'Statement cleared')
+              triggerFlash()
+              setLedgerOpen(false)
+            }}
+            onClose={() => setLedgerOpen(false)}
+          />
+        )}
 
         {/* UAT 2026-09-08 (6-bug4-cards): always mounted now — see
             LoanEditPanel's own comment on the same pattern. */}
@@ -823,7 +835,7 @@ function LoanEditPanel({
    * real loan, bypassing this panel's own fields-grid draft (which only
    * commits via the main Save button and would otherwise silently lose
    * a recurring-overpayment edit made while the card is collapsed). */
-  onSaveRecurringOverpayment: (v: LoanRecurringOverpayment | undefined) => void
+  onSaveRecurringOverpayment: (v: LoanRecurringOverpayment | undefined, options?: { silent?: boolean }) => void
 }) {
   // A 'recurring' prefill (from the What-if page's "Make this a real
   // recurring overpayment" button) seeds the draft's recurringOverpayment
@@ -939,13 +951,13 @@ function LoanEditPanel({
         loan={{ ...loan, ...draft }}
         pots={pots}
         value={draft.recurringOverpayment}
-        onChange={(recurringOverpayment) => {
+        onChange={(recurringOverpayment, options) => {
           // Keep the local draft in sync too, purely so `loan={{ ...loan,
           // ...draft }}` above stays correct for any recast preview
           // computed before the real `loan` prop itself re-renders with
           // the persisted change.
           update({ recurringOverpayment })
-          onSaveRecurringOverpayment(recurringOverpayment)
+          onSaveRecurringOverpayment(recurringOverpayment, options)
         }}
       />
 
@@ -1387,11 +1399,16 @@ function CreditCardLedgerModal({
   card,
   transactions,
   onUpdateMinimumCharge,
+  onClearBalance,
   onClose,
 }: {
   card: CreditCard
   transactions: Transaction[]
   onUpdateMinimumCharge: (date: string, amount: number) => void
+  /** UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, Adam's own repeated
+   * feature request) — logs an overpayment for the row's own full
+   * balanceDue, dated on that row's date, in one tap. */
+  onClearBalance: (date: string, amount: number) => void
   onClose: () => void
 }) {
   const rows = buildCreditCardMinimumChargeRows(card, transactions)
@@ -1443,13 +1460,31 @@ function CreditCardLedgerModal({
                 </button>
               </div>
             ) : (
-              <button key={row.date} onClick={() => startEditing(row)} className="py-2 flex items-center justify-between text-left">
-                <span className="text-xs text-[var(--color-ink)]">
-                  {row.date}
-                  {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
-                </span>
-                <span className="text-xs font-mono text-[var(--color-ink)]">£{formatCurrency(row.amount)}</span>
-              </button>
+              <div key={row.date} className="py-2 flex items-center justify-between gap-2">
+                <button onClick={() => startEditing(row)} className="flex-1 min-w-0 text-left">
+                  <span className="text-xs text-[var(--color-ink)]">
+                    {row.date}
+                    {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
+                  </span>
+                  {/* UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, Adam's own
+                      repeated feature request) — this row's own MINIMUM was
+                      the only figure ever shown here, with nothing to show
+                      the real statement balance actually driving it. */}
+                  {row.balanceDue > row.amount + 0.01 && (
+                    <p className="text-[10px] text-[var(--color-ink-faint)]">£{formatCurrency(row.balanceDue)} owed in full</p>
+                  )}
+                </button>
+                <span className="text-xs font-mono text-[var(--color-ink)] shrink-0">£{formatCurrency(row.amount)}</span>
+                {row.status === 'pending' && row.balanceDue > row.amount + 0.01 && (
+                  <button
+                    onClick={() => onClearBalance(row.date, row.balanceDue)}
+                    className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
+                    style={{ background: 'var(--color-coral)' }}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
             ),
           )}
           {rows.length === 0 && <p className="py-4 text-center text-xs text-[var(--color-ink-faint)]">No minimum charges yet.</p>}
@@ -1919,7 +1954,14 @@ function RecurringOverpaymentEditor({
   loan: Loan
   pots: Pot[]
   value: LoanRecurringOverpayment | undefined
-  onChange: (v: LoanRecurringOverpayment | undefined) => void
+  /** UAT 2026-09-08 (followup-recurring-overpayment-persists retest) —
+   * `silent` suppresses the "Saved" flash for a commit that's really
+   * just one intermediate step of a multi-step flow (the creation
+   * wizard's location choice, immediately followed by the recast
+   * choice) — every commit still persists regardless of this flag, only
+   * the flash is skipped, so the flow doesn't visibly "save" twice for
+   * what reads as one action. */
+  onChange: (v: LoanRecurringOverpayment | undefined, options?: { silent?: boolean }) => void
 }) {
   const [showEndDate, setShowEndDate] = useState(!!value?.endDate)
   const [choosingRecast, setChoosingRecast] = useState(false)
@@ -2056,7 +2098,9 @@ function RecurringOverpaymentEditor({
   // option, not a side effect of skipping the step.
   if (!value && !draftAmount && pendingAmount) {
     const commit = (patch: { location?: 'personal' | 'pot'; potId?: string }) => {
-      onChange({ startDate: todayIso(), amount: pendingAmount, ...patch })
+      // silent: true — this is just step 2 of the creation wizard, the
+      // recast choice screen (its own onChange call) comes right after.
+      onChange({ startDate: todayIso(), amount: pendingAmount, ...patch }, { silent: true })
       setPendingAmount(null)
       setChoosingRecast(true)
     }

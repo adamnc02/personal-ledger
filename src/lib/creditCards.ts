@@ -628,6 +628,15 @@ export interface CreditCardMinimumChargeRow {
   // happened" vs "projected" distinction if it wants to, not because the
   // edit flow itself needs the caller to know which path it'll take.
   materialized: boolean
+  /** UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, Adam's own repeated
+   * feature request) — the FULL balance owed as of this row's date, not
+   * just the minimum payment amount. Lets the ledger modal offer a
+   * "Clear" action that pays off the whole statement in one tap, rather
+   * than the user having to work out and type a matching overpayment
+   * figure by hand (a real source of the "still not fully cleared"
+   * reports — an overpayment even a penny short, or dated slightly
+   * wrong, leaves a genuine residual behind). */
+  balanceDue: number
 }
 
 /**
@@ -669,9 +678,19 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   // echoed back, never something the modal had computed.
   const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions).filter((t) => !storedDates.has(t.date))
 
+  // Only meaningful for still-projected rows — a stored/materialized row
+  // already happened, so "clear the whole statement" isn't a live action
+  // for it any more. balanceDue there is 0 (nothing further owed as of
+  // that date on top of what was already paid; not shown/used by the UI).
   const rows: CreditCardMinimumChargeRow[] = [
-    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true })),
-    ...generated.map((t) => ({ date: t.date, amount: t.amount, status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const), materialized: false })),
+    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true, balanceDue: 0 })),
+    ...generated.map((t) => ({
+      date: t.date,
+      amount: t.amount,
+      status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const),
+      materialized: false,
+      balanceDue: cardBalanceAsOf(card, transactions, new Date(t.date)),
+    })),
   ]
   return rows.sort((a, b) => a.date.localeCompare(b.date))
 }
