@@ -18,6 +18,7 @@ import { transferLocationLabel, buildTransferLocationOptions, transferLocationKe
 import { LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
+import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { addYears } from 'date-fns'
 import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2 } from '../types/ledger'
 
@@ -1286,20 +1287,122 @@ function TransferRecurringRow({
   const [transferFrom, setTransferFrom] = useState(template.transferFrom)
   const [transferTo, setTransferTo] = useState(template.transferTo)
   const [pickingSide, setPickingSide] = useState<'from' | 'to' | null>(null)
+  const [choosingEffectiveDate, setChoosingEffectiveDate] = useState(false)
+  // UAT follow-up (2026-09-08) — same "are you sure, here's what's
+  // changing" confirmation Bills.tsx/Loans.tsx/RecurringTransactionEditPanel
+  // already show before a recurring change commits (Adam's own spec:
+  // "used for anything RECURRING in the app that changed, relating to
+  // bills / transactions / loans / transfers" — transfers were the one
+  // gap left). A recurring transfer's amount now goes through the same
+  // amountEffectiveFrom/amountHistory engine bills/transactions already
+  // use (applyTemplateAmountChange works for any RecurringTemplate,
+  // transfers included — it just wasn't being called here before). The
+  // From/To location fields have no such history mechanism on
+  // RecurringTemplate (no transferFromHistory/transferToHistory field
+  // exists), so a location-only change applies immediately once
+  // confirmed, same as a loan's recurring-overpayment "Paid from" field —
+  // a standing arrangement's setting, not a historized fact about a past
+  // payment.
+  const [pendingConfirm, setPendingConfirm] = useState<{ effectiveFrom: string; changes: RecurringChangeField[]; commit: () => void } | null>(null)
 
   const touchesPersonal = template.transferFrom?.type === 'personal' || template.transferTo?.type === 'personal'
   const isWithdrawal = template.transferTo?.type === 'personal'
   const fromLabel = transferLocationLabel(template.transferFrom, savingsPots, pots)
   const toLabel = transferLocationLabel(template.transferTo, savingsPots, pots)
   const locationsDirty = !locationsEqual(transferFrom, template.transferFrom) || !locationsEqual(transferTo, template.transferTo)
+  const amountDirty = Number(amount) > 0 && Number(amount) !== template.amount
 
   const windowDates = scheduledTemplateDates(template, new Date(), addYearsLocal(new Date(), 1))
   const currentlyPaused = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && windowDates.includes(o.originalDate)).map((o) => o.originalDate))
   const nextOccurrence = templateOccurrencePreviews(template, new Date(), 1)[0]
 
+  function locationChangeFields(): RecurringChangeField[] {
+    const fields: RecurringChangeField[] = []
+    if (!locationsEqual(transferFrom, template.transferFrom)) fields.push({ label: 'From', from: fromLabel, to: transferFrom ? transferLocationLabel(transferFrom, savingsPots, pots) : '—' })
+    if (!locationsEqual(transferTo, template.transferTo)) fields.push({ label: 'To', from: toLabel, to: transferTo ? transferLocationLabel(transferTo, savingsPots, pots) : '—' })
+    return fields
+  }
+
+  function handleSaveClick() {
+    const amountNumber = Number(amount)
+    if (!amountDirty && !locationsDirty) return
+    // A genuine standing amount change is routed through "which payment
+    // should this apply from," same gate as Bills.tsx/
+    // RecurringTransactionEditPanel — everything else (frequency,
+    // followsPayday, etc.) still saves immediately via their own inline
+    // handlers below, unaffected by this button.
+    if (amountDirty && recentAndUpcomingOccurrences(template, new Date()).length > 0) {
+      setChoosingEffectiveDate(true)
+      return
+    }
+    if (amountDirty) {
+      // No occurrences to anchor a date to yet (a brand-new template) —
+      // applies immediately, same as Bills.tsx's equivalent fallback.
+      const updates: Partial<Omit<RecurringTemplate, 'id'>> = { amount: amountNumber }
+      if (locationsDirty && transferFrom && transferTo) {
+        updates.transferFrom = transferFrom
+        updates.transferTo = transferTo
+      }
+      onUpdate(updates)
+      triggerFlash()
+      return
+    }
+    // Location-only change — no amountHistory-style mechanism exists for
+    // From/To (see the state comment above), so this just confirms then
+    // applies immediately (today), rather than asking for a date that
+    // has nothing to anchor to.
+    if (transferFrom && transferTo) {
+      setPendingConfirm({
+        effectiveFrom: todayIso(),
+        changes: locationChangeFields(),
+        commit: () => {
+          onUpdate({ transferFrom, transferTo })
+          triggerFlash()
+        },
+      })
+    }
+  }
+
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={template.name}>
       <div className="relative rounded-2xl px-4 py-3" style={{ background: 'var(--color-surface)' }}>
+        {choosingEffectiveDate && (
+          <RecurringEffectiveDateModal
+            template={template}
+            newAmount={Number(amount)}
+            onCancel={() => setChoosingEffectiveDate(false)}
+            onChoose={(effectiveFrom) => {
+              const changes: RecurringChangeField[] = [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(Number(amount))}` }]
+              if (locationsDirty) changes.push(...locationChangeFields())
+              setPendingConfirm({
+                effectiveFrom,
+                changes,
+                commit: () => {
+                  const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...applyTemplateAmountChange(template, Number(amount), effectiveFrom) }
+                  if (locationsDirty && transferFrom && transferTo) {
+                    updates.transferFrom = transferFrom
+                    updates.transferTo = transferTo
+                  }
+                  onUpdate(updates)
+                  triggerFlash()
+                },
+              })
+              setChoosingEffectiveDate(false)
+            }}
+          />
+        )}
+        {pendingConfirm && (
+          <RecurringChangeConfirmModal
+            effectiveFrom={pendingConfirm.effectiveFrom}
+            changes={pendingConfirm.changes}
+            affectsClearedBalance={pendingConfirm.effectiveFrom <= todayIso()}
+            onCancel={() => setPendingConfirm(null)}
+            onConfirm={() => {
+              pendingConfirm.commit()
+              setPendingConfirm(null)
+            }}
+          />
+        )}
         <button className="w-full flex items-start justify-between gap-2 text-left" onClick={() => setOpen(!open)}>
           <div className="min-w-0">
             <p className="font-body text-sm text-[var(--color-ink)] truncate flex items-center gap-1.5">
@@ -1369,22 +1472,10 @@ function TransferRecurringRow({
             )}
             <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
             <button
-              onClick={() => {
-                const amountNumber = Number(amount)
-                const updates: Partial<Omit<RecurringTemplate, 'id'>> = {}
-                if (amountNumber > 0 && amountNumber !== template.amount) updates.amount = amountNumber
-                if (locationsDirty && transferFrom && transferTo) {
-                  updates.transferFrom = transferFrom
-                  updates.transferTo = transferTo
-                }
-                if (Object.keys(updates).length > 0) {
-                  onUpdate(updates)
-                  triggerFlash()
-                }
-              }}
+              onClick={handleSaveClick}
               className="text-xs self-start disabled:opacity-40"
               style={{ color: 'var(--color-coral)' }}
-              disabled={(!(Number(amount) > 0) || Number(amount) === template.amount) && !locationsDirty}
+              disabled={!amountDirty && !locationsDirty}
             >
               Save {locationsDirty ? 'changes' : 'amount'}
             </button>
@@ -1676,6 +1767,14 @@ function RecurringTransactionEditPanel({
 }) {
   const [draft, setDraft] = useState<RecurringTxDraft>(() => draftFromRecurringTemplate(template))
   const [choosingEffectiveDate, setChoosingEffectiveDate] = useState(false)
+  // UAT follow-up (2026-09-08) — same "are you sure, here's what's
+  // changing" confirmation Bills.tsx/Loans.tsx already show before a
+  // recurring change commits (Adam's own spec: "used for anything
+  // RECURRING in the app that changed, relating to bills / transactions
+  // / loans / transfers"). Holds a closure that performs the exact same
+  // commit this Save button always did, same shape as Bills.tsx's
+  // pendingConfirm.
+  const [pendingConfirm, setPendingConfirm] = useState<{ effectiveFrom: string; changes: RecurringChangeField[]; commit: () => void } | null>(null)
   // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
   // when nothing's changed, same as BillEditPanel's own dirty check.
   const dirty = JSON.stringify(draft) !== JSON.stringify(draftFromRecurringTemplate(template))
@@ -1695,6 +1794,22 @@ function RecurringTransactionEditPanel({
     onSave(draft)
   }
 
+  if (pendingConfirm) {
+    return (
+      <RecurringChangeConfirmModal
+        effectiveFrom={pendingConfirm.effectiveFrom}
+        changes={pendingConfirm.changes}
+        affectsClearedBalance={pendingConfirm.effectiveFrom <= todayIso()}
+        onCancel={() => setPendingConfirm(null)}
+        onConfirm={() => {
+          pendingConfirm.commit()
+          setPendingConfirm(null)
+          setChoosingEffectiveDate(false)
+        }}
+      />
+    )
+  }
+
   if (choosingEffectiveDate) {
     return (
       <RecurringEffectiveDateModal
@@ -1702,8 +1817,11 @@ function RecurringTransactionEditPanel({
         newAmount={draft.amount}
         onCancel={() => setChoosingEffectiveDate(false)}
         onChoose={(effectiveFrom) => {
-          onSave({ ...draft, ...applyTemplateAmountChange(template, draft.amount, effectiveFrom) })
-          setChoosingEffectiveDate(false)
+          setPendingConfirm({
+            effectiveFrom,
+            changes: [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(draft.amount)}` }],
+            commit: () => onSave({ ...draft, ...applyTemplateAmountChange(template, draft.amount, effectiveFrom) }),
+          })
         }}
       />
     )
