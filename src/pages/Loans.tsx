@@ -1804,6 +1804,18 @@ function RecurringOverpaymentEditor({
 }) {
   const [showEndDate, setShowEndDate] = useState(!!value?.endDate)
   const [choosingRecast, setChoosingRecast] = useState(false)
+  // UAT follow-up (2026-09-08) — same "are you sure, here's what's
+  // changing" confirmation Bills.tsx/Loans.tsx's own main location
+  // field/Expenses.tsx already show before a recurring change commits
+  // (Adam's own spec: "used for anything RECURRING in the app that
+  // changed, relating to bills / transactions / loans / transfers").
+  // Unlike the loan's own `location` field, this one has no
+  // amountHistory-style effective-dating mechanism (see the field's own
+  // type comment in types/ledger.ts — "a flat overwrite, not
+  // effective-dated... describes a standing arrangement's setting rather
+  // than a fact about a specific past payment"), so this confirms then
+  // applies immediately, it doesn't ask for a date to anchor to.
+  const [pendingOverpaymentLocationConfirm, setPendingOverpaymentLocationConfirm] = useState<{ changes: RecurringChangeField[]; commit: () => void } | null>(null)
   // Held separately from `value` itself: the amount has to be chosen
   // BEFORE a LoanRecurringOverpayment is created at all — confirmed as a
   // real bug that the old flow skipped straight to the recast-choice
@@ -1824,6 +1836,12 @@ function RecurringOverpaymentEditor({
   // render branch below.
   const [pendingAmount, setPendingAmount] = useState<LoanRecurringOverpayment['amount'] | null>(null)
   const ownerPots = pots.filter((p) => p.personId === loan.ownerId)
+
+  function overpaymentLocationLabel(location: 'personal' | 'pot' | undefined, potId: string | undefined): string {
+    if (location === 'pot') return ownerPots.find((p) => p.id === potId)?.name ?? 'a pot'
+    if (location === 'personal') return 'Personal'
+    return "Follows the loan's own location"
+  }
 
   if (!value && !draftAmount && !pendingAmount) {
     return (
@@ -1987,6 +2005,18 @@ function RecurringOverpaymentEditor({
 
   return (
     <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+      {pendingOverpaymentLocationConfirm && (
+        <RecurringChangeConfirmModal
+          effectiveFrom={todayIso()}
+          changes={pendingOverpaymentLocationConfirm.changes}
+          affectsClearedBalance={false}
+          onCancel={() => setPendingOverpaymentLocationConfirm(null)}
+          onConfirm={() => {
+            pendingOverpaymentLocationConfirm.commit()
+            setPendingOverpaymentLocationConfirm(null)
+          }}
+        />
+      )}
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-[var(--color-ink)]">Recurring overpayment</span>
         <button
@@ -2058,9 +2088,12 @@ function RecurringOverpaymentEditor({
           value={value.location === 'pot' ? `pot:${value.potId ?? ''}` : (value.location ?? '')}
           onChange={(e) => {
             const raw = e.target.value
-            if (raw === '') onChange({ ...value, location: undefined, potId: undefined })
-            else if (raw === 'personal') onChange({ ...value, location: 'personal', potId: undefined })
-            else onChange({ ...value, location: 'pot', potId: raw.slice(4) })
+            const next: { location: 'personal' | 'pot' | undefined; potId: string | undefined } =
+              raw === '' ? { location: undefined, potId: undefined } : raw === 'personal' ? { location: 'personal', potId: undefined } : { location: 'pot', potId: raw.slice(4) }
+            setPendingOverpaymentLocationConfirm({
+              changes: [{ label: 'Paid from', from: overpaymentLocationLabel(value.location, value.potId), to: overpaymentLocationLabel(next.location, next.potId) }],
+              commit: () => onChange({ ...value, location: next.location, potId: next.potId }),
+            })
           }}
           className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
         >
