@@ -173,6 +173,24 @@ export function setPausedLoanRecurringOverpaymentDates(loan: Loan, windowDates: 
  * description of this combination) — but always still converges cleanly
  * on the loan's real final period, however many times it's recast.
  */
+/**
+ * The most recent past scheduled payment (if any) and the next 3 upcoming
+ * ones — loan's own equivalent of schedule.ts's recentAndUpcomingOccurrences,
+ * for the same "which payment should this apply from" picker-first flow
+ * (UAT 2026-09-08, 7-bug8.2-confirm-loans note), reused for a pot's own
+ * checklist toggle when the item being moved is a loan rather than a bill.
+ */
+export function recentAndUpcomingLoanPaymentDates(loan: Loan, asOfDate: Date): { date: string; isPast: boolean }[] {
+  const schedule = buildLoanSchedule(loan)
+  const asOfIso = toIso(asOfDate)
+  const past = schedule.filter((s) => s.date <= asOfIso)
+  const upcoming = schedule.filter((s) => s.date > asOfIso)
+  const result: { date: string; isPast: boolean }[] = []
+  if (past.length > 0) result.push({ date: past[past.length - 1].date, isPast: true })
+  for (const s of upcoming.slice(0, 3)) result.push({ date: s.date, isPast: false })
+  return result
+}
+
 export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
   if (!(loan.monthlyPayment > 0) || !(loan.termMonths > 0) || !(loan.principal > 0)) return []
 

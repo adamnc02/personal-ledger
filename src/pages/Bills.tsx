@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
-import { createPortal } from 'react-dom'
-import { formatCurrency, formatFullDate } from '../lib/format'
+import { formatCurrency } from '../lib/format'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Plus, ChevronDown, ChevronUp, X } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
@@ -16,7 +15,7 @@ import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
-import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
+import { RecurringChangeConfirmModal, EffectiveDateOccurrenceModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { peopleWithIncomeCount } from '../lib/household'
 import { shouldOfferLocationPicker } from '../lib/pickerFirst'
 import { recentAndUpcomingOccurrences, applyTemplateAmountChange, scheduledTemplateDates, setPausedTemplateOccurrences, resolveTemplateAmount, templateOccurrencePreviews } from '../lib/schedule'
@@ -575,6 +574,19 @@ function BillEditPanel({
     setDraft((d) => ({ ...d, ...patch }))
   }
 
+  // UAT 2026-09-08 (7-bug8.2-confirm-bills) — Cancel on either the
+  // effective-date picker or the confirm modal used to only step back to
+  // the previous screen (still leaving the row expanded with its dirty
+  // draft intact), not actually cancel the change the way the modals'
+  // own copy promises. Fully discards the in-progress edit and collapses
+  // the row, matching every other Cancel in the app.
+  function cancelEverything() {
+    setDraft(draftFromTemplate(template))
+    setChoosingEffectiveDate(null)
+    setPendingConfirm(null)
+    onCancel()
+  }
+
   const locationChanged = draft.location !== template.location || (draft.location === 'pot' && draft.potId !== template.potId)
   // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
   // when nothing's actually changed, matching the same rule the new
@@ -625,7 +637,7 @@ function BillEditPanel({
         effectiveFrom={pendingConfirm.effectiveFrom}
         changes={pendingConfirm.changes}
         affectsClearedBalance={pendingConfirm.effectiveFrom <= todayIso()}
-        onCancel={() => setPendingConfirm(null)}
+        onCancel={cancelEverything}
         onConfirm={() => {
           pendingConfirm.commit()
           setPendingConfirm(null)
@@ -644,7 +656,7 @@ function BillEditPanel({
             ? `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
             : `${template.name} is moving ${draft.location === 'pot' ? `to ${pots.find((p) => p.id === draft.potId)?.name ?? 'a pot'}` : draft.location === 'joint' ? 'to Joint' : 'to Personal'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
         }
-        onCancel={() => setChoosingEffectiveDate(null)}
+        onCancel={cancelEverything}
         onChoose={(effectiveFrom) => {
           // Batch 7 (2026-09-07, Bug 8) — rather than committing straight
           // away, build the "are you sure?" diff and let the confirm
@@ -751,36 +763,15 @@ function BillEffectiveDateModal({
   onCancel: () => void
   onChoose: (effectiveFrom: string) => void
 }) {
-  const occurrences = recentAndUpcomingOccurrences(template, new Date())
-
-  return createPortal(
-    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onCancel}>
-      <div
-        className="w-full max-w-md rounded-t-3xl p-5"
-        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-1">Apply this change from…</h3>
-        <p className="text-sm text-[var(--color-ink-muted)] mb-4">{description}</p>
-        <div className="flex flex-col gap-2">
-          {occurrences.map((o) => (
-            <button
-              key={o.date}
-              onClick={() => onChoose(o.date)}
-              className="w-full py-2.5 rounded-full text-sm font-semibold flex items-center justify-center gap-2"
-              style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)' }}
-            >
-              {formatFullDate(o.date)}
-              {o.isPast && <span className="text-xs font-normal text-[var(--color-ink-muted)]">(most recent)</span>}
-            </button>
-          ))}
-        </div>
-        <button onClick={onCancel} className="w-full py-2 mt-2 text-xs text-[var(--color-ink-muted)]">
-          Cancel
-        </button>
-      </div>
-    </div>,
-    document.body,
+  // UAT 2026-09-08 — thin wrapper now: the actual picker UI moved to the
+  // shared EffectiveDateOccurrenceModal so Pots/Loans could reuse it too.
+  return (
+    <EffectiveDateOccurrenceModal
+      description={description}
+      occurrences={recentAndUpcomingOccurrences(template, new Date())}
+      onCancel={onCancel}
+      onChoose={onChoose}
+    />
   )
 }
 

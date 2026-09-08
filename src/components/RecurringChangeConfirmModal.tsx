@@ -73,3 +73,56 @@ export function RecurringChangeConfirmModal({
     document.body,
   )
 }
+
+/**
+ * UAT 2026-09-08 (7-bug8.2-confirm-pot / 7-bug8.2-confirm-loans notes) —
+ * the "which payment should this change apply from" first step, generalised
+ * out of Bills.tsx's own BillEffectiveDateModal so Pots/Loans can reuse the
+ * exact same picker-first list of real upcoming (+ most recent past)
+ * payment dates, instead of each rolling its own plain calendar/date field.
+ * Callers compute their own `occurrences` (a bill's from
+ * recentAndUpcomingOccurrences, a loan's from
+ * recentAndUpcomingLoanPaymentDates) since only they know which schedule
+ * function applies.
+ */
+export function EffectiveDateOccurrenceModal({
+  description,
+  occurrences,
+  onCancel,
+  onChoose,
+}: {
+  description: string
+  occurrences: { date: string; isPast: boolean }[]
+  onCancel: () => void
+  onChoose: (effectiveFrom: string) => void
+}) {
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onCancel}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-1">Apply this change from…</h3>
+        <p className="text-sm text-[var(--color-ink-muted)] mb-4">{description}</p>
+        <div className="flex flex-col gap-2">
+          {occurrences.map((o) => (
+            <button
+              key={o.date}
+              onClick={() => onChoose(o.date)}
+              className="w-full py-2.5 rounded-full text-sm font-semibold flex items-center justify-center gap-2"
+              style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)' }}
+            >
+              {formatFullDate(o.date)}
+              {o.isPast && <span className="text-xs font-normal text-[var(--color-ink-muted)]">(most recent)</span>}
+            </button>
+          ))}
+        </div>
+        <button onClick={onCancel} className="w-full py-2 mt-2 text-xs text-[var(--color-ink-muted)]">
+          Cancel
+        </button>
+      </div>
+    </div>,
+    document.body,
+  )
+}

@@ -16,7 +16,7 @@ import { SwipeToDelete } from '../components/SwipeToDelete'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow } from '../components/FormButtons'
-import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfirmModal'
+import { RecurringChangeConfirmModal, EffectiveDateOccurrenceModal } from '../components/RecurringChangeConfirmModal'
 import { SavedFlashOverlay, useSavedFlash } from '../components/SavedFlash'
 import { NumberInput } from '../components/NumberInput'
 import { CollapsibleSection } from '../components/CollapsibleSection'
@@ -35,7 +35,8 @@ import {
 } from '../lib/savingsPotLedger'
 import { buildExampleLedger } from '../lib/savingsInterest'
 import { newPot, potBalanceAsOf, potDepositOccurrencePreviews } from '../lib/potLedger'
-import { setPausedTemplateOccurrences, scheduledTemplateDates, templateOccurrencePreviews } from '../lib/schedule'
+import { setPausedTemplateOccurrences, scheduledTemplateDates, templateOccurrencePreviews, recentAndUpcomingOccurrences } from '../lib/schedule'
+import { recentAndUpcomingLoanPaymentDates } from '../lib/ledgerLoans'
 import { locationsEqual, transferLocationLabel, transferLocationKey, buildTransferLocationOptions, type TransferLocationOption } from '../lib/transferLedger'
 import { AmountStep, LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
 import {
@@ -663,8 +664,12 @@ export function SavingsPotForm({
       <div className="grid grid-cols-2 gap-3">
         {initial && <PersonSelectField key="person" people={people} value={personId} onChange={setPersonId} />}
         <Field key="name" label="Name">
+          {/* UAT 2026-09-08 (7-bug8.2-confirm-pot note, same root cause as
+              PotEditForm's identical bug) — this component doubles for
+              both creation and editing an existing pot; only the
+              creation case should steal focus. */}
           <input
-            autoFocus
+            autoFocus={!initial}
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. Rainy day fund"
@@ -1828,6 +1833,14 @@ function PotEditForm({
       else next.add(item.key)
       return next
     })
+    // UAT 2026-09-08 (7-bug8.2-confirm-pot note) — matches Bills.tsx's own
+    // guard: nothing to anchor a date to yet (e.g. a schedule with no
+    // occurrences left), so skip straight to the confirm step dated today
+    // rather than showing an empty picker with nothing to tap.
+    if (occurrencesForItem(item).length === 0) {
+      setPendingToggleConfirm({ item, nowChecked, effectiveFrom: todayIso() })
+      return
+    }
     setPendingToggle({ item, nowChecked, effectiveFrom: todayIso() })
   }
 
@@ -1840,6 +1853,19 @@ function PotEditForm({
       return next
     })
     setPendingToggle(null)
+  }
+
+  // UAT 2026-09-08 (7-bug8.2-confirm-pot note) — picks the right schedule
+  // function depending on which kind of item this checklist row actually
+  // is, so the date picker shows real upcoming payment dates rather than
+  // a bare calendar.
+  function occurrencesForItem(item: (typeof items)[number]) {
+    if (item.kind === 'loan') {
+      const loan = loans.find((l) => l.id === item.id)
+      return loan ? recentAndUpcomingLoanPaymentDates(loan, new Date()) : []
+    }
+    const template = templates.find((t) => t.id === item.id)
+    return template ? recentAndUpcomingOccurrences(template, new Date()) : []
   }
 
   function commitToggle(item: (typeof items)[number], nowChecked: boolean, effectiveFrom: string) {
@@ -1855,8 +1881,12 @@ function PotEditForm({
     <div className="rounded-2xl p-4" style={{ background: 'var(--color-bg-elevated)' }}>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Name">
+          {/* UAT 2026-09-08 (7-bug8.2-confirm-pot note) — this form is
+              edit-only (PotForm, a separate component, handles creation),
+              so an autoFocus here stole focus/moved the cursor every time
+              the pot row was simply expanded to look at it, not just to
+              rename it. */}
           <input
-            autoFocus
             value={name}
             onChange={(e) => setName(e.target.value)}
             className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
@@ -1895,14 +1925,12 @@ function PotEditForm({
       )}
 
       {pendingToggle && (
-        <PotChecklistDateModal
-          itemName={pendingToggle.item.name}
-          nowChecked={pendingToggle.nowChecked}
-          effectiveFrom={pendingToggle.effectiveFrom}
-          onChangeEffectiveFrom={(effectiveFrom) => setPendingToggle({ ...pendingToggle, effectiveFrom })}
+        <EffectiveDateOccurrenceModal
+          description={`${pendingToggle.item.name} is ${pendingToggle.nowChecked ? 'moving to this pot' : 'moving back to Current Account'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`}
+          occurrences={occurrencesForItem(pendingToggle.item)}
           onCancel={revertPendingToggle}
-          onContinue={() => {
-            setPendingToggleConfirm(pendingToggle)
+          onChoose={(effectiveFrom) => {
+            setPendingToggleConfirm({ ...pendingToggle, effectiveFrom })
             setPendingToggle(null)
           }}
         />
@@ -1930,48 +1958,6 @@ function PotEditForm({
         />
       )}
     </div>
-  )
-}
-
-/** First step of the pot checklist's tick/untick flow (Batch 7, 2026-09-07,
- * Bug 8) — picks the effective date before handing off to the shared
- * RecurringChangeConfirmModal's diff/confirm step, same two-step shape as
- * Bills.tsx's BillEffectiveDateModal → RecurringChangeConfirmModal, just
- * without an occurrence list to pick from (a pot has no per-occurrence
- * picker infrastructure — a plain date field, defaulting to today, is
- * proportionate here exactly as it already was for this same field before
- * this batch). */
-function PotChecklistDateModal({
-  itemName,
-  nowChecked,
-  effectiveFrom,
-  onChangeEffectiveFrom,
-  onCancel,
-  onContinue,
-}: {
-  itemName: string
-  nowChecked: boolean
-  effectiveFrom: string
-  onChangeEffectiveFrom: (v: string) => void
-  onCancel: () => void
-  onContinue: () => void
-}) {
-  return createPortal(
-    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onCancel}>
-      <div
-        className="w-full max-w-md rounded-t-3xl p-5"
-        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-1">Apply this change from…</h3>
-        <p className="text-sm text-[var(--color-ink-muted)] mb-4">
-          {itemName} is {nowChecked ? 'moving to this pot' : 'moving back to Current Account'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.
-        </p>
-        <EditField label="Changes take effect from" type="date" value={effectiveFrom} onChange={onChangeEffectiveFrom} />
-        <FormButtonRow onCancel={onCancel} onSave={onContinue} saveLabel="Continue" />
-      </div>
-    </div>,
-    document.body,
   )
 }
 

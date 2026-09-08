@@ -17,6 +17,7 @@ import {
   MAX_CALIBRATION_LINES,
   scheduledLoanRecurringOverpaymentDates,
   setPausedLoanRecurringOverpaymentDates,
+  recentAndUpcomingLoanPaymentDates,
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
@@ -33,7 +34,7 @@ import { SwipeToDelete } from '../components/SwipeToDelete'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
-import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
+import { RecurringChangeConfirmModal, EffectiveDateOccurrenceModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { peopleWithIncomeCount } from '../lib/household'
@@ -819,15 +820,6 @@ function LoanEditPanel({
   const [loggingOverpayment, setLoggingOverpayment] = useState(overpaymentPrefill?.mode === 'payoff')
   const [settlingLoan, setSettlingLoan] = useState(false)
   const [calibratingLoan, setCalibratingLoan] = useState(false)
-  // UAT 2026-09-08 (6-bug4-loans): this panel now stays mounted while the
-  // card is collapsed (see `isOpen`'s own comment) rather than unmounting
-  // and losing its draft the way it used to — so an abandoned field edit
-  // (Cancel, or just tapping the header to collapse without saving) needs
-  // an explicit reset instead of relying on a fresh mount to provide one.
-  useEffect(() => {
-    if (!isOpen) setDraft(draftFromLoan(loan))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen])
   // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
   // when nothing's changed — this panel's Save was a plain always-on
   // button with no dirty/validity gating at all before this.
@@ -841,7 +833,11 @@ function LoanEditPanel({
   // closely analogous pot-creation flow was itself just "date picker,
   // default to today," so this stays proportionate rather than building
   // a parallel picker UI for one field.
-  const [locationEffectiveFrom, setLocationEffectiveFrom] = useState(todayIso())
+  // UAT 2026-09-08 (7-bug8.2-confirm-loans note): replaced by a picker-
+  // first flow (see choosingLocationEffectiveDate below), matching Bills/
+  // Pots — this bare date field with no occurrence list to anchor to was
+  // the specific thing Adam asked to remove.
+  const [choosingLocationEffectiveDate, setChoosingLocationEffectiveDate] = useState(false)
   // Batch 7 (2026-09-07, Bug 8 app-wide sweep) — same "are you sure, here's
   // what's changing" confirmation Bills.tsx's BillEditPanel now shows
   // before a location reassignment commits, extended to loans per Adam's
@@ -849,7 +845,7 @@ function LoanEditPanel({
   // transactions / loans / transfers"). Holds a closure that performs the
   // exact same commit this Save button always did, so it's the confirm
   // modal — not this button — that actually applies the change.
-  const [pendingLocationConfirm, setPendingLocationConfirm] = useState<{ changes: RecurringChangeField[]; commit: () => void } | null>(null)
+  const [pendingLocationConfirm, setPendingLocationConfirm] = useState<{ effectiveFrom: string; changes: RecurringChangeField[]; commit: (effectiveFrom: string) => void } | null>(null)
 
   // Prefill only needs to seed the initial draft/form state above — once
   // this panel has mounted with it, tell the parent to forget it so a
@@ -859,8 +855,33 @@ function LoanEditPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // UAT 2026-09-08 (6-bug4-loans): this panel now stays mounted while the
+  // card is collapsed (see `isOpen`'s own comment) rather than unmounting
+  // and losing its draft the way it used to — so an abandoned field edit
+  // (Cancel, or just tapping the header to collapse without saving) needs
+  // an explicit reset instead of relying on a fresh mount to provide one.
+  useEffect(() => {
+    if (!isOpen) {
+      setDraft(draftFromLoan(loan))
+      setChoosingLocationEffectiveDate(false)
+      setPendingLocationConfirm(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
+
   function update(patch: Partial<LoanDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
+  }
+
+  // UAT 2026-09-08 (7-bug8.2-confirm-loans note, same fix as Bills.tsx's
+  // own cancelEverything) — Cancel on the location date picker or the
+  // confirm modal must fully discard the edit and collapse the card, not
+  // just step back to the previous screen.
+  function cancelEverything() {
+    setDraft(draftFromLoan(loan))
+    setChoosingLocationEffectiveDate(false)
+    setPendingLocationConfirm(null)
+    onCancel()
   }
 
   // Live preview of the schedule impact of unsaved edits — merges the draft
@@ -975,14 +996,6 @@ function LoanEditPanel({
         payeeSharePercent={draft.payeeSharePercent}
         onChange={update}
       />
-      {/* Pots backlog item (2026-09 session) — governs ONLY this loan's
-          own regular monthlyPayment; a recurring overpayment has its own,
-          independent location field further down in
-          RecurringOverpaymentEditor. */}
-      {(draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)) && (
-        <EditField label="Location change takes effect from" type="date" value={locationEffectiveFrom} onChange={setLocationEffectiveFrom} />
-      )}
-
       {calibratingLoan && (
         <CalibrationModal
           loanName={loan.name}
@@ -993,14 +1006,37 @@ function LoanEditPanel({
         />
       )}
 
+      {/* UAT 2026-09-08 (7-bug8.2-confirm-loans note) — picker-first list
+          of real upcoming payment dates, replacing the plain "changes
+          take effect from" calendar field, matching Bills/Pots. */}
+      {choosingLocationEffectiveDate && (
+        <EffectiveDateOccurrenceModal
+          description={`${loan.name} is moving to ${loanLocationLabel(draft.location, draft.potId, pots)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`}
+          occurrences={recentAndUpcomingLoanPaymentDates(loan, new Date())}
+          onCancel={cancelEverything}
+          onChoose={(effectiveFrom) => {
+            setPendingLocationConfirm({
+              effectiveFrom,
+              changes: [{ label: 'Location', from: loanLocationLabel(loan.location, loan.potId, pots), to: loanLocationLabel(draft.location, draft.potId, pots) }],
+              commit: (effectiveFrom) => {
+                onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+                const { location: _l, potId: _p, ...rest } = draft
+                onSave(rest)
+              },
+            })
+            setChoosingLocationEffectiveDate(false)
+          }}
+        />
+      )}
+
       {pendingLocationConfirm && (
         <RecurringChangeConfirmModal
-          effectiveFrom={locationEffectiveFrom}
+          effectiveFrom={pendingLocationConfirm.effectiveFrom}
           changes={pendingLocationConfirm.changes}
-          affectsClearedBalance={locationEffectiveFrom <= todayIso()}
-          onCancel={() => setPendingLocationConfirm(null)}
+          affectsClearedBalance={pendingLocationConfirm.effectiveFrom <= todayIso()}
+          onCancel={cancelEverything}
           onConfirm={() => {
-            pendingLocationConfirm.commit()
+            pendingLocationConfirm.commit(pendingLocationConfirm.effectiveFrom)
             setPendingLocationConfirm(null)
           }}
         />
@@ -1011,18 +1047,19 @@ function LoanEditPanel({
         saveDisabled={!dirty}
         onSave={() => {
           const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
-          if (locationChanged) {
-            setPendingLocationConfirm({
-              changes: [{ label: 'Location', from: loanLocationLabel(loan.location, loan.potId, pots), to: loanLocationLabel(draft.location, draft.potId, pots) }],
-              commit: () => {
-                onAssignLocation(draft.location, locationEffectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
-                const { location: _l, potId: _p, ...rest } = draft
-                onSave(rest)
-              },
-            })
-          } else {
+          if (!locationChanged) {
             onSave(draft)
+            return
           }
+          // No occurrences to anchor a date to yet — apply immediately,
+          // dated today, same "nothing to pick from" guard Bills.tsx uses.
+          if (recentAndUpcomingLoanPaymentDates(loan, new Date()).length === 0) {
+            onAssignLocation(draft.location, todayIso(), draft.location === 'pot' ? draft.potId : undefined)
+            const { location: _l, potId: _p, ...rest } = draft
+            onSave(rest)
+            return
+          }
+          setChoosingLocationEffectiveDate(true)
         }}
       />
         </>
