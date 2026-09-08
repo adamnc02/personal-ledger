@@ -18,6 +18,7 @@
 // the bug this replaced.
 
 import { nanoid } from 'nanoid'
+import { addDays } from 'date-fns'
 import { CREDIT_CARD_CATEGORY_ID, CREDIT_CARD_COLORS, type CreditCard, type CreditCardLumpPayment, type Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -318,6 +319,17 @@ export function generateMinimumPaymentTransactions(
   rangeStart: Date,
   rangeEnd: Date,
   transactions: Transaction[] = [],
+  // UAT 2026-09-08 (Summary page cycle-end totals) — an optional hook,
+  // fired once per simulated cycle regardless of whether a charge ends
+  // up generated (amount<=0 cycles included), carrying the STATEMENT
+  // balance as it stood right before that cycle's own payment/minimum —
+  // "the balance due for this period" a real statement would show,
+  // which can genuinely differ from the true running balance
+  // (cardBalanceAsOf) once a statement window is involved. Exists so
+  // callers needing this figure (buildCreditCardCycleSections) share the
+  // exact same simulation this function already runs, rather than
+  // re-deriving it separately and risking the two ever disagreeing.
+  onCycle?: (info: { dateIso: string; statementBalanceBeforePayment: number; workingBalanceBeforePayment: number }) => void,
 ): Omit<Transaction, 'id'>[] {
   if (!card.active) return []
   const results: Omit<Transaction, 'id'>[] = []
@@ -540,6 +552,7 @@ export function generateMinimumPaymentTransactions(
         roundingCouldExplainDeadlock &&
         (round2(statementBalance - computedMinimum) >= statementBalanceBeforeInterest || round2(workingBalance - computedMinimum) >= workingBalanceBeforeInterest)
       const amount = override ? override.amount : deadlocked ? Math.max(statementBalance, workingBalance) : computedMinimum
+      onCycle?.({ dateIso: paymentDateIso, statementBalanceBeforePayment: statementBalance, workingBalanceBeforePayment: workingBalance })
       if (amount > 0) {
         results.push({
           date: paymentDateIso,
@@ -804,4 +817,161 @@ export function buildCreditCardBalanceDueRows(card: CreditCard, transactions: Tr
 /** Convenience wrapper over withLiveBalance for a whole list — the shape almost every read site actually wants. Same rule applies: display/compute only, never persisted. */
 export function withLiveBalances(cards: CreditCard[], transactions: Transaction[], asOfDate: Date = new Date()): CreditCard[] {
   return cards.map((card) => withLiveBalance(card, transactions, asOfDate))
+}
+
+/** This card's own paymentDayOfMonth due date falling in the given calendar month, clamped to the month's real length (short months, Feb) — same clamp generateMinimumPaymentTransactions/billingDatesBetween already use. */
+function creditCardDueDateForMonth(card: CreditCard, monthCursor: Date): Date {
+  const daysInMonth = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 0).getDate()
+  return new Date(monthCursor.getFullYear(), monthCursor.getMonth(), Math.min(card.paymentDayOfMonth, daysInMonth))
+}
+
+/**
+ * UAT 2026-09-08 (Summary page cycle-end totals, Adam-requested) — a
+ * credit card's own accounting periods: bounded by consecutive PAYMENT
+ * dates (paymentDayOfMonth), never the household's own pay-cycle bounds
+ * — a card's due date is its own fixed, independent schedule, unrelated
+ * to when anyone gets paid.
+ *
+ * Each period carries `dueDate` (when the payment/minimum actually posts
+ * — what "the balance due for this period" means) separately from
+ * `windowStart`/`windowEnd` (which real spend counts toward THIS
+ * period). When `statementEndDay` is set, `windowEnd` is that period's
+ * own statement close — via the exact same `statementCloseDateForPaymentDate`
+ * mapping `generateMinimumPaymentTransactions` already uses for minimum-
+ * charge sizing — which can land WEEKS before `dueDate` (e.g. a window
+ * closing the 18th, due the 14th of the month after next); spend dated
+ * in that gap belongs to the FOLLOWING period's window, not this one, so
+ * `windowEnd` (not `dueDate`) is the real spend-bucketing bound. A card
+ * with no statement window configured falls back to `windowEnd ===
+ * dueDate` (spend up to and including the due date itself counts),
+ * matching the same "no window" fallback used elsewhere.
+ *
+ * `count` is the caller's own concern (e.g. 1 for "this cycle", or
+ * `1 + THREE_CYCLES_AHEAD` for "next 3 cycles", matching
+ * projection.ts's horizonCycles convention of current-cycle-first) —
+ * kept as a plain number rather than importing ProjectionHorizon/
+ * THREE_CYCLES_AHEAD from projection.ts, which itself imports FROM this
+ * file (generateMinimumPaymentTransactions) and would create a cycle.
+ */
+export function creditCardCyclePeriods(card: CreditCard, asOfDate: Date, count: number): { windowStart: Date; windowEnd: Date; dueDate: Date }[] {
+  const asOfIso = toIso(asOfDate)
+
+  // The "current" period is the one whose OWN due date hasn't happened
+  // yet (today counts as not-yet-happened, same "due today is still
+  // this period" convention the rest of the app uses).
+  let cursor = new Date(asOfDate.getFullYear(), asOfDate.getMonth(), 1)
+  let dueDate = creditCardDueDateForMonth(card, cursor)
+  while (toIso(dueDate) < asOfIso) {
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+    dueDate = creditCardDueDateForMonth(card, cursor)
+  }
+
+  const dueDates: Date[] = [dueDate]
+  for (let i = 1; i < count; i++) {
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+    dueDates.push(creditCardDueDateForMonth(card, cursor))
+  }
+
+  return dueDates.map((due) => {
+    const prevMonthCursor = new Date(due.getFullYear(), due.getMonth() - 1, 1)
+    const prevDue = creditCardDueDateForMonth(card, prevMonthCursor)
+    const windowEnd = card.statementEndDay != null ? statementCloseDateForPaymentDate(card, due) : due
+    const windowStart = card.statementEndDay != null ? addDays(statementCloseDateForPaymentDate(card, prevDue), 1) : addDays(prevDue, 1)
+    return { windowStart, windowEnd, dueDate: due }
+  })
+}
+
+export interface CreditCardCycleSection {
+  windowStart: Date
+  windowEnd: Date
+  dueDate: Date
+  /** Real spend/payments whose date falls in (windowStart, windowEnd], plus
+   * this period's own minimum-charge/interest row (dated exactly on
+   * dueDate) if one applies — real transactions where they already
+   * exist, generated/projected ones otherwise, exactly like
+   * buildCreditCardMinimumChargeRows' own materialized-wins rule. */
+  rows: { date: string; type: 'credit_card_spend' | 'credit_card_payment'; amount: number; status: 'cleared' | 'pending'; note?: string; sourceType?: string }[]
+  /** The real balance owed as of dueDate — "the balance due for this
+   * period" — via cardBalanceAsOf, not a manual fold of `rows` (interest
+   * itself has no row of its own to fold, so summing rows would silently
+   * omit it). */
+  closingBalance: number
+}
+
+/**
+ * UAT 2026-09-08 (Summary page cycle-end totals, Adam-requested) — one
+ * section per credit-card cycle period, each with its own spend/payment
+ * rows and its own closing (due) balance — the credit-card equivalent of
+ * projection.ts's horizonCycles + Home.tsx's CycleGroupedList, but using
+ * this card's own periods (see creditCardCyclePeriods) instead of the
+ * household pay cycle, and a real cardBalanceAsOf query for each
+ * period's closing figure instead of a running-balance fold (which
+ * would miss interest, since interest has no transaction row of its
+ * own). "We also need to make sure minimum charges appear in this same
+ * ledger" — a period's own not-yet-materialized minimum charge is
+ * generated here exactly like the info modal's ledger does, so an
+ * upcoming due date's charge is visible before autoClear ever
+ * materializes it into a real Transaction.
+ */
+export function buildCreditCardCycleSections(card: CreditCard, transactions: Transaction[], cycles: { windowStart: Date; windowEnd: Date; dueDate: Date }[]): CreditCardCycleSection[] {
+  if (cycles.length === 0) return []
+  const rangeStart = cycles[0].windowStart
+  const rangeEnd = cycles[cycles.length - 1].dueDate
+
+  const cardTransactions = transactions.filter((t) => t.creditCardId === card.id && (t.type === 'credit_card_spend' || t.type === 'credit_card_payment'))
+  // Same materialized-wins dedupe rule as buildCreditCardMinimumChargeRows:
+  // a stored (real, not-lump-payment) credit_card_payment on a given date
+  // IS that date's minimum charge already actually happening — the
+  // generator's own projection for that same date would just restate it.
+  const storedMinimumDates = new Set(cardTransactions.filter((t) => t.type === 'credit_card_payment' && !t.sourceType).map((t) => t.date))
+  // UAT 2026-09-08 — the `onCycle` hook captures the real STATEMENT
+  // balance the simulation computed for each due date, regardless of
+  // whether a charge ended up generated for it (a cycle with nothing due
+  // pushes no row at all) — "the balance due for this period" a real
+  // statement would show, which is what closingBalance below uses,
+  // rather than cardBalanceAsOf's true-running-balance figure (which
+  // would incorrectly include spend that hasn't reached this period's
+  // own statement yet — see the type's own comment on windowEnd vs
+  // dueDate for why that gap is real).
+  const statementBalanceByDate = new Map<string, number>()
+  const generatedMinimums = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions, ({ dateIso, statementBalanceBeforePayment }) =>
+    statementBalanceByDate.set(dateIso, statementBalanceBeforePayment),
+  ).filter((t) => !storedMinimumDates.has(t.date))
+  const todayIso = toIso(new Date())
+  const allRows = [
+    ...cardTransactions.map((t) => ({ date: t.date, type: t.type as 'credit_card_spend' | 'credit_card_payment', amount: t.amount, status: t.status, note: t.note, sourceType: t.sourceType })),
+    ...generatedMinimums.map((t) => ({ date: t.date, type: t.type as 'credit_card_spend' | 'credit_card_payment', amount: t.amount, status: (t.date <= todayIso ? 'cleared' : 'pending') as 'cleared' | 'pending', note: t.note, sourceType: t.sourceType })),
+  ]
+  // For cardBalanceAsOf, which needs real Transaction-shaped objects with
+  // an id — the generated rows above have none, since they're pure
+  // projections.
+  const allAsTransactions: Transaction[] = [
+    ...cardTransactions,
+    ...generatedMinimums.map((t, i) => ({ ...t, id: `projected-${i}` })),
+  ]
+
+  return cycles.map((cycle) => {
+    const windowStartIso = toIso(cycle.windowStart)
+    const windowEndIso = toIso(cycle.windowEnd)
+    const dueDateIso = toIso(cycle.dueDate)
+    const rows = allRows
+      .filter((r) => {
+        // A minimum-charge row is EXPLICITLY dated on a due date by
+        // construction — it must anchor to THAT due date's own section
+        // exclusively. Without this, a due date numerically sitting
+        // inside the FOLLOWING cycle's own spend window (a real
+        // possibility — see the type's own comment on why windowEnd,
+        // not dueDate, bounds spend) would wrongly pull it into that
+        // later section too, double-counting the same charge.
+        const isMinimumChargeRow = r.type === 'credit_card_payment' && !r.sourceType
+        if (isMinimumChargeRow) return r.date === dueDateIso
+        return r.date >= windowStartIso && r.date <= windowEndIso
+      })
+      .sort((a, b) => a.date.localeCompare(b.date))
+    // Fallback only for a due date genuinely outside the simulated range
+    // (shouldn't happen — rangeEnd is always the last cycle's own
+    // dueDate — but cardBalanceAsOf is a safe, real answer either way).
+    const closingBalance = statementBalanceByDate.get(dueDateIso) ?? cardBalanceAsOf(card, allAsTransactions, cycle.dueDate)
+    return { ...cycle, rows, closingBalance }
+  })
 }

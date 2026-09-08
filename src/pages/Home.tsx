@@ -3,12 +3,12 @@ import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
-import { computeProjection, horizonCycles, horizonRangeEnd, type ProjectionHorizon } from '../lib/projection'
+import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, type ProjectionHorizon } from '../lib/projection'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary } from '../lib/jointLedger'
 import { computeJointAccountProjection, jointAccountSignedAmount } from '../lib/jointAccountLedger'
 import { computeHouseholdProjections, type HouseholdPersonProjection } from '../lib/householdLedger'
-import { nextMinimumChargeAmount, totalPaidForCard, withLiveBalance, withLiveBalances } from '../lib/creditCards'
+import { nextMinimumChargeAmount, totalPaidForCard, withLiveBalance, withLiveBalances, creditCardCyclePeriods, buildCreditCardCycleSections, type CreditCardCycleSection } from '../lib/creditCards'
 import { resolveCycleBounds } from '../lib/pensionLedger'
 import { findApplicableSnapshot } from '../lib/salaryLedger'
 import { addDays } from 'date-fns'
@@ -733,7 +733,7 @@ function DeckDetail(props: {
       return <HouseholdDetail {...props} />
     case 'credit_card': {
       const card = data.creditCards.find((c) => c.id === entry.cardId)
-      return card ? <CreditCardDetail card={card} data={data} horizon={props.horizon} /> : null
+      return card ? <CreditCardDetail card={card} data={data} horizon={props.horizon} cycleTotals={props.cycleTotals} /> : null
     }
     case 'credit_cards_combined':
       return <CreditCardsCombinedDetail data={data} horizon={props.horizon} />
@@ -758,8 +758,20 @@ function DeckDetail(props: {
  * toolkit. 'person' grouping (Household-only) is included alongside
  * 'list' — Adam's own spec for the group-by-person view: "the same
  * options to follow... include cycle-end totals."
+ *
+ * Widened again (Adam-specified, 2026-09-08) for 'credit_card' — a
+ * genuinely different case from the other four, which all share one
+ * grouping/order toolkit built around the household's OWN pay cycle.
+ * A credit card has no "Group by"/"Order by" of its own (DeckControls'
+ * `showGroupOrder` never includes it), so `grouping`/`order` are just
+ * whatever the page's shared state happens to be — irrelevant here,
+ * checked anyway only so a value doesn't accidentally matter — and BOTH
+ * horizons apply (a card's own "this cycle"/"next 3 cycles" periods are
+ * always meaningful, unlike the personal/household/joint case where
+ * "this cycle" is a single span with nothing to subtotal).
  */
 function canShowCycleTotals(entry: DeckEntry, horizon: ProjectionHorizon, grouping: Grouping, order: Order): boolean {
+  if (entry.kind === 'credit_card') return order === 'date' && grouping !== 'category'
   return (
     (entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot') &&
     horizon === 'three_cycles' &&
@@ -810,6 +822,12 @@ function DeckControls({
   // simpler deposit/interest history.
   const showHorizon = true
   const showGroupOrder = entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot'
+  // UAT 2026-09-08 (Summary page cycle-end totals, Adam-specified) — a
+  // credit card gets ONLY the Cycle-end totals toggle, not the rest of
+  // the Group-by/Order-by/Show-cleared toolkit (no meaningful category
+  // to group a single card's own activity by), so it renders in its own
+  // spot below rather than inside the showGroupOrder cluster.
+  const showCreditCardCycleTotals = entry.kind === 'credit_card' && canShowCycleTotals(entry, horizon, grouping, order)
   // Household is the only card with a genuine "group by person" —
   // Personal is already one person, and Joint deliberately shows no
   // individuals at all (Adam-specified, 2026-09-03).
@@ -829,6 +847,9 @@ function DeckControls({
   return (
     <div className="flex items-start justify-between mb-5 px-1">
       <div>{showHorizon && <CycleToggle value={horizon} onChange={setHorizon} />}</div>
+      {showCreditCardCycleTotals && (
+        <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />
+      )}
       {showGroupOrder && (
         <div className="flex flex-col items-end gap-1.5">
           <InlineDropdown
@@ -1864,7 +1885,79 @@ function CardActivityRow({ t }: { t: Transaction }) {
   )
 }
 
-function CreditCardDetail({ card: storedCard, data, horizon }: { card: CreditCard; data: AppDataV2; horizon: ProjectionHorizon }) {
+/**
+ * UAT 2026-09-08 (Summary page cycle-end totals, Adam-specified) — the
+ * credit-card equivalent of CycleGroupedList above, one section per this
+ * card's OWN accounting period (creditCardCyclePeriods/
+ * buildCreditCardCycleSections), each closing with the real balance DUE
+ * on that period's own payment date — not a running-balance fold (which
+ * would silently miss interest, since interest posts with no
+ * transaction row of its own). Same "every cycle collapsed by default,
+ * current cycle labelled specially" shape as CycleGroupedList, for
+ * visual consistency between the two.
+ */
+function CreditCardCycleGroupedList({ sections }: { sections: CreditCardCycleSection[] }) {
+  const [toggled, setToggled] = useState<Set<string>>(() => new Set())
+  const toggle = (key: string) =>
+    setToggled((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
+  return (
+    <div className="flex flex-col gap-2">
+      {sections.map((section, i) => {
+        const key = toLocalIsoDate(section.dueDate)
+        const expanded = toggled.has(key)
+        return (
+          <div key={key} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
+            <button onClick={() => toggle(key)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
+              <span className="flex items-center gap-1.5 min-w-0">
+                {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                <span className="text-xs font-semibold text-[var(--color-ink)] truncate">
+                  {i === 0 ? 'Current cycle' : `Due ${formatCycleDate(key)}`}
+                </span>
+              </span>
+              {!expanded && <span className="text-xs font-mono text-[var(--color-ink)] shrink-0">£{formatCurrency(section.closingBalance)}</span>}
+            </button>
+            {expanded && (
+              <div className="px-3 pb-2 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+                {section.rows.map((r, ri) => {
+                  const isSpend = r.type === 'credit_card_spend'
+                  const isMinimumCharge = r.type === 'credit_card_payment' && !r.sourceType
+                  return (
+                    <div key={ri} className="flex items-center justify-between py-2">
+                      <div>
+                        <p className="text-sm text-[var(--color-ink)]">{r.note || (isSpend ? 'Spend' : isMinimumCharge ? 'Minimum charge' : 'Payment')}</p>
+                        <p className="text-[11px] text-[var(--color-ink-muted)]">
+                          {r.date}
+                          {r.status === 'pending' ? ' · Pending' : ''}
+                        </p>
+                      </div>
+                      <p className="text-sm font-mono font-semibold" style={{ color: isSpend ? 'var(--color-negative)' : 'var(--color-positive)' }}>
+                        {isSpend ? '+' : '-'}£{formatCurrency(r.amount)}
+                      </p>
+                    </div>
+                  )
+                })}
+                {section.rows.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] text-center py-3">Nothing this period.</p>}
+                <div className="flex items-center justify-between py-2">
+                  <span className="text-xs font-semibold text-[var(--color-ink)]">Balance due {formatCycleDate(key)}</span>
+                  <span className="text-sm font-mono font-semibold text-[var(--color-ink)]">£{formatCurrency(section.closingBalance)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      })}
+      {sections.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] text-center py-6">No upcoming periods.</p>}
+    </div>
+  )
+}
+
+function CreditCardDetail({ card: storedCard, data, horizon, cycleTotals }: { card: CreditCard; data: AppDataV2; horizon: ProjectionHorizon; cycleTotals: boolean }) {
   // Both halves of this ring are now derived from the same transaction
   // list under the same on-or-before-<asOf> rule: `paid` from the payment
   // transactions, `currentBalance` by replaying them against the anchor.
@@ -1903,18 +1996,31 @@ function CreditCardDetail({ card: storedCard, data, horizon }: { card: CreditCar
   // is tinted with the card's own colour, not the category's.
   const category = data.categories.find((c) => c.id === card.categoryId)
 
+  // UAT 2026-09-08 (Summary page cycle-end totals, Adam-specified) — this
+  // card's OWN accounting periods (bounded by its paymentDayOfMonth, and
+  // its own statement window if one's configured), not the household pay
+  // cycle the flat `activity` list above is filtered to. "This cycle" is
+  // 1 period; "Next 3 cycles" is the current one plus THREE_CYCLES_AHEAD
+  // more, matching horizonCycles' own current-cycle-first convention.
+  const cardCycles = creditCardCyclePeriods(storedCard, new Date(), horizon === 'three_cycles' ? 1 + THREE_CYCLES_AHEAD : 1)
+  const cardCycleSections = cycleTotals ? buildCreditCardCycleSections(storedCard, data.transactions, cardCycles) : []
+
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
       <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">
         {card.name} <span className="text-xs font-normal text-[var(--color-ink-muted)]">due on the {card.paymentDayOfMonth}{ordinalSuffix(card.paymentDayOfMonth)}</span>
       </h2>
 
-      <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-        {activity.map((t) => (
-          <CardActivityRow key={t.id} t={t} />
-        ))}
-        {activity.length === 0 && <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">No activity yet.</p>}
-      </div>
+      {cycleTotals ? (
+        <CreditCardCycleGroupedList sections={cardCycleSections} />
+      ) : (
+        <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+          {activity.map((t) => (
+            <CardActivityRow key={t.id} t={t} />
+          ))}
+          {activity.length === 0 && <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">No activity yet.</p>}
+        </div>
+      )}
 
       {/* Rings always come AFTER the transaction list on every swipe-deck
           card (Adam, 2026-09 session) — this card and CreditCardsCombinedDetail
