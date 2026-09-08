@@ -327,6 +327,8 @@ function PensionRow({
   onToggle,
   onSave,
   onRemove,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   pension: Pension
   people: Person[]
@@ -335,8 +337,22 @@ function PensionRow({
   onToggle: () => void
   onSave: (updates: Partial<Omit<Pension, 'id' | 'personId'>> & { personId?: string }) => void
   onRemove: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — true for exactly one render right
+   * after this pension was newly created, so it can flash "Saved" on
+   * mount (no card exists yet at the moment a brand-new pension's own
+   * save button is clicked). */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
   const owner = people.find((p) => p.id === pension.personId)
+  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash()
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const previews = pensionOccurrencePreviews(pension, new Date(), 1)
   const next = previews[0]
   // Same 2-months-back/12-months-forward window SavingsPot's own pause
@@ -349,7 +365,7 @@ function PensionRow({
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={pension.name}>
-      <div className="rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
+      <div className="relative rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
         <div className="flex items-center justify-between mb-1">
           <div className="flex items-center gap-2 min-w-0">
             <span className="font-display text-base font-semibold text-[var(--color-ink)] truncate">{pension.name}</span>
@@ -398,6 +414,7 @@ function PensionRow({
                   ...amountPatch,
                 })
                 onToggle()
+                triggerFlash()
               }}
             />
             <label className="flex items-center gap-2 mt-1">
@@ -417,6 +434,7 @@ function PensionRow({
             />
           </div>
         )}
+        <SavedFlashOverlay active={flashActive} />
       </div>
     </SwipeToDelete>
   )
@@ -808,6 +826,7 @@ function RecurringTransferEditor({
   onAdd,
   onUpdate,
   onRemove,
+  onSaved,
 }: {
   location: TransferLocation
   defaultName: string
@@ -816,6 +835,10 @@ function RecurringTransferEditor({
   onAdd: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
   onUpdate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemove: (id: string) => void
+  /** Batch 9 (2026-09-07, Bug 11) — fired after a new recurring transfer
+   * is created OR an existing one's edit is saved, so the parent card
+   * (Pot/Savings Pot/Joint) can flash "Saved". */
+  onSaved?: () => void
 }) {
   // UAT Batch 4 follow-up (2026-09-04, Adam-reported): this used to match
   // ANY transfer touching this location and treat it as THE one slot —
@@ -862,13 +885,14 @@ function RecurringTransferEditor({
       followsCycleStart: resolved.followsCycleStart,
     })
     reset()
+    onSaved?.()
   }
 
   if (step === 'closed') {
     return (
       <>
-        {existingDeposit && <RecurringExistingDeposit template={existingDeposit} onUpdate={onUpdate} onRemove={onRemove} />}
-        {existingWithdrawal && <RecurringExistingDeposit template={existingWithdrawal} onUpdate={onUpdate} onRemove={onRemove} />}
+        {existingDeposit && <RecurringExistingDeposit template={existingDeposit} onUpdate={onUpdate} onRemove={onRemove} onSaved={onSaved} />}
+        {existingWithdrawal && <RecurringExistingDeposit template={existingWithdrawal} onUpdate={onUpdate} onRemove={onRemove} onSaved={onSaved} />}
         {!bothConfigured && (
           <button
             onClick={() => {
@@ -985,10 +1009,12 @@ function RecurringExistingDeposit({
   template,
   onUpdate,
   onRemove,
+  onSaved,
 }: {
   template: RecurringTemplate
   onUpdate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemove: (id: string) => void
+  onSaved?: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const [draftAmount, setDraftAmount] = useState(template.amount)
@@ -1084,6 +1110,7 @@ function RecurringExistingDeposit({
             followsCycleStart: draftFollowsCycleStart,
           })
           setExpanded(false)
+          onSaved?.()
         }}
         saveDisabled={!(draftAmount > 0) || !dirty}
       />
@@ -1161,6 +1188,10 @@ function SavingsPotRow({
   const balance = savingsPotBalanceAsOf(pot, transactions, new Date())
   const nextDeposit = depositOccurrencePreviews(pot, new Date(), 1)[0]
   const [ledgerOpen, setLedgerOpen] = useState(false)
+  // Batch 9 (2026-09-07, Bug 11) — one shared flash for this card's main
+  // Save, its "+ Log a deposit or withdrawal", and its "+ Add a recurring
+  // transfer" — all three show "Saved".
+  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
@@ -1194,7 +1225,13 @@ function SavingsPotRow({
                 page's Transfer pill uses, not a parallel mechanism.
                 Batch 6 (2026-09-07 UAT): moved above the edit form to
                 match Joint Account's card ordering. */}
-            <LogTransferButton fixedLocation={{ type: 'savings', savingsPotId: pot.id }} locationOptions={locationOptions} onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
+            <LogTransferButton
+              fixedLocation={{ type: 'savings', savingsPotId: pot.id }}
+              locationOptions={locationOptions}
+              onLogDeposit={onLogDeposit}
+              onLogWithdrawal={onLogWithdrawal}
+              onLogged={triggerFlash}
+            />
 
             {/* Transfer pill (2026-09-04 session) — same discoverable,
                 Loan-style entry point as before, now creating/editing a
@@ -1209,6 +1246,7 @@ function SavingsPotRow({
               onAdd={onAddRecurringTransfer}
               onUpdate={onUpdateRecurringTemplate}
               onRemove={onRemoveRecurringTemplate}
+              onSaved={triggerFlash}
             />
 
             <SavingsPotForm
@@ -1244,10 +1282,12 @@ function SavingsPotRow({
                   ...methodPatch,
                 })
                 onToggle()
+                triggerFlash()
               }}
             />
           </div>
         )}
+        <SavedFlashOverlay active={flashActive} />
       </div>
     </SwipeToDelete>
   )
@@ -1304,11 +1344,16 @@ function LogTransferButton({
   locationOptions,
   onLogDeposit,
   onLogWithdrawal,
+  onLogged,
 }: {
   fixedLocation: TransferLocation
   locationOptions: TransferLocationOption[]
   onLogDeposit: (amount: number, date: string, from: TransferLocation, note?: string) => void
   onLogWithdrawal: (amount: number, date: string, to: TransferLocation, note?: string) => void
+  /** Batch 9 (2026-09-07, Bug 11) — fired right after a deposit/withdrawal
+   * actually commits, so the parent card (Pot/Savings Pot/Joint) can
+   * flash "Saved". */
+  onLogged?: () => void
 }) {
   const fixedKey = transferLocationKey(fixedLocation)
   const [step, setStep] = useState<'closed' | 'type' | 'amount' | 'location' | 'final'>('closed')
@@ -1409,6 +1454,7 @@ function LogTransferButton({
           if (type === 'deposit') onLogDeposit(Number(amount) || 0, date, otherLocation.location, note || undefined)
           else onLogWithdrawal(Number(amount) || 0, date, otherLocation.location, note || undefined)
           reset()
+          onLogged?.()
         }}
         saveDisabled={!(Number(amount) > 0)}
       />
@@ -1957,6 +2003,10 @@ function PotRow({
   // balance figure — the opening balance/date now exist on every pot
   // (see PotForm above), so there's something real to break out.
   const netActivity = balance - pot.openingBalance
+  // Batch 9 (2026-09-07, Bug 11) — one shared flash for this card's main
+  // Save, its "+ Log a deposit or withdrawal", and its "+ Add a recurring
+  // transfer" — all three show "Saved".
+  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
@@ -1994,7 +2044,13 @@ function PotRow({
                 edit form to match Joint Account's card ordering — these
                 stay visible/reachable the instant the card expands,
                 rather than being pushed below the fields. */}
-            <LogTransferButton fixedLocation={{ type: 'pot', potId: pot.id }} locationOptions={locationOptions} onLogDeposit={onLogDeposit} onLogWithdrawal={onLogWithdrawal} />
+            <LogTransferButton
+              fixedLocation={{ type: 'pot', potId: pot.id }}
+              locationOptions={locationOptions}
+              onLogDeposit={onLogDeposit}
+              onLogWithdrawal={onLogWithdrawal}
+              onLogged={triggerFlash}
+            />
             <RecurringTransferEditor
               location={{ type: 'pot', potId: pot.id }}
               defaultName={pot.name}
@@ -2003,6 +2059,7 @@ function PotRow({
               onAdd={onAddRecurringTransfer}
               onUpdate={onUpdateRecurringTemplate}
               onRemove={onRemoveRecurringTemplate}
+              onSaved={triggerFlash}
             />
 
             <PotEditForm
@@ -2010,12 +2067,13 @@ function PotRow({
               templates={templates}
               loans={loans}
               onCancel={onToggle}
-              onSave={(updates) => { onSave(updates); onToggle() }}
+              onSave={(updates) => { onSave(updates); onToggle(); triggerFlash() }}
               onAssignTemplateLocation={onAssignTemplateLocation}
               onAssignLoanLocation={onAssignLoanLocation}
             />
           </div>
         )}
+        <SavedFlashOverlay active={flashActive} />
       </div>
     </SwipeToDelete>
   )
@@ -2305,6 +2363,10 @@ export function Salary() {
   // wizard (Savings/Pots/Joint alike) rather than each row rebuilding it.
   const transferLocationOptions = buildTransferLocationOptions(data.savingsPots, data.pots, !!data.jointAccount, data.primaryPersonId)
   const [editingJointAccount, setEditingJointAccount] = useState(false)
+  // Batch 9 (2026-09-07, Bug 11) — same "one shared flash for main Save/
+  // Log/Recurring" pattern as PotRow/SavingsPotRow, for the Joint Account
+  // card (which lives inline in this component rather than its own row).
+  const { active: jointFlashActive, trigger: triggerJointFlash } = useSavedFlash()
   const [editingDeduction, setEditingDeduction] = useState<{ personId: string; deductionId: string } | null>(null)
   const [settingsOpenFor, setSettingsOpenFor] = useState<string | null>(null)
   // Which person's Salary row / which Pension's row is expanded — one at
@@ -2313,6 +2375,9 @@ export function Salary() {
   // collapsed) since salary is the main reason most visits happen.
   const [expandedPersonId, setExpandedPersonId] = useState<string | null>(data.primaryPersonId ?? null)
   const [expandedPensionId, setExpandedPensionId] = useState<string | null>(null)
+  // Batch 9 (2026-09-07, Bug 11) — see PensionRow's own comment on why a
+  // brand-new pension flashes on MOUNT rather than at save time.
+  const [justCreatedPensionId, setJustCreatedPensionId] = useState<string | null>(null)
   const [addingPension, setAddingPension] = useState(false)
   const [pickingPensionPerson, setPickingPensionPerson] = useState(false)
   const [pensionDefaultPersonId, setPensionDefaultPersonId] = useState(data.primaryPersonId)
@@ -2678,6 +2743,7 @@ export function Salary() {
               const id = addPension(personId, newPension({ personId, ...fields }))
               setAddingPension(false)
               setExpandedPensionId(id)
+              setJustCreatedPensionId(id)
             }}
           />
         )}
@@ -2697,6 +2763,8 @@ export function Salary() {
                 onToggle={() => setExpandedPensionId(expandedPensionId === pension.id ? null : pension.id)}
                 onSave={(updates) => updatePension(pension.id, updates)}
                 onRemove={() => removePension(pension.id)}
+                shouldFlashOnMount={justCreatedPensionId === pension.id}
+                onFlashedOnMount={() => setJustCreatedPensionId(null)}
               />
             )
           })}
@@ -2903,7 +2971,7 @@ export function Salary() {
           exactly what this is. */}
       {data.jointAccount && (
         <CollapsibleSection title="Joint Account" className="mb-8">
-          <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
+          <div className="relative rounded-2xl p-4 flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
             {/* BUGFIX (Adam-reported, 2026-09 session) — used to be a plain
                 info div with a separate text "Edit" button; every other
                 card in this list (Pots, Savings Pots, Pensions) opens its
@@ -2929,6 +2997,7 @@ export function Salary() {
               locationOptions={transferLocationOptions}
               onLogDeposit={(amount, date, from, note) => logTransfer(from, { type: 'joint' }, amount, date, note)}
               onLogWithdrawal={(amount, date, to, note) => logTransfer({ type: 'joint' }, to, amount, date, note)}
+              onLogged={triggerJointFlash}
             />
             <RecurringTransferEditor
               location={{ type: 'joint' }}
@@ -2938,7 +3007,9 @@ export function Salary() {
               onAdd={addRecurringTransfer}
               onUpdate={updateRecurringTemplate}
               onRemove={removeRecurringTemplate}
+              onSaved={triggerJointFlash}
             />
+            <SavedFlashOverlay active={jointFlashActive} />
           </div>
         </CollapsibleSection>
       )}
@@ -2949,6 +3020,7 @@ export function Salary() {
           onSave={(openingBalance, openingBalanceDate) => {
             setJointAccountOpening(openingBalance, openingBalanceDate)
             setEditingJointAccount(false)
+            triggerJointFlash()
           }}
           onCancel={() => setEditingJointAccount(false)}
         />
