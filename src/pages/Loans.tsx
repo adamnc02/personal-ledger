@@ -21,7 +21,7 @@ import {
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
-import { nextMinimumChargeAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
+import { nextMinimumChargeAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, buildCreditCardBalanceDueRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
 import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
@@ -1405,13 +1405,19 @@ function CreditCardLedgerModal({
   card: CreditCard
   transactions: Transaction[]
   onUpdateMinimumCharge: (date: string, amount: number) => void
-  /** UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, Adam's own repeated
-   * feature request) — logs an overpayment for the row's own full
-   * balanceDue, dated on that row's date, in one tap. */
+  /** UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, Adam's own spec, 2nd
+   * design pass) — logs an overpayment for the FULL balance due on that
+   * date (not just that date's minimum), dated on it. */
   onClearBalance: (date: string, amount: number) => void
   onClose: () => void
 }) {
   const rows = buildCreditCardMinimumChargeRows(card, transactions)
+  // UAT 2026-09-08 — a genuinely SEPARATE row from the minimum charge,
+  // not a variant of it (Adam's own correction of the first attempt at
+  // this): "I see two rows per payment date, first being any due
+  // balance... second row is the minimum charge for the same date."
+  const balanceDueRows = buildCreditCardBalanceDueRows(card, transactions)
+  const balanceDueByDate = new Map(balanceDueRows.map((r) => [r.date, r.balanceDue]))
   const [editingDate, setEditingDate] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
 
@@ -1438,55 +1444,59 @@ function CreditCardLedgerModal({
             <X size={20} />
           </button>
         </div>
-        <p className="text-xs text-[var(--color-ink-muted)] mb-3">Tap a payment to adjust it — past or future. Spend and other card activity are on the card's own page.</p>
+        <p className="text-xs text-[var(--color-ink-muted)] mb-3">Tap a minimum charge to adjust it — past or future. Spend and other card activity are on the card's own page.</p>
 
         <div className="overflow-y-auto flex-1 -mx-5 px-5 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-          {rows.map((row) =>
-            editingDate === row.date ? (
-              <div key={row.date} className="py-2 flex items-center gap-2">
-                <span className="text-xs text-[var(--color-ink-muted)] flex-1">{row.date}</span>
-                <input
-                  type="number"
-                  autoFocus
-                  value={editValue}
-                  onChange={(e) => setEditValue(e.target.value)}
-                  className="w-24 bg-transparent border-b border-[var(--color-track)] py-1 text-right text-[var(--color-ink)] outline-none font-mono"
-                />
-                <button onClick={commitEdit} className="text-xs font-semibold px-2 py-1 rounded-lg text-white" style={{ background: 'var(--color-coral)' }}>
-                  Save
-                </button>
-                <button onClick={() => setEditingDate(null)} className="text-xs text-[var(--color-ink-muted)]">
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <div key={row.date} className="py-2 flex items-center justify-between gap-2">
-                <button onClick={() => startEditing(row)} className="flex-1 min-w-0 text-left">
-                  <span className="text-xs text-[var(--color-ink)]">
-                    {row.date}
-                    {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
-                  </span>
-                  {/* UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, Adam's own
-                      repeated feature request) — this row's own MINIMUM was
-                      the only figure ever shown here, with nothing to show
-                      the real statement balance actually driving it. */}
-                  {row.balanceDue > row.amount + 0.01 && (
-                    <p className="text-[10px] text-[var(--color-ink-faint)]">£{formatCurrency(row.balanceDue)} owed in full</p>
-                  )}
-                </button>
-                <span className="text-xs font-mono text-[var(--color-ink)] shrink-0">£{formatCurrency(row.amount)}</span>
-                {row.status === 'pending' && row.balanceDue > row.amount + 0.01 && (
-                  <button
-                    onClick={() => onClearBalance(row.date, row.balanceDue)}
-                    className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
-                    style={{ background: 'var(--color-coral)' }}
-                  >
-                    Clear
+          {rows.map((row) => {
+            const balanceDue = balanceDueByDate.get(row.date)
+            return (
+              <div key={row.date} className="flex flex-col">
+                {balanceDue != null && (
+                  <div className="py-2 flex items-center justify-between gap-2 border-b" style={{ borderColor: 'var(--color-track)' }}>
+                    <div className="min-w-0">
+                      <span className="text-xs text-[var(--color-ink)]">{row.date} · Balance due</span>
+                      <p className="text-[10px] text-[var(--color-ink-faint)]">Paying this in full zeroes off future minimum charges</p>
+                    </div>
+                    <span className="text-xs font-mono text-[var(--color-ink)] shrink-0">£{formatCurrency(balanceDue)}</span>
+                    <button
+                      onClick={() => onClearBalance(row.date, balanceDue)}
+                      className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
+                      style={{ background: 'var(--color-coral)' }}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
+                {editingDate === row.date ? (
+                  <div className="py-2 flex items-center gap-2">
+                    <span className="text-xs text-[var(--color-ink-muted)] flex-1">{row.date} · Minimum charge</span>
+                    <input
+                      type="number"
+                      autoFocus
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      className="w-24 bg-transparent border-b border-[var(--color-track)] py-1 text-right text-[var(--color-ink)] outline-none font-mono"
+                    />
+                    <button onClick={commitEdit} className="text-xs font-semibold px-2 py-1 rounded-lg text-white" style={{ background: 'var(--color-coral)' }}>
+                      Save
+                    </button>
+                    <button onClick={() => setEditingDate(null)} className="text-xs text-[var(--color-ink-muted)]">
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button onClick={() => startEditing(row)} className="py-2 flex items-center justify-between text-left">
+                    <span className="text-xs text-[var(--color-ink)]">
+                      {row.date}
+                      {balanceDue != null && ' · Minimum charge'}
+                      {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
+                    </span>
+                    <span className="text-xs font-mono text-[var(--color-ink)]">£{formatCurrency(row.amount)}</span>
                   </button>
                 )}
               </div>
-            ),
-          )}
+            )
+          })}
           {rows.length === 0 && <p className="py-4 text-center text-xs text-[var(--color-ink-faint)]">No minimum charges yet.</p>}
         </div>
       </div>

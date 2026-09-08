@@ -40,7 +40,25 @@
 // checking BOTH balances' own before-interest progress, and paying off
 // whichever is larger when either deadlocks.
 
-import { generateMinimumPaymentTransactions, computeMinimumPaymentAmount, cardBalanceAsOf, recordCreditCardSpend, recordCreditCardLumpPayment } from '../src/lib/creditCards'
+// UAT 2026-09-08, third retest — Adam's own root-cause theory and spec: a
+// "Balance due" row (the REAL statement total, not just that date's
+// minimum) with its own Clear button, shown as a SEPARATE row from the
+// minimum charge for the same date (not folded into it, which was the
+// first, wrong attempt at this). Clearing it — a lump payment dated on/
+// before the due date, for the full balanceDue figure — should zero that
+// date's own minimum AND every future one, relying on
+// generateMinimumPaymentTransactions's existing lump-payment-before-
+// minimum-computation ordering (no separate "future charges" mechanism
+// needed once the true balance is actually paid down to zero).
+
+import {
+  generateMinimumPaymentTransactions,
+  computeMinimumPaymentAmount,
+  cardBalanceAsOf,
+  recordCreditCardSpend,
+  recordCreditCardLumpPayment,
+  buildCreditCardBalanceDueRows,
+} from '../src/lib/creditCards'
 import type { CreditCard, Transaction } from '../src/types/ledger'
 
 let failures = 0
@@ -109,6 +127,45 @@ const windowCharges = generateMinimumPaymentTransactions(windowCard, new Date(20
 check('A statement-window card with a matching overpayment does NOT generate 60 straight monthly minimum charges', windowCharges.length < 60, true)
 const windowAllTx = [...windowTransactions, ...windowCharges.map((t, i) => ({ ...t, id: `gen-${i}`, status: 'cleared' as const }))]
 check('...and its real balance reaches exactly £0', cardBalanceAsOf(windowCard, windowAllTx, new Date(2031, 8, 1)), 0)
+
+// ---- 6. The "Balance due" + Clear flow end to end ----
+let clearCard: CreditCard = {
+  id: 'card-3',
+  name: 'Clear Button Visa',
+  categoryId: 'cat-cc',
+  color: '#8b5cf6',
+  interestRatePercent: 20,
+  currentBalance: 0,
+  balanceAsOfDate: '2026-09-01',
+  minimumPayment: { type: 'percent_of_balance', percent: 5 },
+  paymentDayOfMonth: 14,
+  statementStartDay: 19,
+  statementEndDay: 18,
+  ownerId: 'adam',
+  lumpPayments: [],
+  active: true,
+}
+let clearTransactions: (Omit<Transaction, 'id'> & { id: string })[] = []
+const clearSpend = recordCreditCardSpend(clearCard, 20, '2026-09-09', 'test spend')
+clearCard = clearSpend.updatedCard
+clearTransactions.push({ ...clearSpend.transaction, id: 'c0' })
+
+// Before clearing: the Oct 14 row should offer a real "balance due" figure.
+const dueRowsBefore = buildCreditCardBalanceDueRows(clearCard, clearTransactions, new Date(2026, 8, 15))
+const octRow = dueRowsBefore.find((r) => r.date === '2026-10-14')
+check('A "Balance due" row exists for the Oct 14 payment date before clearing', !!octRow, true)
+
+// Clear it — exactly what the modal's Clear button does: a lump payment
+// for that row's own balanceDue, dated on the row's own date.
+if (octRow) {
+  const cleared = recordCreditCardLumpPayment(clearCard, octRow.balanceDue, octRow.date, 'Statement cleared')
+  clearCard = cleared.updatedCard
+  clearTransactions.push({ ...cleared.transaction, id: 'c1' })
+}
+
+const futureCharges = generateMinimumPaymentTransactions(clearCard, new Date(2026, 8, 1), new Date(2029, 8, 1), clearTransactions)
+check('After clearing via the Balance-due row, NO further minimum charges are generated at all (not just fewer)', futureCharges.length, 0)
+check('...and the real balance is exactly £0 three years later', cardBalanceAsOf(clearCard, clearTransactions, new Date(2029, 8, 1)), 0)
 
 // ---- 5b. Regression guard — a genuinely progressing percent-of-balance minimum is unaffected ----
 const healthyCard: CreditCard = { ...deadlockedCard, currentBalance: 500, minimumPayment: { type: 'percent_of_balance', percent: 5 } }

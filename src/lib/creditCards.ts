@@ -628,15 +628,6 @@ export interface CreditCardMinimumChargeRow {
   // happened" vs "projected" distinction if it wants to, not because the
   // edit flow itself needs the caller to know which path it'll take.
   materialized: boolean
-  /** UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, Adam's own repeated
-   * feature request) — the FULL balance owed as of this row's date, not
-   * just the minimum payment amount. Lets the ledger modal offer a
-   * "Clear" action that pays off the whole statement in one tap, rather
-   * than the user having to work out and type a matching overpayment
-   * figure by hand (a real source of the "still not fully cleared"
-   * reports — an overpayment even a penny short, or dated slightly
-   * wrong, leaves a genuine residual behind). */
-  balanceDue: number
 }
 
 /**
@@ -678,21 +669,43 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   // echoed back, never something the modal had computed.
   const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions).filter((t) => !storedDates.has(t.date))
 
-  // Only meaningful for still-projected rows — a stored/materialized row
-  // already happened, so "clear the whole statement" isn't a live action
-  // for it any more. balanceDue there is 0 (nothing further owed as of
-  // that date on top of what was already paid; not shown/used by the UI).
   const rows: CreditCardMinimumChargeRow[] = [
-    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true, balanceDue: 0 })),
-    ...generated.map((t) => ({
-      date: t.date,
-      amount: t.amount,
-      status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const),
-      materialized: false,
-      balanceDue: cardBalanceAsOf(card, transactions, new Date(t.date)),
-    })),
+    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true })),
+    ...generated.map((t) => ({ date: t.date, amount: t.amount, status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const), materialized: false })),
   ]
   return rows.sort((a, b) => a.date.localeCompare(b.date))
+}
+
+export interface CreditCardBalanceDueRow {
+  date: string
+  /** The full balance owed as of this date — not just that date's own
+   * minimum payment. */
+  balanceDue: number
+}
+
+/**
+ * UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, Adam's own spec, 2nd
+ * design pass) — a SEPARATE row from the minimum-charge one above, shown
+ * first for the same date in the ledger modal: "I see two rows per
+ * payment date, first being any due balance... second row is the minimum
+ * charge for the same date." Only for still-UPCOMING payment dates (a
+ * past one already happened, nothing left to pre-empt) where the real
+ * balance is meaningfully more than that date's own minimum — otherwise
+ * there's nothing worth offering an early payoff for. Clearing this row
+ * (a lump payment dated on/before this date, for at least this amount)
+ * naturally zeroes that date's own minimum AND every later one too, via
+ * generateMinimumPaymentTransactions's own existing lump-payment-before-
+ * minimum-computation ordering — no separate "future charges" mechanism
+ * needed, paying the real balance down to (near) zero is what makes every
+ * later minimum compute to zero on its own.
+ */
+export function buildCreditCardBalanceDueRows(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): CreditCardBalanceDueRow[] {
+  const minimumRows = buildCreditCardMinimumChargeRows(card, transactions, asOfDate)
+  return minimumRows
+    .filter((r) => r.status === 'pending')
+    .map((r) => ({ date: r.date, balanceDue: cardBalanceAsOf(card, transactions, new Date(r.date)), minimum: r.amount }))
+    .filter((r) => r.balanceDue > r.minimum + 0.01)
+    .map((r) => ({ date: r.date, balanceDue: r.balanceDue }))
 }
 
 /** Convenience wrapper over withLiveBalance for a whole list — the shape almost every read site actually wants. Same rule applies: display/compute only, never persisted. */
