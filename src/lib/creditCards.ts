@@ -96,7 +96,15 @@ export function computeMinimumPaymentAmount(card: CreditCard): number {
   // minimum wouldn't leave the balance any lower than it stood before
   // this cycle's interest, it's not keeping pace with interest — the
   // whole remaining balance is due instead of perpetuating a residue.
-  if (computedMinimum > 0 && round2(balanceWithInterest - computedMinimum) >= card.currentBalance) return balanceWithInterest
+  // Restricted the same way, and for the same reason, as that function's
+  // own guard: only when a percent_of_balance minimum's UNROUNDED
+  // theoretical amount would have exceeded this cycle's interest — i.e.
+  // rounding, not the policy itself, is what erased the progress. A
+  // fixed minimum (or a percent genuinely too small for the rate) is a
+  // real debt trap, not a bug — the balance is meant to grow.
+  const interestThisCycle = balanceWithInterest - card.currentBalance
+  const roundingCouldExplainDeadlock = card.minimumPayment.type === 'percent_of_balance' && (balanceWithInterest * card.minimumPayment.percent) / 100 > interestThisCycle
+  if (computedMinimum > 0 && roundingCouldExplainDeadlock && round2(balanceWithInterest - computedMinimum) >= card.currentBalance) return balanceWithInterest
   return computedMinimum
 }
 
@@ -182,11 +190,34 @@ export function cardBalanceAsOf(card: CreditCard, transactions: Transaction[], a
   const allDates = [...new Set([...billingDates, ...activity.map((t) => t.date)])].sort()
 
   let balance = card.currentBalance
+  // UAT 2026-09-08 (8-bug9.2, Adam-requested grace period) — a real card
+  // charges no interest on new spend at all if the account entered the
+  // billing cycle already fully paid off; interest only starts (and, in
+  // real cards, applies retroactively) once a balance is actually being
+  // carried/revolved. `balanceEnteringCycle` is frozen at the value the
+  // balance held right after the PREVIOUS billing date's own interest +
+  // same-day activity — i.e. what carries INTO this cycle, before this
+  // cycle's own new spend gets added — so it survives however much new
+  // spend accumulates before this cycle's own billing date is reached.
+  let balanceEnteringCycle = card.currentBalance
   for (const date of allDates) {
-    if (billingDates.includes(date)) balance = applyMonthlyInterest(balance, card.interestRatePercent)
+    if (billingDates.includes(date)) {
+      if (balanceEnteringCycle > NEGLIGIBLE_BALANCE) {
+        balance = applyMonthlyInterest(balance, card.interestRatePercent)
+      } else if (balance <= NEGLIGIBLE_BALANCE) {
+        // Grace applies (nothing carried into this cycle) AND there's no
+        // new spend to charge interest-free either — still snap a
+        // lingering negligible-dust residual to exactly zero, same as
+        // applyMonthlyInterest's own guard would have done had it run.
+        // Skipping this call entirely (for the grace case) must not also
+        // resurrect the pre-Batch-8 stuck-forever-at-a-penny bug.
+        balance = 0
+      }
+    }
     for (const t of activity.filter((a) => a.date === date)) {
       balance = t.type === 'credit_card_spend' ? round2(balance + t.amount) : round2(Math.max(0, balance - t.amount))
     }
+    if (billingDates.includes(date)) balanceEnteringCycle = balance
   }
   return round2(Math.max(0, balance))
 }
@@ -350,6 +381,15 @@ export function generateMinimumPaymentTransactions(
     const paymentDate = new Date(cursor.getFullYear(), cursor.getMonth(), Math.min(card.paymentDayOfMonth, daysInMonth))
     const paymentDateIso = toIso(paymentDate)
     const closeDateIso = card.statementEndDay != null ? toIso(statementCloseDateForPaymentDate(card, paymentDate)) : null
+    // UAT 2026-09-08 (8-bug9.2, Adam-requested grace period) — frozen
+    // BEFORE this cycle's own spend gets folded in below, so it reflects
+    // what carried INTO this cycle from the end of the last one. Used
+    // just below to decide whether this cycle accrues interest at all —
+    // see cardBalanceAsOf's identical mechanism for the full reasoning.
+    // Deliberately only tracked for workingBalance — see the interest-
+    // gating block below for why statementBalance shares this same gate
+    // rather than tracking its own (lagged, window-delayed) version.
+    const workingBalanceEnteringCycle = workingBalance
 
     // Fold in any real spend dated up to this payment date into the true
     // running balance — always, regardless of window.
@@ -401,11 +441,39 @@ export function generateMinimumPaymentTransactions(
     // landed early in the cycle (no daily precision here), which is a
     // deliberate, conservative simplification rather than an attempt at
     // exact accrual. Applied to BOTH balances identically — item e adds
-    // no new interest-timing modelling of its own, deliberately, since
-    // Adam didn't ask for daily/grace-period accrual and the app's
-    // existing simplification already doesn't model that.
-    workingBalance = applyMonthlyInterest(workingBalance, card.interestRatePercent)
-    statementBalance = applyMonthlyInterest(statementBalance, card.interestRatePercent)
+    // no new interest-timing modelling of its own beyond the grace-period
+    // check just above: no daily accrual, still no partial-cycle
+    // proration, just an all-or-nothing "did this cycle start already
+    // clear" gate (Adam-requested, 2026-09-08 — real cards charge no
+    // interest on new spend at all if the account entered the cycle fully
+    // paid off, only starting once a balance is actually being carried).
+    // Grace applies when nothing carried in — but still snap a lingering
+    // negligible-dust residual to exactly zero in that case (see
+    // cardBalanceAsOf's identical comment): skipping applyMonthlyInterest
+    // entirely must not resurrect the pre-Batch-8 stuck-forever-at-a-
+    // penny bug for a balance that has no new spend to stay grace-free.
+    // Gated on workingBalanceEnteringCycle for BOTH balances, deliberately
+    // — whether the account is "carrying debt" is a fact about the real
+    // account, and statementBalanceEnteringCycle is a lagged, window-
+    // delayed figure that can read as zero even when workingBalance shows
+    // real debt was carried in (a spend can sit in workingBalance for a
+    // cycle or more before its own window closes and it reaches
+    // statementBalance at all). Gating statementBalance on its OWN
+    // (falsely-zero) entering value granted grace it hadn't earned —
+    // confirmed empirically: a statement-window card that carried real
+    // debt into a cycle got its statementBalance's interest wrongly
+    // skipped while workingBalance's correctly wasn't, so a same-day lump
+    // payment sized to clear the true (interest-inflated) workingBalance
+    // then fully zeroed the (interest-free) statementBalance too, and the
+    // no-longer-owed difference was silently left stranded in
+    // workingBalance forever after.
+    if (workingBalanceEnteringCycle > NEGLIGIBLE_BALANCE) {
+      workingBalance = applyMonthlyInterest(workingBalance, card.interestRatePercent)
+      statementBalance = applyMonthlyInterest(statementBalance, card.interestRatePercent)
+    } else {
+      if (workingBalance <= NEGLIGIBLE_BALANCE) workingBalance = 0
+      if (statementBalance <= NEGLIGIBLE_BALANCE) statementBalance = 0
+    }
 
     // Apply any still-pending lump payments dated on/before this
     // payment date, in date order, BEFORE computing this month's
@@ -442,9 +510,34 @@ export function generateMinimumPaymentTransactions(
       // while statementBalance is still (very slowly) progressing. An
       // explicit override is left untouched (a deliberate figure, not
       // the computed one this guard exists to correct).
+      // UAT 2026-09-08 (found while adding the grace-period feature,
+      // running the full verify-*.ts suite for the first time in a while)
+      // — this guard was firing for a genuine, real-world debt trap too:
+      // a FIXED minimum (or a percent that's mathematically too small
+      // for the rate, regardless of rounding) smaller than the interest
+      // accruing is completely real credit-card behaviour — the balance
+      // is SUPPOSED to grow, forever, exactly as the pre-existing
+      // verify-ledger-phase2.ts debt-trap test expects. That's a
+      // different thing entirely from every ORIGINAL bug report here
+      // (Adam's 5%-of-balance-vs-20%-APR repros), where the minimum
+      // percent mathematically EXCEEDS the monthly rate — it SHOULD
+      // converge — and only fails to because of rounding at small-pence
+      // scale. Distinguishing the two: only a percent_of_balance minimum
+      // whose UNROUNDED theoretical amount would have exceeded this
+      // cycle's own interest (i.e. rounding, not the policy itself, is
+      // what erased the progress) counts as a deadlock to force-resolve.
+      // A fixed minimum, or a percent genuinely smaller than the rate,
+      // is left alone — the balance is allowed to grow/stay flat, same
+      // as any real card.
+      const percent = card.minimumPayment.type === 'percent_of_balance' ? card.minimumPayment.percent : null
+      const roundingCouldExplainDeadlock =
+        percent != null &&
+        ((statementBalance * percent) / 100 > statementBalance - statementBalanceBeforeInterest ||
+          (workingBalance * percent) / 100 > workingBalance - workingBalanceBeforeInterest)
       const deadlocked =
         !override &&
         computedMinimum > 0 &&
+        roundingCouldExplainDeadlock &&
         (round2(statementBalance - computedMinimum) >= statementBalanceBeforeInterest || round2(workingBalance - computedMinimum) >= workingBalanceBeforeInterest)
       const amount = override ? override.amount : deadlocked ? Math.max(statementBalance, workingBalance) : computedMinimum
       if (amount > 0) {
