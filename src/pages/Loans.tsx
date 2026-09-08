@@ -198,6 +198,12 @@ export function Loans() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [importGeneration])
   const [overpaymentPrefill, setOverpaymentPrefill] = useState<OverpaymentPrefill | null>(null)
+  // Batch 9 (2026-09-07, Bug 11) — a brand-new loan/card has no card to
+  // flash at the moment its own Save fires (the row only mounts on the
+  // NEXT render, once data.loans/data.creditCards includes it) — same
+  // "flash on mount instead" handoff Bills.tsx uses for a new bill.
+  const [justCreatedLoanId, setJustCreatedLoanId] = useState<string | null>(null)
+  const [justCreatedCardId, setJustCreatedCardId] = useState<string | null>(null)
   const routerLocation = useLocation()
   const navigate = useNavigate()
   const loanPrefill = (routerLocation.state as { loanPrefill?: LoanPrefill } | null)?.loanPrefill
@@ -309,7 +315,8 @@ export function Loans() {
               if (loanPrefill) navigate('.', { replace: true, state: null })
             }}
             onSave={(loan) => {
-              addLoan(loan)
+              const id = addLoan(loan)
+              setJustCreatedLoanId(id)
               setAddingLoan(false)
               if (loanPrefill) navigate('.', { replace: true, state: null })
             }}
@@ -346,6 +353,8 @@ export function Loans() {
                 onCalibrate={(lines) => calibrateLoanAction(loan.id, lines)}
                 overpaymentPrefill={overpaymentPrefill?.targetKind === 'loan' && overpaymentPrefill.targetId === loan.id ? overpaymentPrefill : null}
                 onPrefillConsumed={() => setOverpaymentPrefill(null)}
+                shouldFlashOnMount={justCreatedLoanId === loan.id}
+                onFlashedOnMount={() => setJustCreatedLoanId(null)}
               />
             )
           })}
@@ -394,7 +403,8 @@ export function Loans() {
             onAddCategory={addCategory}
             onCancel={() => setAddingCard(false)}
             onSave={(card) => {
-              addCreditCard(card)
+              const id = addCreditCard(card)
+              setJustCreatedCardId(id)
               setAddingCard(false)
             }}
           />
@@ -436,6 +446,8 @@ export function Loans() {
                 onUpdateMinimumCharge={(date, amount) => updateCreditCardMinimumCharge(card.id, date, amount)}
                 overpaymentPrefill={overpaymentPrefill?.targetKind === 'credit_card' && overpaymentPrefill.targetId === card.id ? overpaymentPrefill : null}
                 onPrefillConsumed={() => setOverpaymentPrefill(null)}
+                shouldFlashOnMount={justCreatedCardId === card.id}
+                onFlashedOnMount={() => setJustCreatedCardId(null)}
               />
             )
           })}
@@ -481,6 +493,8 @@ function LoanRow({
   onCalibrate,
   overpaymentPrefill,
   onPrefillConsumed,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   loan: Loan
   category: { id: string; name: string; icon: string; iconColor: string } | undefined
@@ -503,9 +517,22 @@ function LoanRow({
   onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — true for exactly one render right
+   * after this loan was newly created, so it can flash "Loan saved." on
+   * mount (no card exists yet at the moment a brand-new loan's own save
+   * button is clicked). */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
-  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash()
   const [ledgerOpen, setLedgerOpen] = useState(false)
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash('Loan saved')
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={loan.name}>
@@ -562,21 +589,25 @@ function LoanRow({
               onToggle()
               triggerFlash()
             }}
-            onLogOverpayment={onLogOverpayment}
+            onLogOverpayment={(amount, date, note, recastMode) => {
+              onLogOverpayment(amount, date, note, recastMode)
+              triggerFlash()
+            }}
             onUpdateOverpayment={onUpdateOverpayment}
             onRemoveOverpayment={onRemoveOverpayment}
             onSettle={(amount, date, note) => {
               onSettle(amount, date, note)
               onToggle()
-              triggerFlash()
+              triggerFlash('Loan settled')
             }}
             onCalibrate={onCalibrate}
+            onCalibrated={() => triggerFlash('Calibration saved')}
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
           />
         )}
 
-        <SavedFlashOverlay active={flashActive} />
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
     </SwipeToDelete>
   )
@@ -600,6 +631,8 @@ function CreditCardRow({
   onUpdateMinimumCharge,
   overpaymentPrefill,
   onPrefillConsumed,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   card: CreditCard // live: currentBalance is the DERIVED figure, for display
   storedCard: CreditCard // as persisted: currentBalance is the stated anchor, for editing
@@ -618,9 +651,19 @@ function CreditCardRow({
   onUpdateMinimumCharge: (date: string, amount: number) => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — see LoanRow's own comment. */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
-  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash()
   const [ledgerOpen, setLedgerOpen] = useState(false)
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash('Credit Card saved')
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={card.name}>
@@ -663,13 +706,16 @@ function CreditCardRow({
             }}
             onUpdateLumpPayment={onUpdateLumpPayment}
             onRemoveLumpPayment={onRemoveLumpPayment}
-            onLogLumpPayment={onLogLumpPayment}
+            onLogLumpPayment={(amount, date, note) => {
+              onLogLumpPayment(amount, date, note)
+              triggerFlash()
+            }}
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
           />
         )}
 
-        <SavedFlashOverlay active={flashActive} />
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
     </SwipeToDelete>
   )
@@ -708,6 +754,7 @@ function LoanEditPanel({
   onRemoveOverpayment,
   onSettle,
   onCalibrate,
+  onCalibrated,
   overpaymentPrefill,
   onPrefillConsumed,
 }: {
@@ -724,6 +771,8 @@ function LoanEditPanel({
   onRemoveOverpayment: (overpaymentId: string) => void
   onSettle: (amount: number, date: string, note?: string) => void
   onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
+  /** Batch 9 (2026-09-07, Bug 11) — see CalibrationModal's own comment. */
+  onCalibrated?: () => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
 }) {
@@ -895,7 +944,13 @@ function LoanEditPanel({
       )}
 
       {calibratingLoan && (
-        <CalibrationModal loanName={loan.name} existingLinesCount={loan.statementCalibrationLines?.length ?? 0} onCalibrate={onCalibrate} onClose={() => setCalibratingLoan(false)} />
+        <CalibrationModal
+          loanName={loan.name}
+          existingLinesCount={loan.statementCalibrationLines?.length ?? 0}
+          onCalibrate={onCalibrate}
+          onCalibrated={onCalibrated}
+          onClose={() => setCalibratingLoan(false)}
+        />
       )}
 
       {pendingLocationConfirm && (
@@ -1362,11 +1417,18 @@ function CalibrationModal({
   existingLinesCount,
   onCalibrate,
   onClose,
+  onCalibrated,
 }: {
   loanName: string
   existingLinesCount: number
   onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
   onClose: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — fired when the modal closes AFTER a
+   * real calibration attempt (confident match or not — the statement
+   * lines themselves are saved either way), so the caller can flash
+   * "Calibration saved" on the loan card. NOT fired by the X button
+   * closing the modal before ever submitting anything. */
+  onCalibrated?: () => void
 }) {
   const [rows, setRows] = useState<{ date: string; capital: string; interest: string }[]>([{ date: todayIso(), capital: '', interest: '' }])
   const [result, setResult] = useState<CalibrationResult | null>(null)
@@ -1463,7 +1525,14 @@ function CalibrationModal({
                 + Add more lines
               </button>
             )}
-            <button onClick={onClose} className="w-full mt-2 py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
+            <button
+              onClick={() => {
+                onCalibrated?.()
+                onClose()
+              }}
+              className="w-full mt-2 py-2.5 rounded-full text-sm font-semibold text-white"
+              style={{ background: 'var(--color-coral)' }}
+            >
               Done
             </button>
           </div>
