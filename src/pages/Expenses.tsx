@@ -19,7 +19,7 @@ import { LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, re
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
-import { addYears } from 'date-fns'
+import { addYears, addDays } from 'date-fns'
 import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2 } from '../types/ledger'
 
 const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
@@ -55,7 +55,7 @@ const RECURRING_FREQUENCY_LABELS: Record<'weekly' | 'every_n_weeks' | 'monthly' 
 }
 type RecurringFrequency = keyof typeof RECURRING_FREQUENCY_LABELS
 
-import { todayIso } from '../lib/date'
+import { todayIso, toLocalIsoDate } from '../lib/date'
 
 type PageMode = 'transactions' | 'recurring' | 'transfer'
 
@@ -92,8 +92,15 @@ function MonthCollapsedTransactionList<T>({
       return next
     })
 
-  const pending = items.filter((i) => !isCleared(i))
-  const cleared = items.filter(isCleared)
+  // UAT 2026-09-08 (9-transactions-sweep note) — a JUST-cleared item used
+  // to disappear into its month's collapsed group immediately, burying it
+  // right when it's most likely to need a quick edit. Only a cleared item
+  // more than 3 days old now groups; anything cleared today or within the
+  // last 2 days stays in the flat, ungrouped list alongside pending items
+  // ("for emergency editing," per Adam's own spec).
+  const recentCutoffIso = toLocalIsoDate(addDays(new Date(), -3))
+  const pending = items.filter((i) => !isCleared(i) || getDate(i) > recentCutoffIso)
+  const cleared = items.filter((i) => isCleared(i) && getDate(i) <= recentCutoffIso)
 
   // Grouped by calendar month (YYYY-MM) — items arrive already sorted by
   // the caller (each pill's own list is sorted before this component ever
