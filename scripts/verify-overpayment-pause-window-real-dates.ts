@@ -57,6 +57,22 @@ const pausedLoan: Loan = { ...loan, recurringOverpayment: { ...loan.recurringOve
 // overpayment for that period once wired through periodDate correctly.
 check('The paused period genuinely stops generating an overpayment', recurringOverpaymentForDate(pausedLoan, augEntry.periodDate, 5000), 0)
 
+// ─────────────────────────────────────────────────────────────────────
+// UAT 2026-09-09 (retest3-overpay-pause-still-works) — THE ACTUAL
+// REPORTED BUG: after pausing a date and saving, that one row's own
+// DISPLAY reverted from the overpayment's real date (21st) back to the
+// loan's own payment date (2nd), while every other (unpaused) row
+// stayed correct. Root cause: recurringOverpaymentRealDates gated on
+// `entry.recurringOverpaymentApplied > 0`, and a paused period always
+// resolves to 0 there — so a paused period got no real-date mapping at
+// all, and callers fell back to the loan's own period date for that one
+// row. Fixed by gating on the overpayment's active date WINDOW instead
+// of whether it actually applied that period.
+// ─────────────────────────────────────────────────────────────────────
+const windowAfterPause = scheduledLoanRecurringOverpaymentRealDates(pausedLoan, rangeStart, rangeEnd)
+check('The now-PAUSED period still shows its own real date (21st), not the loan\'s payment date (2nd) — the exact reported bug', windowAfterPause.find((e) => e.periodDate === augEntry.periodDate)?.date, '2026-08-21')
+check('Every OTHER (still-unpaused) row is unaffected', windowAfterPause.every((e) => e.date.endsWith('-21')), true)
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) FAILED.`)
   process.exit(1)

@@ -594,7 +594,20 @@ export function recurringOverpaymentRealDates(loan: Loan, schedule: LoanSchedule
   let iterations = 0
 
   for (const entry of schedule) {
-    if (entry.recurringOverpaymentApplied <= 0) {
+    // UAT 2026-09-09 (retest3-overpay-pause-still-works) — gate on the
+    // overpayment's own active DATE WINDOW (start/end), not on whether it
+    // actually applied that period. Confirmed as a real, reported bug:
+    // gating on `entry.recurringOverpaymentApplied > 0` meant a PAUSED
+    // period (which `recurringOverpaymentForDate` correctly zeroes out)
+    // got no real-date mapping at all, so callers fell back to the
+    // loan's own period date for that one row — pausing a date flipped
+    // its displayed date to the loan's, while every other (unpaused) row
+    // stayed correct. Same "ignore pausedDates entirely, a paused date
+    // still has to appear correctly so it can be unpaused" principle
+    // scheduledLoanRecurringOverpaymentRealDates's own date-window filter
+    // already follows — this is the other half of that same fix.
+    const inWindow = entry.date >= r.startDate && (!r.endDate || entry.date <= r.endDate)
+    if (!inWindow) {
       previousPeriodDate = new Date(entry.date)
       continue
     }
