@@ -293,12 +293,14 @@ export function Expenses() {
   // uses for its own overpaymentPrefill.
   const routerLocation = useLocation()
   const navigate = useNavigate()
-  const [recurringOverpaymentPrefill, setRecurringOverpaymentPrefill] = useState<{ loanId: string; amount: number } | null>(null)
+  const [recurringOverpaymentPrefill, setRecurringOverpaymentPrefill] = useState<{ loanId: string; amount: number; date?: string } | null>(null)
   useEffect(() => {
-    const prefill = (routerLocation.state as { overpaymentPrefill?: { targetKind: 'loan' | 'credit_card'; targetId: string; mode: 'payoff' | 'recurring'; amount: number } } | null)?.overpaymentPrefill
+    const prefill = (
+      routerLocation.state as { overpaymentPrefill?: { targetKind: 'loan' | 'credit_card'; targetId: string; mode: 'payoff' | 'recurring'; amount: number; date?: string } } | null
+    )?.overpaymentPrefill
     if (prefill && prefill.mode === 'recurring' && prefill.targetKind === 'loan') {
       setMode('overpayments')
-      setRecurringOverpaymentPrefill({ loanId: prefill.targetId, amount: prefill.amount })
+      setRecurringOverpaymentPrefill({ loanId: prefill.targetId, amount: prefill.amount, date: prefill.date })
       setAdding(true)
       // Consumed into local state above — clear the router state so a
       // manual close/reopen later doesn't re-trigger it.
@@ -1332,7 +1334,7 @@ function OverpaymentCreateForm({
    * makeImpactReal). Amount/mode/target are seeded straight in; the
    * person still steps through From (unless the loan's joint)/recast/
    * date/Save themselves. */
-  prefill?: { loanId: string; amount: number } | null
+  prefill?: { loanId: string; amount: number; date?: string } | null
   onCancel: () => void
   onSaveLoan: (loanId: string, amount: number, date: string, note: string | undefined, recastMode: 'reduce_term' | 'reduce_payment') => void
   onSaveCard: (cardId: string, amount: number, date: string, note?: string) => void
@@ -1355,7 +1357,7 @@ function OverpaymentCreateForm({
   const [fromLocation, setFromLocation] = useState<'personal' | 'pot' | undefined>(undefined)
   const [fromPotId, setFromPotId] = useState<string | undefined>(undefined)
   const [recastMode, setRecastMode] = useState<'reduce_term' | 'reduce_payment'>('reduce_term')
-  const [date, setDate] = useState(todayIso())
+  const [date, setDate] = useState(prefill?.date ?? todayIso())
   const [note, setNote] = useState('')
 
   const amountNumber = mode === 'recurring' && recurringAmountType === 'percent_of_balance' ? Number(recurringPercent) : Number(amount)
@@ -1976,7 +1978,15 @@ function LoanRecurringOverpaymentEditForm({
           effectiveFrom={todayIso()}
           changes={pendingConfirm.changes}
           affectsClearedBalance={false}
-          onCancel={() => setPendingConfirm(null)}
+          // 2026-09-09 followup (Adam-reported) — Cancel here used to only
+          // dismiss the confirm modal, leaving the edit form open with the
+          // unsaved draft still showing the changed values. Matches every
+          // other cancel-out-of-a-recurring-change flow in the app now:
+          // discards the draft entirely and collapses the row.
+          onCancel={() => {
+            setPendingConfirm(null)
+            onCancel()
+          }}
           onConfirm={() => {
             pendingConfirm.commit()
             setPendingConfirm(null)

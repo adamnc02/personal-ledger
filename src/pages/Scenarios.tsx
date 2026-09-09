@@ -130,7 +130,13 @@ export function Scenarios() {
   // instead (2026-09-09 followup — recurring overpayments are no longer
   // created/edited on the Borrowing page at all), pre-filling the same
   // picker-first wizard used everywhere else.
-  function makeImpactReal(li: LoanImpact) {
+  // `actionDate` — 2026-09-09 followup (Adam-reported): the wizard this
+  // hands off to used to always default to today, silently dropping
+  // whichever date the person had actually set on the scenario's own
+  // loan_overpayment action. Resolved by the caller (it knows which
+  // scenario/action this button belongs to; LoanImpact itself carries no
+  // date) and passed straight through.
+  function makeImpactReal(li: LoanImpact, actionDate?: string) {
     if (li.kind === 'payoff') {
       navigate('/loans', {
         state: {
@@ -139,7 +145,7 @@ export function Scenarios() {
             targetId: li.loanId,
             mode: 'payoff',
             amount: li.lumpSumApplied,
-            date: todayIso(),
+            date: actionDate ?? todayIso(),
           },
         },
       })
@@ -157,6 +163,7 @@ export function Scenarios() {
             targetId: li.loanId,
             mode: 'recurring',
             amount: li.overpaymentPerMonth,
+            date: actionDate,
           },
         },
       })
@@ -335,7 +342,21 @@ export function Scenarios() {
 
                   <div className="h-px my-1" style={{ background: 'var(--color-track)' }} />
 
-                  <ImpactSummary impact={impact} viewerId={viewMode === 'personal' ? me?.id : undefined} onMakeReal={makeImpactReal} purchases={getPurchases(scenario)} />
+                  <ImpactSummary
+                    impact={impact}
+                    viewerId={viewMode === 'personal' ? me?.id : undefined}
+                    onMakeReal={(li) =>
+                      makeImpactReal(
+                        li,
+                        scenario.actions.find(
+                          (a) =>
+                            (a.type === 'loan_overpayment' && a.linkedTargetId === li.loanId) ||
+                            (a.type === 'pay_off_loan' && a.targets?.some((t) => t.id === li.loanId)),
+                        )?.date,
+                      )
+                    }
+                    purchases={getPurchases(scenario)}
+                  />
                 </div>
               )}
             </div>
