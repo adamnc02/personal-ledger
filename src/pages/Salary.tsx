@@ -17,6 +17,7 @@ import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl
 import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow } from '../components/FormButtons'
 import { RecurringChangeConfirmModal, EffectiveDateOccurrenceModal } from '../components/RecurringChangeConfirmModal'
+import { EffectiveDatedChangeFlow, type RecurringChangeField } from '../components/EffectiveDatedChangeFlow'
 import { SavedFlashOverlay, useSavedFlash } from '../components/SavedFlash'
 import { NumberInput } from '../components/NumberInput'
 import { CollapsibleSection } from '../components/CollapsibleSection'
@@ -4266,20 +4267,52 @@ function PeriodEditor({
   }
 
   const fullDraft = draft
+  const snapshotFields: SalaryDraftFields = {
+    grossAnnual: applicableSnapshot.grossAnnual,
+    taxCode: applicableSnapshot.taxCode,
+    studentLoanPlan: applicableSnapshot.studentLoanPlan,
+    payFrequency: applicableSnapshot.payFrequency,
+    deductions: applicableSnapshot.deductions,
+    employerPensionPercent: applicableSnapshot.employerPensionPercent,
+  }
   // UAT follow-up (2026-09-04, Adam-reported): Save had NO disabled state
   // at all here — full brightness the instant this period expanded,
   // regardless of whether anything had changed. Compared against the
   // same applicableSnapshot-derived shape the draft was seeded from.
-  const dirty =
-    JSON.stringify(draft) !==
-    JSON.stringify({
-      grossAnnual: applicableSnapshot.grossAnnual,
-      taxCode: applicableSnapshot.taxCode,
-      studentLoanPlan: applicableSnapshot.studentLoanPlan,
-      payFrequency: applicableSnapshot.payFrequency,
-      deductions: applicableSnapshot.deductions,
-      employerPensionPercent: applicableSnapshot.employerPensionPercent,
-    })
+  const dirty = JSON.stringify(draft) !== JSON.stringify(snapshotFields)
+
+  // 2026-09-09 — closes the gap Adam named explicitly (the "just this
+  // payment / all future" confirm didn't show what was actually
+  // changing, unlike Bills'/Transfers' own diff-confirm step). One row
+  // per changed scalar field; deductions are summarised rather than
+  // diffed line-by-line (a per-deduction diff belongs to the Deduction
+  // list's own edit UI, not this scope-confirm step).
+  function salaryChangeFields(): RecurringChangeField[] {
+    const changes: RecurringChangeField[] = []
+    if (draft.grossAnnual !== snapshotFields.grossAnnual) {
+      changes.push({ label: 'Gross annual salary', from: `£${formatCurrency(snapshotFields.grossAnnual)}`, to: `£${formatCurrency(draft.grossAnnual)}` })
+    }
+    if (draft.taxCode !== snapshotFields.taxCode) {
+      changes.push({ label: 'Tax code', from: snapshotFields.taxCode, to: draft.taxCode })
+    }
+    if (draft.studentLoanPlan !== snapshotFields.studentLoanPlan) {
+      changes.push({ label: 'Student loan', from: STUDENT_LOAN_LABELS[snapshotFields.studentLoanPlan], to: STUDENT_LOAN_LABELS[draft.studentLoanPlan] })
+    }
+    if (draft.payFrequency !== snapshotFields.payFrequency) {
+      changes.push({
+        label: 'Paid',
+        from: snapshotFields.payFrequency === 'four_weekly' ? 'Every 4 weeks (13/yr)' : 'Monthly (12/yr)',
+        to: draft.payFrequency === 'four_weekly' ? 'Every 4 weeks (13/yr)' : 'Monthly (12/yr)',
+      })
+    }
+    if (draft.employerPensionPercent !== snapshotFields.employerPensionPercent) {
+      changes.push({ label: 'Employer pension %', from: `${snapshotFields.employerPensionPercent ?? 0}%`, to: `${draft.employerPensionPercent ?? 0}%` })
+    }
+    if (JSON.stringify(draft.deductions) !== JSON.stringify(snapshotFields.deductions)) {
+      changes.push({ label: 'Deductions', from: `${snapshotFields.deductions.length} deduction${snapshotFields.deductions.length === 1 ? '' : 's'}`, to: `${draft.deductions.length} deduction${draft.deductions.length === 1 ? '' : 's'}` })
+    }
+    return changes
+  }
   const breakdown = calculateNetSalary(fullDraft)
   const periodLabel = draft.payFrequency === 'four_weekly' ? 'every 4 weeks' : 'monthly'
 
@@ -4514,15 +4547,19 @@ function PeriodEditor({
       </button>
 
       {confirming && (
-        <ConfirmSalaryChangeModal
-          nextPaydayLabel={dateIso}
-          onCancel={() => setConfirming(false)}
-          onJustNext={() => {
-            onSaveJustThis(fullDraft)
-            setConfirming(false)
+        <EffectiveDatedChangeFlow
+          scopeStep={{
+            description: `Just this payment (${formatFullDate(dateIso)}), or every payment from then on?`,
+            singleLabel: 'Just this payment',
           }}
-          onAllFuture={() => {
-            onSaveAllFuture(fullDraft)
+          fixedEffectiveFrom={dateIso}
+          occurrences={[]}
+          dateStepDescription=""
+          buildChanges={salaryChangeFields}
+          onCancelAll={() => setConfirming(false)}
+          onCommit={(_effectiveFrom, scope) => {
+            if (scope === 'single') onSaveJustThis(fullDraft)
+            else onSaveAllFuture(fullDraft)
             setConfirming(false)
           }}
         />
@@ -4630,55 +4667,6 @@ function NetPayOverrideControl({
         Cancel
       </button>
     </div>
-  )
-}
-
-function ConfirmSalaryChangeModal({
-  nextPaydayLabel,
-  onCancel,
-  onJustNext,
-  onAllFuture,
-}: {
-  nextPaydayLabel: string | null
-  onCancel: () => void
-  onJustNext: () => void
-  onAllFuture: () => void
-}) {
-  // Portalled to document.body (not rendered inline in the page tree) —
-  // otherwise it sits inside #app-shell, which is a fixed-height,
-  // overflow-hidden container the nav bar is absolutely positioned
-  // within. On iOS that combination clips/misorders a "position: fixed"
-  // descendant against the nav's own stacking context, so despite a
-  // higher z-index the confirm buttons rendered underneath the nav bar
-  // (see the rest of the app's modals — DeductionModal, CategoryIconPickerModal,
-  // etc. — which all portal for exactly this reason). Bottom padding
-  // matches those same modals so the buttons clear the nav bar itself,
-  // not just the safe-area inset.
-  return createPortal(
-    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onCancel}>
-      <div
-        className="w-full max-w-md rounded-t-3xl p-5"
-        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-1">Apply this change to…</h3>
-        <p className="text-sm text-[var(--color-ink-muted)] mb-4">
-          {nextPaydayLabel ? `Just this payment (${nextPaydayLabel}), or every payment from then on?` : 'Just this payment, or every payment from then on?'}
-        </p>
-        <div className="flex flex-col gap-2">
-          <button onClick={onJustNext} className="w-full py-2.5 rounded-full text-sm font-semibold" style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)' }}>
-            Just this payment
-          </button>
-          <button onClick={onAllFuture} className="w-full py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
-            This and all future payments
-          </button>
-          <button onClick={onCancel} className="w-full py-2 text-xs text-[var(--color-ink-muted)]">
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body,
   )
 }
 
