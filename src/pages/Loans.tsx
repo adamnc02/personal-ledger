@@ -15,6 +15,7 @@ import {
   isLoanConfidentlyCalibrated,
   MAX_CALIBRATION_LINES,
   recentAndUpcomingLoanPaymentDates,
+  applyLoanMonthlyPaymentChange,
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
@@ -30,7 +31,7 @@ import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
-import { RecurringChangeConfirmModal, EffectiveDateOccurrenceModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
+import { EffectiveDatedChangeFlow, type RecurringChangeField } from '../components/EffectiveDatedChangeFlow'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { peopleWithIncomeCount } from '../lib/household'
@@ -811,18 +812,16 @@ function LoanEditPanel({
   // default to today," so this stays proportionate rather than building
   // a parallel picker UI for one field.
   // UAT 2026-09-08 (7-bug8.2-confirm-loans note): replaced by a picker-
-  // first flow (see choosingLocationEffectiveDate below), matching Bills/
-  // Pots — this bare date field with no occurrence list to anchor to was
-  // the specific thing Adam asked to remove.
-  const [choosingLocationEffectiveDate, setChoosingLocationEffectiveDate] = useState(false)
-  // Batch 7 (2026-09-07, Bug 8 app-wide sweep) — same "are you sure, here's
-  // what's changing" confirmation Bills.tsx's BillEditPanel now shows
-  // before a location reassignment commits, extended to loans per Adam's
-  // own spec ("used for anything RECURRING... relating to bills /
-  // transactions / loans / transfers"). Holds a closure that performs the
-  // exact same commit this Save button always did, so it's the confirm
-  // modal — not this button — that actually applies the change.
-  const [pendingLocationConfirm, setPendingLocationConfirm] = useState<{ effectiveFrom: string; changes: RecurringChangeField[]; commit: (effectiveFrom: string) => void } | null>(null)
+  // first flow, matching Bills/Pots — this bare date field with no
+  // occurrence list to anchor to was the specific thing Adam asked to
+  // remove. Generalised 2026-09-09 into the shared EffectiveDatedChangeFlow
+  // (same changeKind convention as BillEditPanel) to also cover a
+  // monthlyPayment change, now that Loan has a real monthlyPaymentHistory
+  // mechanism (ledgerLoans.ts's resolveMonthlyPayment/
+  // applyLoanMonthlyPaymentChange) — no scope ("just this/all future")
+  // step for monthlyPayment, per Adam's own call: a loan's own payment
+  // has no single-occurrence concept, only a permanent change.
+  const [changeKind, setChangeKind] = useState<'monthlyPayment' | 'location' | null>(null)
 
   // Prefill only needs to seed the initial draft/form state above — once
   // this panel has mounted with it, tell the parent to forget it so a
@@ -840,8 +839,7 @@ function LoanEditPanel({
   useEffect(() => {
     if (!isOpen) {
       setDraft(draftFromLoan(loan))
-      setChoosingLocationEffectiveDate(false)
-      setPendingLocationConfirm(null)
+      setChangeKind(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen])
@@ -856,8 +854,7 @@ function LoanEditPanel({
   // just step back to the previous screen.
   function cancelEverything() {
     setDraft(draftFromLoan(loan))
-    setChoosingLocationEffectiveDate(false)
-    setPendingLocationConfirm(null)
+    setChangeKind(null)
     onCancel()
   }
 
@@ -1009,36 +1006,44 @@ function LoanEditPanel({
 
       {/* UAT 2026-09-08 (7-bug8.2-confirm-loans note) — picker-first list
           of real upcoming payment dates, replacing the plain "changes
-          take effect from" calendar field, matching Bills/Pots. */}
-      {choosingLocationEffectiveDate && (
-        <EffectiveDateOccurrenceModal
-          description={`${loan.name} is moving to ${loanLocationLabel(draft.location, draft.potId, pots)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`}
+          take effect from" calendar field, matching Bills/Pots.
+          Generalised 2026-09-09 to also cover a monthlyPayment change
+          (same shared component, same combined-in-one-flow convention
+          BillEditPanel uses when amount+location change together). */}
+      {changeKind && (
+        <EffectiveDatedChangeFlow
           occurrences={recentAndUpcomingLoanPaymentDates(loan, new Date())}
-          onCancel={cancelEverything}
-          onChoose={(effectiveFrom) => {
-            setPendingLocationConfirm({
-              effectiveFrom,
-              changes: [{ label: 'Location', from: loanLocationLabel(loan.location, loan.potId, pots), to: loanLocationLabel(draft.location, draft.potId, pots) }],
-              commit: (effectiveFrom) => {
-                onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
-                const { location: _l, potId: _p, ...rest } = draft
-                onSave(rest)
-              },
-            })
-            setChoosingLocationEffectiveDate(false)
+          dateStepDescription={
+            changeKind === 'monthlyPayment'
+              ? `${loan.name}'s payment is changing from £${formatCurrency(loan.monthlyPayment)} to £${formatCurrency(draft.monthlyPayment)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
+              : `${loan.name} is moving to ${loanLocationLabel(draft.location, draft.potId, pots)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
+          }
+          buildChanges={() => {
+            const changes: RecurringChangeField[] = []
+            if (changeKind === 'monthlyPayment') changes.push({ label: 'Monthly payment', from: `£${formatCurrency(loan.monthlyPayment)}`, to: `£${formatCurrency(draft.monthlyPayment)}` })
+            const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
+            if (locationChanged) changes.push({ label: 'Location', from: loanLocationLabel(loan.location, loan.potId, pots), to: loanLocationLabel(draft.location, draft.potId, pots) })
+            return changes
           }}
-        />
-      )}
-
-      {pendingLocationConfirm && (
-        <RecurringChangeConfirmModal
-          effectiveFrom={pendingLocationConfirm.effectiveFrom}
-          changes={pendingLocationConfirm.changes}
-          affectsClearedBalance={pendingLocationConfirm.effectiveFrom <= todayIso()}
-          onCancel={cancelEverything}
-          onConfirm={() => {
-            pendingLocationConfirm.commit(pendingLocationConfirm.effectiveFrom)
-            setPendingLocationConfirm(null)
+          affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
+          onCancelAll={cancelEverything}
+          onCommit={(effectiveFrom) => {
+            const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
+            if (changeKind === 'monthlyPayment') {
+              const paymentPatch = applyLoanMonthlyPaymentChange(loan, draft.monthlyPayment, effectiveFrom)
+              if (locationChanged) {
+                const { location: _l, potId: _p, ...rest } = draft
+                onSave({ ...rest, ...paymentPatch })
+                onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+              } else {
+                onSave({ ...draft, ...paymentPatch })
+              }
+            } else {
+              onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+              const { location: _l, potId: _p, ...rest } = draft
+              onSave(rest)
+            }
+            setChangeKind(null)
           }}
         />
       )}
@@ -1047,20 +1052,26 @@ function LoanEditPanel({
         onCancel={onCancel}
         saveDisabled={!dirty}
         onSave={() => {
+          const monthlyPaymentChanged = draft.monthlyPayment !== loan.monthlyPayment
           const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
-          if (!locationChanged) {
-            onSave(draft)
+          const hasOccurrences = recentAndUpcomingLoanPaymentDates(loan, new Date()).length > 0
+          if (monthlyPaymentChanged && hasOccurrences) {
+            setChangeKind('monthlyPayment')
+            return
+          }
+          if (locationChanged && hasOccurrences) {
+            setChangeKind('location')
             return
           }
           // No occurrences to anchor a date to yet — apply immediately,
           // dated today, same "nothing to pick from" guard Bills.tsx uses.
-          if (recentAndUpcomingLoanPaymentDates(loan, new Date()).length === 0) {
+          if (locationChanged) {
             onAssignLocation(draft.location, todayIso(), draft.location === 'pot' ? draft.potId : undefined)
             const { location: _l, potId: _p, ...rest } = draft
             onSave(rest)
             return
           }
-          setChoosingLocationEffectiveDate(true)
+          onSave(draft)
         }}
       />
         </>

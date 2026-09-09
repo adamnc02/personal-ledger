@@ -552,6 +552,19 @@ export interface Loan {
   id: string
   name: string
   monthlyPayment: number
+  // Historized effective-dating for the loan's own standing payment
+  // amount (2026-09-09, unified effective-dating work) — mirrors
+  // RecurringTemplate's amountEffectiveFrom/amountHistory exactly (same
+  // field shapes, same resolution rule in ledgerLoans.ts's
+  // resolveMonthlyPayment). buildLoanSchedule walks this per-period so a
+  // change only reaches periods on/after `effectiveFrom`; anything
+  // before keeps whatever payment was actually in effect at the time,
+  // the same guarantee Bills already gives its own amount changes. Only
+  // `monthlyPayment` gets this (not apr/termMonths — Adam's own call:
+  // those describe what the loan always contractually was, not a new
+  // arrangement starting from a chosen date).
+  monthlyPaymentEffectiveFrom?: string
+  monthlyPaymentHistory?: { effectiveFrom: string; amount: number }[]
   termMonths: number
   startDate: string // ISO date of first payment
   // Derived at render time from monthlyPayment × termMonths, adjusted for

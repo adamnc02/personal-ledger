@@ -131,6 +131,51 @@ export function scheduledLoanRecurringOverpaymentDates(loan: Loan, rangeStart: D
     .filter((date) => date >= rangeStartIso && date <= rangeEndIso && date >= r.startDate && (!r.endDate || date <= r.endDate))
 }
 
+/**
+ * What `loan.monthlyPayment` resolves to on a specific date, once a
+ * `monthlyPaymentHistory` entry exists — mirrors schedule.ts's
+ * resolveTemplateAmount exactly, including its tie-break-by-recording-
+ * order rule (the LATER array index wins on an exact-date collision,
+ * since a loan's first-ever payment edit routinely offers the loan's own
+ * startDate as the very first picker option, which is also the fallback
+ * "prior value" date applyLoanMonthlyPaymentChange records below — the
+ * same real, not-just-theoretical collision resolveTemplateAmount's own
+ * comment documents for Bills).
+ */
+export function resolveMonthlyPayment(loan: Loan, dateIso: string): number {
+  const candidates: { effectiveFrom: string; amount: number }[] = [...(loan.monthlyPaymentHistory ?? [])]
+  if (loan.monthlyPaymentEffectiveFrom) candidates.push({ effectiveFrom: loan.monthlyPaymentEffectiveFrom, amount: loan.monthlyPayment })
+  if (candidates.length === 0) return loan.monthlyPayment
+
+  const applicable = candidates
+    .map((c, index) => ({ ...c, index }))
+    .filter((c) => c.effectiveFrom <= dateIso)
+    .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom) || b.index - a.index)
+  return applicable[0]?.amount ?? loan.monthlyPayment
+}
+
+/**
+ * Builds the patch to apply when a loan's own standing monthlyPayment
+ * changes and the person has picked which payment it should take effect
+ * from (LoanEditPanel's "which payment does this apply from" step) —
+ * preserves the OLD amount as a history entry, exactly like
+ * schedule.ts's applyTemplateAmountChange. Falls back to `startDate` (a
+ * loan's own equivalent of a bill's anchorDate) for the very first edit's
+ * "prior value" entry.
+ */
+export function applyLoanMonthlyPaymentChange(
+  loan: Loan,
+  newAmount: number,
+  effectiveFrom: string,
+): Pick<Loan, 'monthlyPayment' | 'monthlyPaymentEffectiveFrom' | 'monthlyPaymentHistory'> {
+  const priorEntry = { effectiveFrom: loan.monthlyPaymentEffectiveFrom ?? loan.startDate, amount: loan.monthlyPayment }
+  return {
+    monthlyPayment: newAmount,
+    monthlyPaymentEffectiveFrom: effectiveFrom,
+    monthlyPaymentHistory: [...(loan.monthlyPaymentHistory ?? []), priorEntry],
+  }
+}
+
 /** Reconciles pausedDates against a full desired-pause-set from the picker — same reconcile-the-whole-window logic as schedule.ts's setPausedTemplateOccurrences, just against a plain date list instead of RecurringOccurrenceOverride objects (Phase 4). */
 export function setPausedLoanRecurringOverpaymentDates(loan: Loan, windowDates: string[], pausedDates: string[]): LoanRecurringOverpayment | undefined {
   if (!loan.recurringOverpayment) return undefined
@@ -215,10 +260,18 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
   // dated on or before its own payment date, not just same-month matches.
   const overpayments = loan.overpayments.slice().sort((a, b) => a.date.localeCompare(b.date))
   let overpaymentIndex = 0
+  // Once a reduce_payment recast has ever fired for this loan, it fully
+  // owns the payment figure from that point on — a monthlyPaymentHistory
+  // entry describes a hypothetical standing payment the recast has
+  // already superseded with a real, computed re-amortisation, so it's
+  // deliberately never consulted again after this flips true (Adam's own
+  // call on the interaction between the two mechanisms).
+  let recastActive = false
 
   for (let i = 0; i < MAX_SCHEDULE_ENTRIES && balance > 0.005; i++) {
     const paymentDate = addMonths(start, i)
     const paymentDateIso = toIso(paymentDate)
+    if (!recastActive) currentPayment = resolveMonthlyPayment(loan, paymentDateIso)
 
     const interestApplied = round2(convention.interestForPeriod(balance, previousPeriodDate, paymentDate, monthlyRate, loan.principal))
     const balanceWithInterest = round2(balance + interestApplied)
@@ -292,6 +345,7 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
     if (recastToReducePayment && balance > 0.005) {
       const periodsRemaining = Math.max(1, loan.termMonths - i)
       currentPayment = round2(standardPayment(balance, monthlyRate, periodsRemaining))
+      recastActive = true
     }
 
     schedule.push({
