@@ -24,6 +24,7 @@ import { EditField } from '../components/EditField'
 import { hasSalaryConfigured } from '../lib/household'
 import { pensionOccurrencePreviews, applyPensionAmountChange, newPension, scheduledPensionDates, setPausedPensionOccurrences, resolvePensionAmount } from '../lib/pensionLedger'
 import { JointAccountSetupModal } from '../components/JointAccountSetupModal'
+import { RebalanceAccountsModal, type RebalanceTarget } from '../components/RebalanceAccountsModal'
 import { formatFullDate } from '../lib/format'
 import {
   newSavingsPot,
@@ -2385,6 +2386,7 @@ export function Salary() {
   // wizard (Savings/Pots/Joint alike) rather than each row rebuilding it.
   const transferLocationOptions = buildTransferLocationOptions(data.savingsPots, data.pots, !!data.jointAccount, data.primaryPersonId)
   const [editingJointAccount, setEditingJointAccount] = useState(false)
+  const [rebalancing, setRebalancing] = useState(false)
   // Batch 9 (2026-09-07, Bug 11) — same "one shared flash for main Save/
   // Log/Recurring" pattern as PotRow/SavingsPotRow, for the Joint Account
   // card (which lives inline in this component rather than its own row).
@@ -3120,6 +3122,52 @@ export function Salary() {
                 setExpandedPersonId(null)
               }}
               onClose={() => setSettingsOpenFor(null)}
+            />
+          )
+        })()}
+
+      {/* "Rebalance all accounts" (2026-09-09, Adam-specified) — a single
+          wide button at the bottom of the Wallet page. Walks Adam through
+          picking any mix of Pots/Savings Pots/Joint Account/Current
+          Accounts, then one modal per selected account to set a new
+          opening balance + date. Every one of these already folds its
+          balance from openingBalance forward and ignores anything dated
+          before openingDate/openingBalanceDate (see potLedger.ts/
+          savingsPotLedger.ts/jointAccountLedger.ts/projection.ts), so
+          writing the new anchor here is already the "hide prior history"
+          reset — locked to each account's own new date, no shared cutoff. */}
+      <button
+        onClick={() => setRebalancing(true)}
+        className="w-full py-3 rounded-full text-sm font-semibold text-white mt-6"
+        style={{ background: 'var(--color-coral)' }}
+      >
+        Rebalance all accounts
+      </button>
+
+      {rebalancing &&
+        (() => {
+          const targets: RebalanceTarget[] = [
+            ...data.pots.map((p) => ({ key: `pot:${p.id}`, label: p.name, sublabel: 'Pot' })),
+            ...data.savingsPots.map((p) => ({ key: `savingsPot:${p.id}`, label: p.name, sublabel: 'Savings pot' })),
+            ...(data.jointAccount ? [{ key: 'joint', label: 'Joint Account' }] : []),
+            ...data.people
+              .filter((person) => data.payCycles.some((pc) => pc.personId === person.id))
+              .map((person) => ({ key: `personal:${person.id}`, label: `${person.name}'s current account`, sublabel: 'Current account' })),
+          ]
+          return (
+            <RebalanceAccountsModal
+              targets={targets}
+              onCancel={() => setRebalancing(false)}
+              onSave={(results) => {
+                for (const { key, amount, date } of results) {
+                  const [kind, id] = key.split(':')
+                  if (kind === 'pot') updatePot(id, { openingBalance: amount, openingDate: date })
+                  else if (kind === 'savingsPot') updateSavingsPot(id, { openingBalance: amount, openingDate: date })
+                  else if (kind === 'joint') setJointAccountOpening(amount, date)
+                  else if (kind === 'personal') updatePayCycle(id, { openingBalance: amount, openingBalanceDate: date })
+                }
+                setRebalancing(false)
+              }}
             />
           )
         })()}
