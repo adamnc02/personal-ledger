@@ -21,6 +21,7 @@ import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { addYears, addDays } from 'date-fns'
 import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2 } from '../types/ledger'
+import { LoggedPaymentList } from './Loans'
 
 const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   cash: 'Cash',
@@ -274,6 +275,10 @@ export function Expenses() {
     updatePot,
     logTransfer,
     addRecurringTransfer,
+    updateLoanOverpayment,
+    removeLoanOverpayment,
+    updateCreditCardLumpPayment,
+    removeCreditCardLumpPayment,
   } = useLedgerData()
   const [mode, setMode] = useState<PageMode>('transactions')
   const [adding, setAdding] = useState(false)
@@ -337,11 +342,29 @@ export function Expenses() {
   // creation wizard already uses.
   const transferLocationOptions = buildTransferLocationOptions(data.savingsPots, data.pots, !!data.jointAccount, data.primaryPersonId)
 
-  // The Transfer pill only appears once there's somewhere to transfer TO
-  // — a savings pot, the joint account, or a pot — same "invisible until
-  // it would do something" rule the old Savings/Joint/Pots pills used
+  // 2026-09-09 session (Adam-specified) — loan/credit-card overpayments
+  // now live here too, same reasoning as the transfer rows above: the
+  // messy bit was showing a running list of past overpayments inline on
+  // the Borrowing page's expanded card, not the log button itself (that
+  // stays right where it is). Only loans/cards that actually HAVE a
+  // logged overpayment show a row — a loan/card with none yet stays
+  // invisible here, same "nothing to show yet" rule transferTransactions
+  // already follows.
+  const loansWithOverpayments = data.loans.filter((l) => l.overpayments.length > 0)
+  const cardsWithLumpPayments = data.creditCards.filter((c) => c.lumpPayments.length > 0)
+
+  // The Transfer pill appears once there's somewhere to transfer TO — a
+  // savings pot, the joint account, a pot — OR a loan/credit card with at
+  // least one overpayment logged against it, same "invisible until it
+  // would do something" rule the old Savings/Joint/Pots pills used
   // individually.
-  const pageModes: PageMode[] = ['transactions', 'recurring', ...(data.savingsPots.length > 0 || data.jointAccount || data.pots.length > 0 ? (['transfer'] as const) : [])]
+  const pageModes: PageMode[] = [
+    'transactions',
+    'recurring',
+    ...(data.savingsPots.length > 0 || data.jointAccount || data.pots.length > 0 || loansWithOverpayments.length > 0 || cardsWithLumpPayments.length > 0
+      ? (['transfer'] as const)
+      : []),
+  ]
   const modeLabel: Record<PageMode, string> = { transactions: 'Transactions', recurring: 'Recurring', transfer: 'Transfers' }
 
   return (
@@ -532,6 +555,37 @@ export function Expenses() {
                 />
               )}
             />
+
+            {/* 2026-09-09 session (Adam-specified) — loan/credit-card
+                overpayments, logged from the Borrowing page's own "+ Log
+                an overpayment"/"+ Log a payment" button (unchanged, still
+                there), now live here rather than as an inline list on the
+                expanded card — same as a pot/savings pot/joint account
+                deposit never showing its own history on the Wallet page. */}
+            {(loansWithOverpayments.length > 0 || cardsWithLumpPayments.length > 0) && (
+              <div className="flex flex-col gap-3 mt-2">
+                {loansWithOverpayments.map((loan) => (
+                  <div key={loan.id}>
+                    <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">{loan.name} overpayments</h3>
+                    <LoggedPaymentList
+                      payments={loan.overpayments}
+                      onUpdate={(overpaymentId, amount, date, note) => updateLoanOverpayment(loan.id, overpaymentId, amount, date, note)}
+                      onRemove={(overpaymentId) => removeLoanOverpayment(loan.id, overpaymentId)}
+                    />
+                  </div>
+                ))}
+                {cardsWithLumpPayments.map((card) => (
+                  <div key={card.id}>
+                    <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">{card.name} payments</h3>
+                    <LoggedPaymentList
+                      payments={card.lumpPayments}
+                      onUpdate={(lumpPaymentId, amount, date, note) => updateCreditCardLumpPayment(card.id, lumpPaymentId, amount, date, note)}
+                      onRemove={(lumpPaymentId) => removeCreditCardLumpPayment(card.id, lumpPaymentId)}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </>
       )}
