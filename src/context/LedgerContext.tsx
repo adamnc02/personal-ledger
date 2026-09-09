@@ -553,7 +553,27 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     return id
   }
   const updateLoan: LedgerContextValue['updateLoan'] = (id, updates) => {
-    setDataState((prev) => ({ ...prev, loans: prev.loans.map((l) => (l.id === id ? { ...l, ...updates } : l)) }))
+    setDataState((prev) => ({
+      ...prev,
+      loans: prev.loans.map((l) => {
+        if (l.id !== id) return l
+        const next = { ...l, ...updates }
+        // 2026-09-09 followup (Adam-reported) — a pot belongs to one
+        // person; reassigning the loan's owner must not leave its
+        // recurring overpayment silently still pointing at a pot that
+        // belonged to the OLD owner. Falls back to "follow the loan"
+        // (undefined location), same as never having set an override —
+        // the person picks a real replacement themselves next time they
+        // open it on the Overpayments pill.
+        if (updates.ownerId && updates.ownerId !== l.ownerId && next.recurringOverpayment?.location === 'pot') {
+          const stillOwned = prev.pots.some((p) => p.id === next.recurringOverpayment?.potId && p.personId === updates.ownerId)
+          if (!stillOwned) {
+            next.recurringOverpayment = { ...next.recurringOverpayment, location: undefined, potId: undefined }
+          }
+        }
+        return next
+      }),
+    }))
   }
   const removeLoan: LedgerContextValue['removeLoan'] = (id) => {
     setDataState((prev) => {

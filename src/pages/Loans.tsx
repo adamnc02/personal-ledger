@@ -786,18 +786,13 @@ function LoanEditPanel({
    * no Cancel at all; collapses the card without saving. */
   onCancel: () => void
 }) {
-  // A 'recurring' prefill (from the What-if page's "Make this a real
-  // recurring overpayment" button) seeds the draft's recurringOverpayment
-  // straight away rather than the loan's current saved value — the user
-  // still has to hit Save to actually commit it. A 'payoff' prefill
-  // instead pre-opens the one-off log form below (see loggingOverpayment).
-  const [draft, setDraft] = useState<LoanDraft>(() => {
-    const base = draftFromLoan(loan)
-    if (overpaymentPrefill && overpaymentPrefill.mode === 'recurring') {
-      return { ...base, recurringOverpayment: { startDate: todayIso(), amount: { type: 'fixed', amount: overpaymentPrefill.amount } } }
-    }
-    return base
-  })
+  // 2026-09-09 followup — a 'recurring' prefill from the What-if page's
+  // "Make this a real recurring overpayment" button now goes straight to
+  // the Transactions page's Overpayments pill instead of here (recurring
+  // overpayments are no longer created/edited on the Borrowing page at
+  // all — see Scenarios.tsx's makeImpactReal), so overpaymentPrefill
+  // reaching this panel is always a 'payoff' (one-off) prefill now.
+  const [draft, setDraft] = useState<LoanDraft>(() => draftFromLoan(loan))
   const [loggingOverpayment, setLoggingOverpayment] = useState(overpaymentPrefill?.mode === 'payoff')
   const [settlingLoan, setSettlingLoan] = useState(false)
   const [calibratingLoan, setCalibratingLoan] = useState(false)

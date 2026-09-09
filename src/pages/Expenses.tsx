@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { formatCurrency, formatFullDate, formatMonthYear } from '../lib/format'
 import { Plus, Trash2, X, ChevronDown, ChevronUp, ArrowRight, ArrowLeftRight } from 'lucide-react'
@@ -286,6 +287,25 @@ export function Expenses() {
   } = useLedgerData()
   const [mode, setMode] = useState<PageMode>('transactions')
   const [adding, setAdding] = useState(false)
+  // 2026-09-09 followup — the What-if page's "Make this a real recurring
+  // overpayment" button lands here now (see Scenarios.tsx's
+  // makeImpactReal), same router-state handoff pattern Loans.tsx already
+  // uses for its own overpaymentPrefill.
+  const routerLocation = useLocation()
+  const navigate = useNavigate()
+  const [recurringOverpaymentPrefill, setRecurringOverpaymentPrefill] = useState<{ loanId: string; amount: number } | null>(null)
+  useEffect(() => {
+    const prefill = (routerLocation.state as { overpaymentPrefill?: { targetKind: 'loan' | 'credit_card'; targetId: string; mode: 'payoff' | 'recurring'; amount: number } } | null)?.overpaymentPrefill
+    if (prefill && prefill.mode === 'recurring' && prefill.targetKind === 'loan') {
+      setMode('overpayments')
+      setRecurringOverpaymentPrefill({ loanId: prefill.targetId, amount: prefill.amount })
+      setAdding(true)
+      // Consumed into local state above — clear the router state so a
+      // manual close/reopen later doesn't re-trigger it.
+      navigate('.', { replace: true, state: null })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   // Batch 9 (2026-09-07, Bug 11) — a brand-new ad-hoc transaction/
   // recurring transaction/transfer has no row to flash at the moment its
   // own Save fires (the row only mounts on the NEXT render) — same
@@ -579,18 +599,25 @@ export function Expenses() {
               loans={activeLoans}
               cards={activeCards}
               pots={data.pots}
-              onCancel={() => setAdding(false)}
+              prefill={recurringOverpaymentPrefill}
+              onCancel={() => {
+                setAdding(false)
+                setRecurringOverpaymentPrefill(null)
+              }}
               onSaveLoan={(loanId, amount, date, note, recastMode) => {
                 logLoanOverpayment(loanId, amount, date, note, recastMode)
                 setAdding(false)
+                setRecurringOverpaymentPrefill(null)
               }}
               onSaveCard={(cardId, amount, date, note) => {
                 logCreditCardLumpPayment(cardId, amount, date, note)
                 setAdding(false)
+                setRecurringOverpaymentPrefill(null)
               }}
               onSaveRecurring={(loanId, recurringOverpayment) => {
                 updateLoan(loanId, { recurringOverpayment })
                 setAdding(false)
+                setRecurringOverpaymentPrefill(null)
               }}
             />
           )}
@@ -1290,6 +1317,7 @@ function OverpaymentCreateForm({
   loans,
   cards,
   pots,
+  prefill,
   onCancel,
   onSaveLoan,
   onSaveCard,
@@ -1298,12 +1326,20 @@ function OverpaymentCreateForm({
   loans: Loan[]
   cards: CreditCard[]
   pots: Pot[]
+  /** 2026-09-09 followup — the What-if page's "Make this a real recurring
+   * overpayment" button lands here pre-filled, same wizard as every other
+   * entry point rather than a separate UI (see Scenarios.tsx's
+   * makeImpactReal). Amount/mode/target are seeded straight in; the
+   * person still steps through From (unless the loan's joint)/recast/
+   * date/Save themselves. */
+  prefill?: { loanId: string; amount: number } | null
   onCancel: () => void
   onSaveLoan: (loanId: string, amount: number, date: string, note: string | undefined, recastMode: 'reduce_term' | 'reduce_payment') => void
   onSaveCard: (cardId: string, amount: number, date: string, note?: string) => void
   onSaveRecurring: (loanId: string, recurringOverpayment: LoanRecurringOverpayment) => void
 }) {
-  const [mode, setMode] = useState<OverpaymentMode>('one_off')
+  const prefillLoan = prefill ? loans.find((l) => l.id === prefill.loanId) : undefined
+  const [mode, setMode] = useState<OverpaymentMode>(prefillLoan ? 'recurring' : 'one_off')
   // Recurring is loan-only — a credit card target is never offered once
   // Recurring is picked.
   const targets: OverpaymentTarget[] =
@@ -1311,11 +1347,11 @@ function OverpaymentCreateForm({
       ? loans.map((l) => ({ kind: 'loan' as const, id: l.id, label: `Loan: ${l.name}` }))
       : [...loans.map((l) => ({ kind: 'loan' as const, id: l.id, label: `Loan: ${l.name}` })), ...cards.map((c) => ({ kind: 'card' as const, id: c.id, label: `Credit Card: ${c.name}` }))]
 
-  const [step, setStep] = useState<OverpaymentFormStep>('amount')
-  const [amount, setAmount] = useState('')
+  const [step, setStep] = useState<OverpaymentFormStep>(prefillLoan ? (prefillLoan.location === 'joint' ? 'recast' : 'from') : 'amount')
+  const [amount, setAmount] = useState(prefillLoan ? String(prefill!.amount) : '')
   const [recurringAmountType, setRecurringAmountType] = useState<'fixed' | 'percent_of_balance'>('fixed')
   const [recurringPercent, setRecurringPercent] = useState('5')
-  const [target, setTarget] = useState<OverpaymentTarget | null>(null)
+  const [target, setTarget] = useState<OverpaymentTarget | null>(prefillLoan ? { kind: 'loan', id: prefillLoan.id, label: `Loan: ${prefillLoan.name}` } : null)
   const [fromLocation, setFromLocation] = useState<'personal' | 'pot' | undefined>(undefined)
   const [fromPotId, setFromPotId] = useState<string | undefined>(undefined)
   const [recastMode, setRecastMode] = useState<'reduce_term' | 'reduce_payment'>('reduce_term')
@@ -1899,11 +1935,28 @@ function LoanRecurringOverpaymentEditForm({
     draft.recastMode !== (value.recastMode ?? 'reduce_term')
   const amountValid = amountType === 'fixed' ? Number(fixedAmount) > 0 : Number(percent) > 0
 
+  function amountLabel(a: LoanRecurringOverpayment['amount']): string {
+    return a.type === 'fixed' ? `£${formatCurrency(a.amount)}` : `${a.percent}% of balance`
+  }
+
   function handleSave() {
+    // 2026-09-09 followup (Adam-reported) — "used for anything RECURRING
+    // in the app that changed" applies to EVERY field here, not just
+    // location: same confirm-diff modal Bills/recurring transfers show,
+    // one line per changed field.
     const locationChanged = draft.location !== value.location || (draft.location === 'pot' && draft.potId !== value.potId)
+    const changes: RecurringChangeField[] = []
+    if (JSON.stringify(draft.amount) !== JSON.stringify(value.amount)) changes.push({ label: 'Amount', from: amountLabel(value.amount), to: amountLabel(draft.amount) })
+    if (locationChanged) changes.push({ label: 'Paid from', from: overpaymentFromLabel(loan, pots, value.location, value.potId), to: overpaymentFromLabel(loan, pots, draft.location, draft.potId) })
+    if (draft.recastMode !== (value.recastMode ?? 'reduce_term')) {
+      changes.push({ label: 'How it\'s applied', from: value.recastMode === 'reduce_payment' ? 'Keep the same length' : 'Keep payment the same', to: draft.recastMode === 'reduce_payment' ? 'Keep the same length' : 'Keep payment the same' })
+    }
+    if (draft.startDate !== value.startDate) changes.push({ label: 'Start date', from: value.startDate, to: draft.startDate })
+    if (draft.endDate !== value.endDate) changes.push({ label: 'End date', from: value.endDate ?? 'None', to: draft.endDate ?? 'None' })
+
     const commit = () => onSave(draft)
-    if (locationChanged) {
-      setPendingConfirm({ changes: [{ label: 'Paid from', from: overpaymentFromLabel(loan, pots, value.location, value.potId), to: overpaymentFromLabel(loan, pots, draft.location, draft.potId) }], commit })
+    if (changes.length > 0) {
+      setPendingConfirm({ changes, commit })
     } else {
       commit()
     }
@@ -1912,7 +1965,12 @@ function LoanRecurringOverpaymentEditForm({
   const windowDates = scheduledLoanRecurringOverpaymentDates(loan, addMonths(new Date(), -2), addMonths(new Date(), 12))
 
   return (
-    <div className="px-3 pb-3 flex flex-col gap-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
+    // No border-t here, deliberately (2026-09-09 followup, Adam-reported
+    // duplicate divider) — PausedOccurrencesControl below already owns
+    // its own top border/spacing for every one of its call sites app-
+    // wide, and it's the first thing rendered here, so adding a second
+    // one on this wrapper doubled up the line right above it.
+    <div className="px-3 pb-3 flex flex-col gap-3">
       {pendingConfirm && (
         <RecurringChangeConfirmModal
           effectiveFrom={todayIso()}
@@ -1927,22 +1985,20 @@ function LoanRecurringOverpaymentEditForm({
       )}
 
       {/* Adam's own spec — the only button above the editable fields. */}
-      <div className="pt-2">
-        <PausedOccurrencesControl
-          windowDates={windowDates}
-          currentlyPaused={new Set(value.pausedDates ?? [])}
-          amountForDate={() => (value.amount.type === 'fixed' ? value.amount.amount : Math.round(((loan.principal * value.amount.percent) / 100) * 100) / 100)}
-          itemLabel="overpayments"
-          nextPaymentPreview={(tentative) => {
-            const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, tentative)
-            return windowDates.find((d) => !merged?.pausedDates?.includes(d)) ?? null
-          }}
-          onSave={(pausedDates) => {
-            const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, pausedDates)
-            if (merged) onSave(merged)
-          }}
-        />
-      </div>
+      <PausedOccurrencesControl
+        windowDates={windowDates}
+        currentlyPaused={new Set(value.pausedDates ?? [])}
+        amountForDate={() => (value.amount.type === 'fixed' ? value.amount.amount : Math.round(((loan.principal * value.amount.percent) / 100) * 100) / 100)}
+        itemLabel="overpayments"
+        nextPaymentPreview={(tentative) => {
+          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, tentative)
+          return windowDates.find((d) => !merged?.pausedDates?.includes(d)) ?? null
+        }}
+        onSave={(pausedDates) => {
+          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, pausedDates)
+          if (merged) onSave(merged)
+        }}
+      />
 
       <div className="flex gap-2">
         <button

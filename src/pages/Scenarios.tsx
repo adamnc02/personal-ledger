@@ -121,12 +121,15 @@ export function Scenarios() {
   }
 
   // "Convert to real" for a loan/credit-card impact — rather than
-  // auto-saving here, the user is transported to the Borrowing page with the
-  // target row already open and the relevant fields pre-populated (a
-  // one-off payoff pre-fills the log-an-overpayment/log-a-payment form; a
-  // recurring overpayment pre-fills the loan's recurring overpayment
-  // fields), and saves it themselves from there. See Loans.tsx's
-  // OverpaymentPrefill/overpaymentPrefill handling.
+  // auto-saving here, the user is transported to wherever that kind of
+  // overpayment is actually created and saves it themselves from there:
+  // a one-off payoff goes to the Borrowing page (pre-fills the
+  // log-an-overpayment/log-a-payment form — see Loans.tsx's
+  // OverpaymentPrefill/overpaymentPrefill handling); a recurring
+  // overpayment goes to the Transactions page's Overpayments pill
+  // instead (2026-09-09 followup — recurring overpayments are no longer
+  // created/edited on the Borrowing page at all), pre-filling the same
+  // picker-first wizard used everywhere else.
   function makeImpactReal(li: LoanImpact) {
     if (li.kind === 'payoff') {
       navigate('/loans', {
@@ -141,7 +144,13 @@ export function Scenarios() {
         },
       })
     } else if (li.kind === 'overpayment' && li.targetKind === 'loan') {
-      navigate('/loans', {
+      // 2026-09-09 followup (Adam-specified) — recurring overpayments are
+      // no longer created or edited on the Borrowing page at all, only
+      // from the Transactions page's Overpayments pill (same picker-first
+      // wizard as every other entry point). A one-off payoff (above)
+      // still goes to the Borrowing page, which still owns "+ Log an
+      // overpayment".
+      navigate('/expenses', {
         state: {
           overpaymentPrefill: {
             targetKind: 'loan',
