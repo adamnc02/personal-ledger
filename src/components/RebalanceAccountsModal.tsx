@@ -90,10 +90,19 @@ export function RebalanceAccountsModal({
     )
   }
 
-  const key = selected[step]
+  // 2026-09-09 followup (Adam-reported) — step through selected accounts
+  // in the same fixed order they're listed in on the checklist, not
+  // click order. Click order made the walkthrough depend on which
+  // order the boxes happened to get ticked in, which is where "Joint
+  // Account never appeared in the flow" came from — it hadn't actually
+  // vanished, it was just wherever the click order put it, easy to lose
+  // track of. This makes the sequence predictable and matches what's on
+  // screen in the checklist.
+  const orderedSelected = targets.filter((t) => selected.includes(t.key)).map((t) => t.key)
+  const key = orderedSelected[step]
   const target = targets.find((t) => t.key === key)!
   const current = values[key] ?? { amount: '', date: todayIso() }
-  const isLast = step === selected.length - 1
+  const isLast = step === orderedSelected.length - 1
   const amountNumber = Number(current.amount)
   const canProceed = current.amount.trim() !== '' && !Number.isNaN(amountNumber) && !!current.date
 
@@ -104,7 +113,7 @@ export function RebalanceAccountsModal({
   const advance = () => {
     if (isLast) {
       onSave(
-        selected.map((k) => ({
+        orderedSelected.map((k) => ({
           key: k,
           amount: Number(values[k]?.amount ?? 0),
           date: values[k]?.date ?? todayIso(),
@@ -123,7 +132,7 @@ export function RebalanceAccountsModal({
         onClick={(e) => e.stopPropagation()}
       >
         <p className="text-[10px] font-semibold tracking-wide uppercase text-[var(--color-ink-faint)] mb-1">
-          {step + 1} of {selected.length}
+          {step + 1} of {orderedSelected.length}
         </p>
         <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-4">{target.label}</h2>
 

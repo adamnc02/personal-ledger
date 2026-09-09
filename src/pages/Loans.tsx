@@ -1900,105 +1900,14 @@ function OverpaymentForm({
 // the new values; loan overpayments don't need that step since a loan's
 // balance is always derived fresh from its schedule, never stored. ──
 
+// 2026-09-09 followup (Adam-reported) — the list/edit UI that used to
+// live here (LoggedPaymentList/LoggedPaymentEditForm) moved to
+// Expenses.tsx as OverpaymentRowItem/OverpaymentEditForm, styled to match
+// the rest of the Transactions page (swipe-to-delete) instead of this
+// page's own grouped-card-with-inline-Delete pattern. The shape stays
+// here since both loan overpayments and credit-card lump payments are
+// this exact {id, date, amount, note?} shape.
 export type LoggedPayment = { id: string; date: string; amount: number; note?: string }
-
-export function LoggedPaymentList({
-  payments,
-  onUpdate,
-  onRemove,
-}: {
-  payments: LoggedPayment[]
-  onUpdate: (paymentId: string, amount: number, date: string, note?: string) => void
-  onRemove: (paymentId: string) => void
-}) {
-  const [editingId, setEditingId] = useState<string | null>(null)
-  if (payments.length === 0) return null
-
-  const sorted = payments.slice().sort((a, b) => b.date.localeCompare(a.date))
-  const total = payments.reduce((sum, p) => sum + p.amount, 0)
-
-  return (
-    <div className="rounded-xl p-3 flex flex-col gap-1.5" style={{ background: 'var(--color-bg-elevated)' }}>
-      <span className="text-xs font-medium text-[var(--color-ink)]">
-        {payments.length} payment{payments.length === 1 ? '' : 's'} logged, totalling £{formatCurrency(total)}
-      </span>
-      {sorted.map((p) => (
-        <div key={p.id} className="rounded-lg overflow-hidden" style={{ background: 'var(--color-surface)' }}>
-          <button onClick={() => setEditingId(editingId === p.id ? null : p.id)} className="w-full flex items-center justify-between px-2.5 py-2 text-left">
-            <div>
-              <p className="text-sm text-[var(--color-ink)]">{p.note || 'Payment'}</p>
-              <p className="text-[11px] text-[var(--color-ink-faint)]">{p.date}</p>
-            </div>
-            <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(p.amount)}</span>
-          </button>
-          {editingId === p.id && (
-            <LoggedPaymentEditForm
-              payment={p}
-              onSave={(amount, date, note) => {
-                onUpdate(p.id, amount, date, note)
-                setEditingId(null)
-              }}
-              onDelete={() => {
-                onRemove(p.id)
-                setEditingId(null)
-              }}
-              onCancel={() => setEditingId(null)}
-            />
-          )}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function LoggedPaymentEditForm({
-  payment,
-  onSave,
-  onDelete,
-  onCancel,
-}: {
-  payment: LoggedPayment
-  onSave: (amount: number, date: string, note?: string) => void
-  onDelete: () => void
-  onCancel: () => void
-}) {
-  const [amount, setAmount] = useState(String(payment.amount))
-  const [date, setDate] = useState(payment.date)
-  const [note, setNote] = useState(payment.note ?? '')
-  const [confirmingDelete, setConfirmingDelete] = useState(false)
-  const amountNumber = Number(amount)
-  // UAT follow-up (2026-09-05, Adam-reported): dims Save when nothing's
-  // actually changed, same rule every other edit panel in the app now
-  // follows.
-  const dirty = amountNumber !== payment.amount || date !== payment.date || note.trim() !== (payment.note ?? '')
-
-  return (
-    <div className="px-2.5 pb-2.5 flex flex-col gap-2 border-t" style={{ borderColor: 'var(--color-track)' }}>
-      <div className="grid grid-cols-2 gap-2 pt-2">
-        <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
-        <EditField label="Date" type="date" value={date} onChange={setDate} />
-      </div>
-      <EditField label="Note (optional)" value={note} onChange={setNote} />
-      <button onClick={() => setConfirmingDelete(true)} className="text-xs self-start" style={{ color: 'var(--color-negative)' }}>
-        Delete
-      </button>
-      {confirmingDelete && (
-        <ConfirmModal
-          title="Delete this payment?"
-          description="This can't be undone."
-          confirmLabel="Delete"
-          tone="danger"
-          onConfirm={() => {
-            setConfirmingDelete(false)
-            onDelete()
-          }}
-          onCancel={() => setConfirmingDelete(false)}
-        />
-      )}
-      <FormButtonRow onCancel={onCancel} onSave={() => onSave(amountNumber, date, note || undefined)} saveDisabled={!(amountNumber > 0 && date) || !dirty} />
-    </div>
-  )
-}
 
 // ── Recurring/standing overpayment — distinct from the one-off log above.
 // A real ongoing commitment ("an extra £100 every month", or "an extra 5%

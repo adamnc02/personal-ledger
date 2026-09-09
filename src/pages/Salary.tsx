@@ -3146,12 +3146,20 @@ export function Salary() {
 
       {rebalancing &&
         (() => {
+          // 2026-09-09 followup (Adam-reported) — this is Adam's own
+          // rebalance, not a tool for touching a partner's individually-
+          // owned accounts. Pots/Savings Pots/current account are only
+          // offered here when they belong to the primary person ("me");
+          // the Joint Account is the one thing everyone shares, so it's
+          // always offered regardless of ownership.
           const targets: RebalanceTarget[] = [
-            ...data.pots.map((p) => ({ key: `pot:${p.id}`, label: p.name, sublabel: 'Pot' })),
-            ...data.savingsPots.map((p) => ({ key: `savingsPot:${p.id}`, label: p.name, sublabel: 'Savings pot' })),
+            ...data.pots.filter((p) => p.personId === data.primaryPersonId).map((p) => ({ key: `pot:${p.id}`, label: p.name, sublabel: 'Pot' })),
+            ...data.savingsPots
+              .filter((p) => p.personId === data.primaryPersonId)
+              .map((p) => ({ key: `savingsPot:${p.id}`, label: p.name, sublabel: 'Savings pot' })),
             ...(data.jointAccount ? [{ key: 'joint', label: 'Joint Account' }] : []),
             ...data.people
-              .filter((person) => data.payCycles.some((pc) => pc.personId === person.id))
+              .filter((person) => person.id === data.primaryPersonId && data.payCycles.some((pc) => pc.personId === person.id))
               .map((person) => ({ key: `personal:${person.id}`, label: `${person.name}'s current account`, sublabel: 'Current account' })),
           ]
           return (

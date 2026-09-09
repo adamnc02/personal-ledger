@@ -21,7 +21,7 @@ import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { addYears, addDays } from 'date-fns'
 import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2 } from '../types/ledger'
-import { LoggedPaymentList } from './Loans'
+import type { LoggedPayment } from './Loans'
 
 const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   cash: 'Cash',
@@ -561,27 +561,52 @@ export function Expenses() {
                 an overpayment"/"+ Log a payment" button (unchanged, still
                 there), now live here rather than as an inline list on the
                 expanded card — same as a pot/savings pot/joint account
-                deposit never showing its own history on the Wallet page. */}
+                deposit never showing its own history on the Wallet page.
+                2026-09-09 followup (Adam-reported) — these used to render
+                via Loans.tsx's own LoggedPaymentList (a single grouped
+                card with a running total and an inline Delete button
+                inside its edit form), which read as a different UI
+                paradigm from the rest of this page. Restyled as flat,
+                individually swipeable rows via OverpaymentRowItem below,
+                matching TransferRowItem exactly. */}
             {(loansWithOverpayments.length > 0 || cardsWithLumpPayments.length > 0) && (
               <div className="flex flex-col gap-3 mt-2">
                 {loansWithOverpayments.map((loan) => (
                   <div key={loan.id}>
                     <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">{loan.name} overpayments</h3>
-                    <LoggedPaymentList
-                      payments={loan.overpayments}
-                      onUpdate={(overpaymentId, amount, date, note) => updateLoanOverpayment(loan.id, overpaymentId, amount, date, note)}
-                      onRemove={(overpaymentId) => removeLoanOverpayment(loan.id, overpaymentId)}
-                    />
+                    <div className="flex flex-col gap-2">
+                      {loan.overpayments
+                        .slice()
+                        .sort((a, b) => b.date.localeCompare(a.date))
+                        .map((p) => (
+                          <OverpaymentRowItem
+                            key={p.id}
+                            payment={p}
+                            label={`${loan.name} overpayment`}
+                            onUpdate={(amount, date, note) => updateLoanOverpayment(loan.id, p.id, amount, date, note)}
+                            onRemove={() => removeLoanOverpayment(loan.id, p.id)}
+                          />
+                        ))}
+                    </div>
                   </div>
                 ))}
                 {cardsWithLumpPayments.map((card) => (
                   <div key={card.id}>
                     <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">{card.name} payments</h3>
-                    <LoggedPaymentList
-                      payments={card.lumpPayments}
-                      onUpdate={(lumpPaymentId, amount, date, note) => updateCreditCardLumpPayment(card.id, lumpPaymentId, amount, date, note)}
-                      onRemove={(lumpPaymentId) => removeCreditCardLumpPayment(card.id, lumpPaymentId)}
-                    />
+                    <div className="flex flex-col gap-2">
+                      {card.lumpPayments
+                        .slice()
+                        .sort((a, b) => b.date.localeCompare(a.date))
+                        .map((p) => (
+                          <OverpaymentRowItem
+                            key={p.id}
+                            payment={p}
+                            label={`${card.name} payment`}
+                            onUpdate={(amount, date, note) => updateCreditCardLumpPayment(card.id, p.id, amount, date, note)}
+                            onRemove={() => removeCreditCardLumpPayment(card.id, p.id)}
+                          />
+                        ))}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1297,6 +1322,83 @@ function TransferRowItem({
         <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
     </SwipeToDelete>
+  )
+}
+
+/**
+ * 2026-09-09 followup (Adam-reported) — a logged loan overpayment/credit-
+ * card payment's own row here, styled to match TransferRowItem exactly
+ * (tap to expand an inline edit form, swipe left for the same
+ * SwipeToDelete confirm every other row on this page uses) rather than
+ * Loans.tsx's own LoggedPaymentList, which groups everything into one
+ * card with a running total and an inline Delete button — a different UI
+ * paradigm from the rest of the Transactions page.
+ */
+function OverpaymentRowItem({
+  payment,
+  label,
+  onUpdate,
+  onRemove,
+}: {
+  payment: LoggedPayment
+  label: string
+  onUpdate: (amount: number, date: string, note?: string) => void
+  onRemove: () => void
+}) {
+  const [isEditing, setIsEditing] = useState(false)
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash('Payment updated.')
+
+  return (
+    <SwipeToDelete onDelete={onRemove} confirmLabel={label}>
+      <div className="relative rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
+        <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center justify-between p-3 text-left">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-[var(--color-ink)] truncate">{payment.note || label}</p>
+            <p className="text-xs text-[var(--color-ink-muted)]">{payment.date}</p>
+          </div>
+          <p className="text-sm font-mono font-semibold shrink-0 text-[var(--color-ink)]">£{formatCurrency(payment.amount)}</p>
+        </button>
+        {isEditing && (
+          <OverpaymentEditForm
+            payment={payment}
+            onCancel={() => setIsEditing(false)}
+            onSave={(amount, date, note) => {
+              onUpdate(amount, date, note)
+              setIsEditing(false)
+              triggerFlash()
+            }}
+          />
+        )}
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
+      </div>
+    </SwipeToDelete>
+  )
+}
+
+function OverpaymentEditForm({
+  payment,
+  onSave,
+  onCancel,
+}: {
+  payment: LoggedPayment
+  onSave: (amount: number, date: string, note?: string) => void
+  onCancel: () => void
+}) {
+  const [amount, setAmount] = useState(String(payment.amount))
+  const [date, setDate] = useState(payment.date)
+  const [note, setNote] = useState(payment.note ?? '')
+  const amountNumber = Number(amount)
+  const dirty = amountNumber !== payment.amount || date !== payment.date || note.trim() !== (payment.note ?? '')
+
+  return (
+    <div className="px-3 pb-3 flex flex-col gap-2 border-t" style={{ borderColor: 'var(--color-track)' }}>
+      <div className="grid grid-cols-2 gap-2 pt-2">
+        <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+        <EditField label="Date" type="date" value={date} onChange={setDate} />
+      </div>
+      <EditField label="Note (optional)" value={note} onChange={setNote} />
+      <FormButtonRow onCancel={onCancel} onSave={() => onSave(amountNumber, date, note || undefined)} saveDisabled={!(amountNumber > 0 && date) || !dirty} />
+    </div>
   )
 }
 
