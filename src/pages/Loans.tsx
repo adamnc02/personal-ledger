@@ -724,7 +724,11 @@ function CreditCardRow({
               triggerFlash()
             }}
             onClearBalance={(date, amount) => {
+              // 2026-09-09 followup (Adam-requested) — Save on the new
+              // confirm modal collapses the card too, same as every other
+              // action here (Save, Log a payment) once it commits.
               onLogLumpPayment(amount, date, 'Statement cleared')
+              if (isOpen) onToggle()
               triggerFlash()
             }}
             overpaymentPrefill={overpaymentPrefill}
@@ -1296,6 +1300,12 @@ function CreditCardDueSection({
   const past = rows.filter((r) => r.isPast)
   const mostRecent = past.length > 0 ? past[past.length - 1] : null
   const upcoming = rows.filter((r) => !r.isPast).slice(0, mostRecent ? 3 : 4)
+  // 2026-09-09 followup (Adam-requested) — Clear used to fire straight
+  // off the tap; now it stages the row here first so the confirm modal
+  // below can show what it's about to do, matching every other
+  // consequential action in the app (Settle, Delete, etc.) rather than
+  // being the one silent exception.
+  const [confirming, setConfirming] = useState<{ date: string; balanceDue: number } | null>(null)
 
   if (!mostRecent && upcoming.length === 0) return null
 
@@ -1305,7 +1315,7 @@ function CreditCardDueSection({
         <>
           <h4 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Most recent due</h4>
           <div className="flex flex-col gap-2 mb-3">
-            <CreditCardDueRow row={mostRecent} onClearBalance={onClearBalance} />
+            <CreditCardDueRow row={mostRecent} onRequestClear={setConfirming} />
           </div>
         </>
       )}
@@ -1314,10 +1324,23 @@ function CreditCardDueSection({
           <h4 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Upcoming due</h4>
           <div className="flex flex-col gap-2 mb-3">
             {upcoming.map((row) => (
-              <CreditCardDueRow key={row.date} row={row} onClearBalance={onClearBalance} />
+              <CreditCardDueRow key={row.date} row={row} onRequestClear={setConfirming} />
             ))}
           </div>
         </>
+      )}
+      {confirming && (
+        <ConfirmModal
+          title="Clear this balance?"
+          description={`Pays off the full £${formatCurrency(confirming.balanceDue)} owed as of ${confirming.date} in one go, dated on it — this zeroes off every minimum charge up to and including that date, and stops any further ones compounding against it.`}
+          confirmLabel="Save"
+          cancelLabel="Cancel"
+          onConfirm={() => {
+            onClearBalance(confirming.date, confirming.balanceDue)
+            setConfirming(null)
+          }}
+          onCancel={() => setConfirming(null)}
+        />
       )}
     </div>
   )
@@ -1325,10 +1348,10 @@ function CreditCardDueSection({
 
 function CreditCardDueRow({
   row,
-  onClearBalance,
+  onRequestClear,
 }: {
   row: { date: string; balanceDue: number; isPast: boolean }
-  onClearBalance: (date: string, amount: number) => void
+  onRequestClear: (row: { date: string; balanceDue: number }) => void
 }) {
   return (
     <div className="rounded-xl p-3 flex items-center justify-between gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
@@ -1338,7 +1361,7 @@ function CreditCardDueRow({
       </div>
       {!row.isPast && (
         <button
-          onClick={() => onClearBalance(row.date, row.balanceDue)}
+          onClick={() => onRequestClear({ date: row.date, balanceDue: row.balanceDue })}
           className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
           style={{ background: 'var(--color-coral)' }}
         >
