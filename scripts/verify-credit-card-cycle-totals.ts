@@ -70,7 +70,16 @@ check('...and does NOT double-count into the following (14 Nov) section', sectio
 // date (via cardBalanceAsOf), not a naive sum of its own rows (which
 // would miss interest).
 check('The 14 Sept section (no spend yet) closes at £0', sections[0].closingBalance, 0)
-check('The 14 Oct section closes above £20 (spend + one cycle of interest)', sections[1].closingBalance > 20, true)
+// BUGFIX (2026-09-09, statement-window grace-timing) — this used to
+// assert `> 20` (interest already posted by 14 Oct), which encoded the
+// very bug this fix corrects: 14 Oct is this spend's genuine FIRST due
+// date under the statement-window rule (its window, 19 Aug-18 Sept,
+// hadn't even closed by the raw-calendar 14 Sept date), so real grace
+// applies — the closing figure must be EXACTLY £20, not inflated by a
+// cycle of interest that was never actually due yet. See
+// verify-credit-card-amortization-deadlock.ts's "Statement-window grace"
+// checks for the same repro asserted directly against cardBalanceAsOf.
+check('The 14 Oct section closes at EXACTLY £20 (real grace period — its genuine first due date, no interest yet)', sections[1].closingBalance, 20)
 
 // ---- Fallback: no statement window configured — spend counts toward the very next payment date, plain and simple ----
 let plainCard: CreditCard = { ...windowCard, id: 'card-2', statementStartDay: undefined, statementEndDay: undefined }

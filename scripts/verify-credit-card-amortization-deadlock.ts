@@ -98,6 +98,7 @@ import {
   recordCreditCardSpend,
   recordCreditCardLumpPayment,
   buildCreditCardBalanceDueRows,
+  buildCreditCardMinimumChargeRows as _buildMinRows,
 } from '../src/lib/creditCards'
 import type { CreditCard, Transaction } from '../src/types/ledger'
 
@@ -214,6 +215,68 @@ if (octRow) {
 const futureCharges = generateMinimumPaymentTransactions(clearCard, new Date(2026, 8, 1), new Date(2029, 8, 1), clearTransactions)
 check('After clearing via the Balance-due row, NO further minimum charges are generated at all (not just fewer)', futureCharges.length, 0)
 check('...and the real balance is exactly £0 three years later', cardBalanceAsOf(clearCard, clearTransactions, new Date(2029, 8, 1)), 0)
+
+// ---- 5d. Statement-window grace-timing (2026-09-09, Adam's exact repro) ----
+// `paymentDayOfMonth: 14, statementStartDay: 19, statementEndDay: 18` — a
+// £20 spend on 9th Sept has its real first due date on 14th Oct (its
+// window, Aug19-Sep18, hadn't even closed by 14th Sept), so it must be
+// EXACTLY £20.00 there, not £20.31 — the bug was cardBalanceAsOf treating
+// 14th Sept (the next raw paymentDayOfMonth) as the grace-relevant cycle
+// boundary, one whole window too early.
+let graceWindowCard: CreditCard = { ...clearCard, id: 'card-3g', currentBalance: 0, lumpPayments: [] }
+const gwSpend = recordCreditCardSpend(graceWindowCard, 20, '2026-09-09', 'grace-window spend')
+graceWindowCard = gwSpend.updatedCard
+const gwTransactions: (Omit<Transaction, 'id'> & { id: string })[] = [{ ...gwSpend.transaction, id: 'gw0' }]
+check('Statement-window grace: EXACT £20.00 due on 14th Oct (not £20.31 from interest posting a cycle early)', cardBalanceAsOf(graceWindowCard, gwTransactions, new Date(2026, 9, 14)), 20)
+check('...also exactly £20 at the (real but earlier) calendar 14th Sept date — nothing was ever due there', cardBalanceAsOf(graceWindowCard, gwTransactions, new Date(2026, 8, 14)), 20)
+check('...grace is LOST the cycle after the real (window-aware) due date is missed — interest now applies at 14th Nov', cardBalanceAsOf(graceWindowCard, gwTransactions, new Date(2026, 10, 14)) > 20, true)
+
+// Paying the £20 in full by its real due date (14th Oct) re-earns grace
+// for new spend going forward, same as the non-window grace fixture below
+// — confirms the "lose grace entirely once revolving, real UK T&Cs"
+// policy (2026-09-09, Adam-requested) also holds for a window card, not
+// just the plain calendar-cycle case.
+const gwPay = recordCreditCardLumpPayment(graceWindowCard, 20, '2026-10-14', 'paid in full by due date')
+graceWindowCard = gwPay.updatedCard
+gwTransactions.push({ ...gwPay.transaction, id: 'gw1' })
+const gwSpend2 = recordCreditCardSpend(graceWindowCard, 15, '2026-10-20', 'second grace-window spend')
+graceWindowCard = gwSpend2.updatedCard
+gwTransactions.push({ ...gwSpend2.transaction, id: 'gw2' })
+check('Paying in full by the real due date re-earns grace for the NEXT window too (statement-window card)', cardBalanceAsOf(graceWindowCard, gwTransactions, new Date(2026, 10, 14)), 15)
+
+// ---- 5e. Regression guard — a card WITHOUT a statement window is completely unaffected ----
+// Same £20-on-a-fresh-card shape as 5d, but no statementStartDay/EndDay —
+// must reproduce the pre-existing (already-correct) raw-calendar grace
+// behaviour byte-for-byte, since the statement-window fix above only
+// activates when both window fields are set.
+let noWindowCard: CreditCard = { ...clearCard, id: 'card-3n', currentBalance: 0, statementStartDay: undefined, statementEndDay: undefined, lumpPayments: [] }
+const nwSpend = recordCreditCardSpend(noWindowCard, 20, '2026-09-09', 'no-window spend')
+noWindowCard = nwSpend.updatedCard
+const nwTransactions: (Omit<Transaction, 'id'> & { id: string })[] = [{ ...nwSpend.transaction, id: 'nw0' }]
+check('No statement window: grace still applies through the very next raw calendar due date (14th Sept), £20 exactly', cardBalanceAsOf(noWindowCard, nwTransactions, new Date(2026, 8, 14)), 20)
+check('No statement window: grace lost the cycle after THAT (14th Oct) since it was never window-delayed to begin with', cardBalanceAsOf(noWindowCard, nwTransactions, new Date(2026, 9, 14)) > 20, true)
+
+// ---- 5f. Statement-window minimum-charge rows must not appear a cycle early either (2026-09-09) ----
+// A second, distinct manifestation of the same root cause: a fresh card
+// with no stored minimum-charge history yet always starts its
+// buildCreditCardMinimumChargeRows simulation range AT asOfDate (see that
+// function's own rangeStart comment) — so calling it same-day-as, or any
+// time after, an unclosed purchase used to fold that purchase straight
+// into the OPENING statementBalance uninspected, generating a real (if
+// small) minimum-charge row on 14th Sept that shouldn't exist at all.
+// Must be identical regardless of exactly when `asOfDate` falls relative
+// to the spend, once it's genuinely after it.
+let freshCard: CreditCard = { ...clearCard, id: 'card-3f', currentBalance: 0, lumpPayments: [] }
+const freshSpend = recordCreditCardSpend(freshCard, 20, '2026-09-09', 'fresh spend')
+freshCard = freshSpend.updatedCard
+const freshTransactions: (Omit<Transaction, 'id'> & { id: string })[] = [{ ...freshSpend.transaction, id: 'f0' }]
+const rowsAsOfBeforeSpend = _buildMinRows(freshCard, freshTransactions, new Date(2026, 8, 1))
+const rowsAsOfSpendDay = _buildMinRows(freshCard, freshTransactions, new Date(2026, 8, 9))
+const rowsAsOfMidCycle = _buildMinRows(freshCard, freshTransactions, new Date(2026, 8, 15))
+check('No minimum-charge row generated on 14th Sept (asOfDate before the spend) — first real charge is 14th Oct', rowsAsOfBeforeSpend[0]?.date, '2026-10-14')
+check('...same first-charge date when asOfDate falls ON the spend day (rangeStart used to skip window-gating here)', rowsAsOfSpendDay[0]?.date, '2026-10-14')
+check('...same first-charge date when asOfDate falls after the spend, mid-cycle', rowsAsOfMidCycle[0]?.date, '2026-10-14')
+check('...and the amount agrees across all three asOfDates (£1.00 — 5% of £20)', rowsAsOfSpendDay[0]?.amount === rowsAsOfBeforeSpend[0]?.amount && rowsAsOfMidCycle[0]?.amount === rowsAsOfBeforeSpend[0]?.amount, true)
 
 // ---- 5b. Regression guard — a genuinely progressing percent-of-balance minimum is unaffected ----
 const healthyCard: CreditCard = { ...deadlockedCard, currentBalance: 500, minimumPayment: { type: 'percent_of_balance', percent: 5 } }
