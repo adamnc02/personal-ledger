@@ -13,7 +13,16 @@ import { schedulePotPreviewWindow, scheduledPotDepositDates, potDepositOccurrenc
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { visibleCategoriesFor } from '../lib/categories'
-import { recentAndUpcomingOccurrences, applyTemplateAmountChange, templateOccurrencePreviews, setPausedTemplateOccurrences, scheduledTemplateDates, generateTransactionsForTemplate, type RawOccurrence } from '../lib/schedule'
+import {
+  recentAndUpcomingOccurrences,
+  applyTemplateAmountChange,
+  applyTemplateSingleOccurrenceAmountChange,
+  templateOccurrencePreviews,
+  setPausedTemplateOccurrences,
+  scheduledTemplateDates,
+  generateTransactionsForTemplate,
+  type RawOccurrence,
+} from '../lib/schedule'
 import { transferLocationLabel, buildTransferLocationOptions, transferLocationKey, locationsEqual, type TransferLocationOption } from '../lib/transferLedger'
 import { LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
@@ -2325,6 +2334,10 @@ function TransferRecurringRow({
       <div className="relative rounded-2xl px-4 py-3" style={{ background: 'var(--color-surface)' }}>
         {choosingEffectiveDate && (
           <EffectiveDatedChangeFlow
+            scopeStep={{
+              description: `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(Number(amount))}. Just a single payment, or every payment from then on?`,
+              singleLabel: 'Just a single payment',
+            }}
             occurrences={recentAndUpcomingOccurrences(template, new Date())}
             dateStepDescription={`${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(Number(amount))}. Which payment should the new amount start from? Everything before it keeps the old amount.`}
             buildChanges={() => {
@@ -2334,13 +2347,23 @@ function TransferRecurringRow({
             }}
             affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
             onCancelAll={cancelEverything}
-            onCommit={(effectiveFrom) => {
-              const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...applyTemplateAmountChange(template, Number(amount), effectiveFrom) }
+            onCommit={(effectiveFrom, scope) => {
+              // A location change (if any) always applies from this date
+              // forward regardless of the amount's single/all-future
+              // choice — it has no single-occurrence mechanism of its own.
+              const amountPatch =
+                scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(template, Number(amount), effectiveFrom) : applyTemplateAmountChange(template, Number(amount), effectiveFrom)
+              const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...amountPatch }
               if (locationsDirty && transferFrom && transferTo) {
                 updates.transferFrom = transferFrom
                 updates.transferTo = transferTo
               }
               onUpdate(updates)
+              // A single-occurrence change leaves the STANDING amount
+              // untouched — reset the local draft back to it so the field
+              // doesn't keep showing the one-off value as if it were now
+              // the template's own amount.
+              if (scope === 'single') setAmount(String(template.amount))
               triggerFlash()
               setOpen(false)
               setChoosingEffectiveDate(false)
@@ -2713,13 +2736,18 @@ function RecurringTransactionEditPanel({
   if (changingAmount) {
     return (
       <EffectiveDatedChangeFlow
+        scopeStep={{
+          description: `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Just a single payment, or every payment from then on?`,
+          singleLabel: 'Just a single payment',
+        }}
         occurrences={recentAndUpcomingOccurrences(template, new Date())}
         dateStepDescription={`${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`}
         buildChanges={() => [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(draft.amount)}` }]}
         affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
         onCancelAll={cancelEverything}
-        onCommit={(effectiveFrom) => {
-          onSave({ ...draft, ...applyTemplateAmountChange(template, draft.amount, effectiveFrom) })
+        onCommit={(effectiveFrom, scope) => {
+          const amountPatch = scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(template, draft.amount, effectiveFrom) : applyTemplateAmountChange(template, draft.amount, effectiveFrom)
+          onSave({ ...draft, amount: scope === 'single' ? template.amount : draft.amount, ...amountPatch })
           setChangingAmount(false)
         }}
       />

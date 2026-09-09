@@ -18,7 +18,15 @@ import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { EffectiveDatedChangeFlow, type RecurringChangeField } from '../components/EffectiveDatedChangeFlow'
 import { peopleWithIncomeCount } from '../lib/household'
 import { shouldOfferLocationPicker } from '../lib/pickerFirst'
-import { recentAndUpcomingOccurrences, applyTemplateAmountChange, scheduledTemplateDates, setPausedTemplateOccurrences, resolveTemplateAmount, templateOccurrencePreviews } from '../lib/schedule'
+import {
+  recentAndUpcomingOccurrences,
+  applyTemplateAmountChange,
+  applyTemplateSingleOccurrenceAmountChange,
+  scheduledTemplateDates,
+  setPausedTemplateOccurrences,
+  resolveTemplateAmount,
+  templateOccurrencePreviews,
+} from '../lib/schedule'
 import { addMonths } from 'date-fns'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
 
@@ -635,6 +643,21 @@ function BillEditPanel({
         : `${template.name} is moving ${draft.location === 'pot' ? `to ${pots.find((p) => p.id === draft.potId)?.name ?? 'a pot'}` : draft.location === 'joint' ? 'to Joint' : 'to Personal'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
     return (
       <EffectiveDatedChangeFlow
+        // UAT follow-up (2026-09-09, Adam-reported) — the "just a single
+        // payment / all future" step is the first thing shown for any
+        // AMOUNT change, per Adam's original spec ("the step 1 is just
+        // this payment or all future payments" for bills/transfers/
+        // recurring payments/loans/credit cards). A location-only change
+        // has no single-occurrence write to honour (see onCommit below),
+        // so it goes straight to the date picker, same as before —
+        // matching the same "don't offer a choice that can't actually be
+        // delivered" principle Loan.monthlyPayment's own scope step
+        // (deliberately absent) follows.
+        scopeStep={
+          changeKind === 'amount'
+            ? { description: `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Just a single payment, or every payment from then on?`, singleLabel: 'Just a single payment' }
+            : undefined
+        }
         occurrences={recentAndUpcomingOccurrences(template, new Date())}
         dateStepDescription={dateStepDescription}
         buildChanges={() => {
@@ -649,18 +672,22 @@ function BillEditPanel({
         }}
         affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
         onCancelAll={cancelEverything}
-        onCommit={(effectiveFrom) => {
+        onCommit={(effectiveFrom, scope) => {
           if (changeKind === 'amount') {
-            const amountPatch = applyTemplateAmountChange(template, draft.amount, effectiveFrom)
+            const amountPatch =
+              scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(template, draft.amount, effectiveFrom) : applyTemplateAmountChange(template, draft.amount, effectiveFrom)
             if (locationChanged) {
               // Both changed — apply the amount patch immediately, then
               // the location reassignment separately (it carries its own
               // retroactive transaction rewrite, which a plain onSave
               // patch can't do — see this component's own comment above).
-              onSave({ ...draft, ...amountPatch })
+              // The location change always applies from this date forward
+              // regardless of the amount's single/all-future choice — it
+              // has no single-occurrence mechanism of its own.
+              onSave({ ...draft, amount: scope === 'single' ? template.amount : draft.amount, ...amountPatch })
               onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
             } else {
-              onSave({ ...draft, ...amountPatch })
+              onSave({ ...draft, amount: scope === 'single' ? template.amount : draft.amount, ...amountPatch })
             }
           } else {
             onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)

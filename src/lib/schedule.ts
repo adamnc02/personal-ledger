@@ -308,6 +308,26 @@ export function applyTemplateAmountChange(
 }
 
 /**
+ * Builds the patch for a SINGLE-occurrence ("just a single payment")
+ * amount change — reuses the existing occurrenceOverrides mechanism
+ * (already used for pausing/moving one occurrence) rather than inventing
+ * a new field, since it already carries exactly this per-occurrence
+ * "amount overridden, nothing else about this template touched" shape.
+ * Merges onto any existing override for the same slot (e.g. one that was
+ * previously moved to a different date) rather than clobbering it.
+ */
+export function applyTemplateSingleOccurrenceAmountChange(
+  template: RecurringTemplate,
+  newAmount: number,
+  originalDate: string,
+): Pick<RecurringTemplate, 'occurrenceOverrides'> {
+  const existing = template.occurrenceOverrides ?? []
+  const priorEntry = existing.find((o) => o.originalDate === originalDate)
+  const withoutThis = existing.filter((o) => o.originalDate !== originalDate)
+  return { occurrenceOverrides: [...withoutThis, { ...priorEntry, originalDate, amount: newAmount }] }
+}
+
+/**
  * The most recent past occurrence (if any) and the next 3 upcoming ones,
  * for Bills.tsx's "apply this change from which payment?" picker —
  * always computed from the template's CURRENT schedule shape (frequency/
