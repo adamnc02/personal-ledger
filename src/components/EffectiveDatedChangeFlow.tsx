@@ -54,7 +54,15 @@ export function EffectiveDatedChangeFlow({
   scopeStep?: ScopeStepConfig
   fixedEffectiveFrom?: string
   occurrences: { date: string; isPast: boolean }[]
-  dateStepDescription: string
+  /**
+   * UAT 2026-09-09 (retest-bills-amount-and-location-wording) — a plain
+   * string always read as forward-looking ("which payment should the new
+   * amount START FROM"), which is wrong once "just a single payment" was
+   * chosen on the step before this one. Callers with a scopeStep should
+   * word this differently per scope; callers with no scopeStep at all
+   * (nothing to disambiguate) can keep passing a plain string.
+   */
+  dateStepDescription: string | ((scope: ChangeScope | null) => string)
   buildChanges: (effectiveFrom: string, scope: ChangeScope | null) => RecurringChangeField[]
   affectsClearedBalance?: (effectiveFrom: string) => boolean
   onCancelAll: () => void
@@ -100,9 +108,10 @@ export function EffectiveDatedChangeFlow({
   }
 
   if (step === 'date') {
+    const description = typeof dateStepDescription === 'function' ? dateStepDescription(scope) : dateStepDescription
     return (
-      <FlowSheet title="Apply this change from…" onCancelAll={onCancelAll} onBack={!isFirstStep ? goBack : undefined}>
-        <p className="text-sm text-[var(--color-ink-muted)] mb-4">{dateStepDescription}</p>
+      <FlowSheet title={scope === 'single' ? 'Which payment does this affect?' : 'Apply this change from…'} onCancelAll={onCancelAll} onBack={!isFirstStep ? goBack : undefined}>
+        <p className="text-sm text-[var(--color-ink-muted)] mb-4">{description}</p>
         <div className="flex flex-col gap-2">
           {occurrences.map((o) => (
             <button

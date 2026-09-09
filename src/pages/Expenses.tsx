@@ -38,7 +38,7 @@ import {
   previewRecurringOverpaymentRecast,
   scheduledLoanRecurringOverpaymentDates,
   setPausedLoanRecurringOverpaymentDates,
-  recentAndUpcomingLoanPaymentDates,
+  recentAndUpcomingLoanRecurringOverpaymentDates,
   applyRecurringOverpaymentAmountChange,
   applyRecurringOverpaymentSingleAmountOverride,
   resolveRecurringOverpaymentAmount,
@@ -2044,12 +2044,14 @@ function LoanRecurringOverpaymentEditForm({
     }
   }
 
-  // Recurring-overpayment dates are a subset of the loan's own payment
-  // dates (scheduledLoanRecurringOverpaymentDates derives its own
-  // candidates from the identical buildLoanSchedule(loan) output), so
-  // reusing recentAndUpcomingLoanPaymentDates is safe — filtered to this
-  // overpayment's own active window so a picked date can't predate it.
-  const pickerOccurrences = recentAndUpcomingLoanPaymentDates(loan, new Date()).filter((o) => o.date >= value.startDate && (!value.endDate || o.date <= value.endDate))
+  // UAT 2026-09-09 (retest-overpay-single-no-reamortise) — this used to
+  // reuse recentAndUpcomingLoanPaymentDates directly, which returns the
+  // LOAN's own schedule dates (e.g. always the 2nd of the month), not the
+  // recurring overpayment's own real dates — confirmed as a real bug,
+  // since the two cadences can genuinely differ. The new
+  // recentAndUpcomingLoanRecurringOverpaymentDates resolves the real date
+  // the same way generateLoanPaymentTransactions/the ledger itself does.
+  const pickerOccurrences = recentAndUpcomingLoanRecurringOverpaymentDates(loan, new Date()).filter((o) => o.date >= value.startDate && (!value.endDate || o.date <= value.endDate))
 
   function handleSave() {
     // 2026-09-09 followup (Adam-reported) — "used for anything RECURRING
@@ -2096,10 +2098,12 @@ function LoanRecurringOverpaymentEditForm({
                 }
               : undefined
           }
-          occurrences={pickerOccurrences}
-          dateStepDescription={
+          occurrences={pickerOccurrences.map((o) => ({ date: o.date, isPast: o.isPast }))}
+          dateStepDescription={(scope) =>
             amountChanged
-              ? `${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)}. Which payment should this apply from?`
+              ? scope === 'single'
+                ? `${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)} for one payment only. Which payment is this?`
+                : `${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)}. Which payment should this apply from?`
               : `${loan.name}'s recurring overpayment is moving to ${overpaymentFromLabel(loan, pots, draft.location, draft.potId)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
           }
           buildChanges={(_effectiveFrom, scope) => {
@@ -2115,12 +2119,24 @@ function LoanRecurringOverpaymentEditForm({
           onCommit={(effectiveFrom, scope) => {
             let patch: LoanRecurringOverpayment = draft
             if (amountChanged) {
+              // The picker shows the overpayment's own REAL date, but
+              // amountHistory/amountOverrides must be keyed by the
+              // underlying loan schedule entry's date instead — the same
+              // basis recurringOverpaymentForDate compares against
+              // internally (see recentAndUpcomingLoanRecurringOverpaymentDates's
+              // own comment). Falls back to effectiveFrom itself only if
+              // the lookup somehow misses, which shouldn't happen since
+              // this list is exactly where effectiveFrom came from.
+              const periodDate = pickerOccurrences.find((o) => o.date === effectiveFrom)?.periodDate ?? effectiveFrom
               patch =
                 scope === 'single'
-                  ? { ...patch, amount: value.amount, ...applyRecurringOverpaymentSingleAmountOverride(value, draft.amount, effectiveFrom) }
-                  : { ...patch, ...applyRecurringOverpaymentAmountChange(value, draft.amount, effectiveFrom) }
+                  ? { ...patch, amount: value.amount, ...applyRecurringOverpaymentSingleAmountOverride(value, draft.amount, periodDate) }
+                  : { ...patch, ...applyRecurringOverpaymentAmountChange(value, draft.amount, periodDate) }
             }
             onSave(patch)
+            // Location reassignment matches against the Transaction's own
+            // stored `.date`, which IS the real display date — no
+            // translation needed here, unlike the amount case above.
             if (locationChanged) onAssignLocation(effectiveFrom, draft.location as 'personal' | 'pot', draft.potId)
             setChangingAmount(false)
           }}
@@ -2385,7 +2401,11 @@ function TransferRecurringRow({
               singleLabel: 'Just a single payment',
             }}
             occurrences={recentAndUpcomingOccurrences(template, new Date())}
-            dateStepDescription={`${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(Number(amount))}. Which payment should the new amount start from? Everything before it keeps the old amount.`}
+            dateStepDescription={(scope) =>
+              scope === 'single'
+                ? `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(Number(amount))} for one payment only. Which payment is this?`
+                : `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(Number(amount))}. Which payment should the new amount start from? Everything before it keeps the old amount.`
+            }
             buildChanges={(_effectiveFrom, scope) => {
               const changes: RecurringChangeField[] = [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(Number(amount))}` }]
               if (locationsDirty) {
@@ -2792,7 +2812,11 @@ function RecurringTransactionEditPanel({
           singleLabel: 'Just a single payment',
         }}
         occurrences={recentAndUpcomingOccurrences(template, new Date())}
-        dateStepDescription={`${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`}
+        dateStepDescription={(scope) =>
+          scope === 'single'
+            ? `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)} for one payment only. Which payment is this?`
+            : `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
+        }
         buildChanges={() => [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(draft.amount)}` }]}
         affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
         onCancelAll={cancelEverything}

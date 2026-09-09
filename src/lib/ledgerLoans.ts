@@ -126,16 +126,22 @@ export function resolveRecurringOverpaymentAmount(r: LoanRecurringOverpayment, d
  * overpayment amount change — preserves the old amount as a history
  * entry, mirroring applyLoanMonthlyPaymentChange/applyTemplateAmountChange.
  */
+// UAT 2026-09-09 (retest-bills-just-single/all-future-samedate) — same
+// fix as schedule.ts's applyTemplateAmountChange: a PERMANENT ("all
+// future") change also clears any amountOverrides entry dated on/after
+// `effectiveFrom`, so a prior single-occurrence override can't silently
+// outlive a later standing change that was meant to cover it too.
 export function applyRecurringOverpaymentAmountChange(
   r: LoanRecurringOverpayment,
   newAmount: LoanRecurringOverpayment['amount'],
   effectiveFrom: string,
-): Pick<LoanRecurringOverpayment, 'amount' | 'amountEffectiveFrom' | 'amountHistory'> {
+): Pick<LoanRecurringOverpayment, 'amount' | 'amountEffectiveFrom' | 'amountHistory' | 'amountOverrides'> {
   const priorEntry = { effectiveFrom: r.amountEffectiveFrom ?? r.startDate, amount: r.amount }
   return {
     amount: newAmount,
     amountEffectiveFrom: effectiveFrom,
     amountHistory: [...(r.amountHistory ?? []), priorEntry],
+    amountOverrides: (r.amountOverrides ?? []).filter((o) => o.date < effectiveFrom),
   }
 }
 
@@ -547,7 +553,7 @@ export interface LoanLedgerRow {
  * recurring-overpayment date inside the (previous period, this period]
  * window for any period where the aggregate is non-zero.
  */
-function recurringOverpaymentRealDates(loan: Loan, schedule: LoanScheduleEntry[]): Map<string, string> {
+export function recurringOverpaymentRealDates(loan: Loan, schedule: LoanScheduleEntry[]): Map<string, string> {
   const map = new Map<string, string>() // schedule entry date -> real recurring-overpayment date
   const r = loan.recurringOverpayment
   if (!r) return map
@@ -1035,6 +1041,50 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
   }
 
   return results
+}
+
+/**
+ * The most recent past REAL recurring-overpayment date (if any) and the
+ * next 3 upcoming ones — the recurring-overpayment counterpart to
+ * recentAndUpcomingLoanPaymentDates above, for the SAME "which payment
+ * does this apply from" picker-first flow, but for its own cadence rather
+ * than the loan's own regular payment dates. UAT 2026-09-09
+ * (retest-overpay-single-no-reamortise) — confirmed as a real bug: the
+ * recurring-overpayment editor's picker was reusing
+ * recentAndUpcomingLoanPaymentDates directly, which returns the LOAN's
+ * own schedule dates (e.g. the 2nd of each month), not the recurring
+ * overpayment's own real dates (which can land on a completely different
+ * day — see recurringOverpaymentRealDates's own comment). Reuses
+ * generateLoanPaymentTransactions directly (already resolves the real
+ * date via recurringOverpaymentRealDates internally) rather than
+ * re-deriving that mapping here a second time.
+ */
+/**
+ * `date` is the REAL calendar date to show the person (what
+ * generateLoanPaymentTransactions/the ledger itself displays this
+ * occurrence as) — `periodDate` is the underlying loan schedule entry's
+ * OWN date, which is what recurringOverpaymentForDate/
+ * resolveRecurringOverpaymentAmount actually key their date comparisons
+ * against internally (same basis as `r.startDate`/`r.endDate`/
+ * `pausedDates`, all of which compare against buildLoanSchedule's own
+ * per-period `dateIso`, never the real display date). A caller writing an
+ * amountHistory/amountOverrides entry MUST use `periodDate`, not `date`,
+ * or the entry will silently never match anything inside the engine.
+ */
+export function recentAndUpcomingLoanRecurringOverpaymentDates(loan: Loan, asOfDate: Date): { date: string; periodDate: string; isPast: boolean }[] {
+  const schedule = buildLoanSchedule(loan)
+  const realDates = recurringOverpaymentRealDates(loan, schedule)
+  const entries = schedule
+    .filter((e) => e.recurringOverpaymentApplied > 0)
+    .map((e) => ({ date: realDates.get(e.date) ?? e.date, periodDate: e.date }))
+    .sort((a, b) => a.date.localeCompare(b.date))
+  const asOfIso = toIso(asOfDate)
+  const past = entries.filter((e) => e.date <= asOfIso)
+  const upcoming = entries.filter((e) => e.date > asOfIso)
+  const result: { date: string; periodDate: string; isPast: boolean }[] = []
+  if (past.length > 0) result.push({ ...past[past.length - 1], isPast: true })
+  for (const e of upcoming.slice(0, 3)) result.push({ ...e, isPast: false })
+  return result
 }
 
 /**

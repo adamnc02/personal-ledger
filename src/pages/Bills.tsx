@@ -15,7 +15,7 @@ import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
-import { EffectiveDatedChangeFlow, type RecurringChangeField } from '../components/EffectiveDatedChangeFlow'
+import { EffectiveDatedChangeFlow, type RecurringChangeField, type ChangeScope } from '../components/EffectiveDatedChangeFlow'
 import { peopleWithIncomeCount } from '../lib/household'
 import { shouldOfferLocationPicker } from '../lib/pickerFirst'
 import {
@@ -637,9 +637,15 @@ function BillEditPanel({
   }
 
   if (changeKind) {
-    const dateStepDescription =
+    // UAT 2026-09-09 (retest-bills-amount-and-location-wording) — scope-
+    // aware: "just a single payment" only affects the ONE occurrence
+    // picked here, so the wording can't say "start from" (forward-
+    // looking) the way the all-future case genuinely means.
+    const dateStepDescription = (scope: ChangeScope | null) =>
       changeKind === 'amount'
-        ? `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
+        ? scope === 'single'
+          ? `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)} for one payment only. Which payment is this?`
+          : `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
         : `${template.name} is moving ${draft.location === 'pot' ? `to ${pots.find((p) => p.id === draft.potId)?.name ?? 'a pot'}` : draft.location === 'joint' ? 'to Joint' : 'to Personal'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
     return (
       <EffectiveDatedChangeFlow

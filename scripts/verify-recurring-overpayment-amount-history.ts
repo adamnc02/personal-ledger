@@ -89,6 +89,21 @@ const overrideOverHistory: LoanRecurringOverpayment = {
 }
 check('An override on the exact date an amountHistory change also takes effect wins outright', resolveRecurringOverpaymentAmount(overrideOverHistory, effectiveFromDate), { type: 'fixed', amount: 999 })
 
+// ─────────────────────────────────────────────────────────────────────
+// UAT 2026-09-09 (retest-bills-just-single/all-future-samedate) — same
+// "frozen" bug as schedule.ts's amountHistory: a PERMANENT change must
+// clear any amountOverrides entry it reaches, not leave it frozen at the
+// old one-off value forever.
+// ─────────────────────────────────────────────────────────────────────
+const withOverrideAtDate: LoanRecurringOverpayment = { ...recurring, ...applyRecurringOverpaymentSingleAmountOverride(recurring, { type: 'fixed', amount: 999 }, overrideDate) }
+const supersedingPermanent: LoanRecurringOverpayment = { ...withOverrideAtDate, ...applyRecurringOverpaymentAmountChange(withOverrideAtDate, { type: 'fixed', amount: 200 }, overrideDate) }
+check('A permanent change effective ON the overridden date supersedes it', resolveRecurringOverpaymentAmount(supersedingPermanent, overrideDate), { type: 'fixed', amount: 200 })
+check('The now-superseded override entry is actually removed, not left dangling', supersedingPermanent.amountOverrides, [])
+
+const earlierOverride: LoanRecurringOverpayment = { ...recurring, ...applyRecurringOverpaymentSingleAmountOverride(recurring, { type: 'fixed', amount: 999 }, baseline[0].date) }
+const laterPermanentUnaffectedEarlier: LoanRecurringOverpayment = { ...earlierOverride, ...applyRecurringOverpaymentAmountChange(earlierOverride, { type: 'fixed', amount: 200 }, effectiveFromDate) }
+check('An override dated BEFORE the permanent change\'s effective date is left untouched', laterPermanentUnaffectedEarlier.amountOverrides, [{ date: baseline[0].date, amount: { type: 'fixed', amount: 999 } }])
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) FAILED.`)
   process.exit(1)

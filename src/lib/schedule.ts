@@ -314,17 +314,34 @@ export function setPausedTemplateOccurrences(template: RecurringTemplate, window
  * follow-up picker) — preserves the OLD amount as a history entry so
  * anything before `effectiveFrom` keeps resolving to it, exactly as
  * salaryLedger.ts's snapshot list does for a pay rise.
+ *
+ * UAT 2026-09-09 (retest-bills-just-single/all-future-samedate) — a
+ * PERMANENT ("all future") change now also clears the `amount` off any
+ * `occurrenceOverrides` entry dated on/after `effectiveFrom`. Confirmed
+ * as a real, reported bug otherwise: a prior single-occurrence override
+ * always wins in resolveOccurrenceAmount regardless of what the standing
+ * history says (by design, for a genuinely one-off correction) — but
+ * that meant a later "all future" change silently could never reach a
+ * date that had earlier been individually overridden, which reads as
+ * "frozen" from the outside and defeats what "ALL future payments"
+ * promises. A date-move override (no `amount` set) is left alone — this
+ * only clears the amount half of an override, same surgical scope
+ * setPausedTemplateOccurrences already uses for pause/unpause.
  */
 export function applyTemplateAmountChange(
   template: RecurringTemplate,
   newAmount: number,
   effectiveFrom: string,
-): Pick<RecurringTemplate, 'amount' | 'amountEffectiveFrom' | 'amountHistory'> {
+): Pick<RecurringTemplate, 'amount' | 'amountEffectiveFrom' | 'amountHistory' | 'occurrenceOverrides'> {
   const priorEntry = { effectiveFrom: template.amountEffectiveFrom ?? template.anchorDate, amount: template.amount }
+  const occurrenceOverrides = (template.occurrenceOverrides ?? [])
+    .map((o) => (o.originalDate >= effectiveFrom && o.amount !== undefined ? { ...o, amount: undefined } : o))
+    .filter((o) => o.date !== undefined || o.amount !== undefined || o.deleted !== undefined)
   return {
     amount: newAmount,
     amountEffectiveFrom: effectiveFrom,
     amountHistory: [...(template.amountHistory ?? []), priorEntry],
+    occurrenceOverrides,
   }
 }
 

@@ -67,15 +67,42 @@ check('Merging an amount override onto an existing date-move override keeps the 
 // state when both exist on the same template.
 // ─────────────────────────────────────────────────────────────────────
 const permanentEffectiveFrom = '2026-10-01'
-const combined: RecurringTemplate = {
-  ...template,
-  ...applyTemplateSingleOccurrenceAmountChange(template, 999, overrideDate),
-  ...applyTemplateAmountChange(template, 80, permanentEffectiveFrom),
-}
+const withSingleOverride: RecurringTemplate = { ...template, ...applyTemplateSingleOccurrenceAmountChange(template, 999, overrideDate) }
+// Chained onto withSingleOverride (not the bare template) — applyTemplateAmountChange
+// itself now filters occurrenceOverrides, so it must see the override to filter it
+// correctly (it's dated BEFORE permanentEffectiveFrom here, so it should survive).
+const combined: RecurringTemplate = { ...withSingleOverride, ...applyTemplateAmountChange(withSingleOverride, 80, permanentEffectiveFrom) }
 const combinedOccurrences = generateTransactionsForTemplate(combined, rangeStart, rangeEnd)
 check('The single-occurrence override still applies at its own date', combinedOccurrences.find((o) => o.date === overrideDate)?.amount, 999)
 check('Periods before the permanent change (and not overridden) still use the OLD standing amount', combinedOccurrences.find((o) => o.date === '2026-09-01')?.amount, 50)
 check('Periods on/after the permanent change use the NEW standing amount', combinedOccurrences.find((o) => o.date === permanentEffectiveFrom)?.amount, 80)
+
+// ─────────────────────────────────────────────────────────────────────
+// UAT 2026-09-09 (retest-bills-just-single/all-future-samedate) — the
+// ACTUAL reported bug: a single-occurrence override "froze" that date
+// forever, surviving even a LATER permanent ("all future") change
+// effective on/before that same date. A permanent change now clears the
+// amount off any occurrenceOverrides entry it reaches, since "ALL future
+// payments" has to mean all of them, not all-except-ones-with-a-prior-
+// one-off-tweak.
+// ─────────────────────────────────────────────────────────────────────
+const laterPermanentEffectiveFrom = overrideDate // effective ON the same date the override was set
+const supersedingChange: RecurringTemplate = { ...withSingleOverride, ...applyTemplateAmountChange(withSingleOverride, 100, laterPermanentEffectiveFrom) }
+const supersedingOccurrences = generateTransactionsForTemplate(supersedingChange, rangeStart, rangeEnd)
+check('A permanent change effective ON the overridden date supersedes it — no longer frozen at the old one-off value', supersedingOccurrences.find((o) => o.date === overrideDate)?.amount, 100)
+check('...and every later occurrence also uses the new standing amount', supersedingOccurrences.find((o) => o.date === '2026-09-01')?.amount, 100)
+check('The now-empty override entry (amount cleared, nothing else set) is dropped entirely rather than left as a dangling empty record', supersedingChange.occurrenceOverrides, [])
+
+const movedOnly: RecurringTemplate = { ...template, occurrenceOverrides: [{ originalDate: overrideDate, date: '2026-08-15' }] }
+const movedPlusPermanent: RecurringTemplate = { ...movedOnly, ...applyTemplateAmountChange(movedOnly, 100, laterPermanentEffectiveFrom) }
+check('A pure date-move override (no amount set) survives a permanent amount change untouched', movedPlusPermanent.occurrenceOverrides, [{ originalDate: overrideDate, date: '2026-08-15' }])
+
+// A single-occurrence override dated BEFORE the permanent change's
+// effective date must NOT be touched — it's already covered by "before
+// this date, keep the old value," which the override already satisfies.
+const earlierOverrideTemplate: RecurringTemplate = { ...template, ...applyTemplateSingleOccurrenceAmountChange(template, 999, '2026-06-01') }
+const laterPermanent: RecurringTemplate = { ...earlierOverrideTemplate, ...applyTemplateAmountChange(earlierOverrideTemplate, 100, '2026-09-01') }
+check('An override dated BEFORE the permanent change\'s effective date is left untouched', laterPermanent.occurrenceOverrides, [{ originalDate: '2026-06-01', amount: 999 }])
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) FAILED.`)
