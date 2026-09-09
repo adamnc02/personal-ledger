@@ -315,32 +315,43 @@ export function setPausedTemplateOccurrences(template: RecurringTemplate, window
  * anything before `effectiveFrom` keeps resolving to it, exactly as
  * salaryLedger.ts's snapshot list does for a pay rise.
  *
- * UAT 2026-09-09 (retest-bills-just-single/all-future-samedate) — a
- * PERMANENT ("all future") change now also clears the `amount` off any
- * `occurrenceOverrides` entry dated on/after `effectiveFrom`. Confirmed
- * as a real, reported bug otherwise: a prior single-occurrence override
- * always wins in resolveOccurrenceAmount regardless of what the standing
- * history says (by design, for a genuinely one-off correction) — but
- * that meant a later "all future" change silently could never reach a
- * date that had earlier been individually overridden, which reads as
- * "frozen" from the outside and defeats what "ALL future payments"
- * promises. A date-move override (no `amount` set) is left alone — this
- * only clears the amount half of an override, same surgical scope
- * setPausedTemplateOccurrences already uses for pause/unpause.
+ * UAT 2026-09-09 (retest2-bills-single-before-allfuture-untouched) — a
+ * PERMANENT change now DROPS every existing candidate (every
+ * amountHistory entry, and the current amount/amountEffectiveFrom pair)
+ * whose OWN effectiveFrom is on/after the new `effectiveFrom`, instead of
+ * just appending one more entry on top of whatever's already there.
+ * Confirmed as a real, serious bug otherwise, via Adam's own repro: edit
+ * a bill to £39 effective 1 Sept, then again to £40 effective 1 Nov, then
+ * try to set it back to £37 effective 1 Sept (i.e. an effective date
+ * EARLIER than a change that's already recorded further in the future).
+ * The naive "always append" version kept the old {effectiveFrom: 1 Nov,
+ * amount: £40} entry sitting in history — resolveTemplateAmount always
+ * picks the single LATEST effectiveFrom <= the query date, so for any
+ * date on/after 1 Nov, that stale, later-dated entry kept OUTRANKING the
+ * new 1-Sept change and resurrected the £40 the person had just tried to
+ * overwrite. The fix: an entry whose effectiveFrom >= the new
+ * effectiveFrom was only ever relevant for dates >= its own
+ * effectiveFrom — exactly the range the new change now fully owns — so
+ * it can be dropped outright rather than kept around to wrongly compete.
+ * Entries with effectiveFrom < the new effectiveFrom are genuinely
+ * unaffected (dates before the new change still need them) and are kept
+ * as-is. Same "supersede everything from this date forward" fix applied
+ * to `occurrenceOverrides`' amount half, for the identical reason.
  */
 export function applyTemplateAmountChange(
   template: RecurringTemplate,
   newAmount: number,
   effectiveFrom: string,
 ): Pick<RecurringTemplate, 'amount' | 'amountEffectiveFrom' | 'amountHistory' | 'occurrenceOverrides'> {
-  const priorEntry = { effectiveFrom: template.amountEffectiveFrom ?? template.anchorDate, amount: template.amount }
+  const priorCandidates = [...(template.amountHistory ?? []), { effectiveFrom: template.amountEffectiveFrom ?? template.anchorDate, amount: template.amount }]
+  const amountHistory = priorCandidates.filter((c) => c.effectiveFrom < effectiveFrom)
   const occurrenceOverrides = (template.occurrenceOverrides ?? [])
     .map((o) => (o.originalDate >= effectiveFrom && o.amount !== undefined ? { ...o, amount: undefined } : o))
     .filter((o) => o.date !== undefined || o.amount !== undefined || o.deleted !== undefined)
   return {
     amount: newAmount,
     amountEffectiveFrom: effectiveFrom,
-    amountHistory: [...(template.amountHistory ?? []), priorEntry],
+    amountHistory,
     occurrenceOverrides,
   }
 }

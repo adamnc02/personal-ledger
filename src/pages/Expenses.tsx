@@ -36,7 +36,7 @@ import type { LoggedPayment } from './Loans'
 import {
   previewOverpaymentRecast,
   previewRecurringOverpaymentRecast,
-  scheduledLoanRecurringOverpaymentDates,
+  scheduledLoanRecurringOverpaymentRealDates,
   setPausedLoanRecurringOverpaymentDates,
   recentAndUpcomingLoanRecurringOverpaymentDates,
   applyRecurringOverpaymentAmountChange,
@@ -2079,7 +2079,16 @@ function LoanRecurringOverpaymentEditForm({
     }
   }
 
-  const windowDates = scheduledLoanRecurringOverpaymentDates(loan, addMonths(new Date(), -2), addMonths(new Date(), 12))
+  // UAT 2026-09-09 (retest2-overpay-single-no-reamortise note) — same
+  // real-vs-period-date duality as pickerOccurrences above: windowEntries
+  // carries both so the "manage paused payments" checklist can DISPLAY
+  // the overpayment's own real dates while still comparing/writing
+  // pausedDates using the period-date basis recurringOverpaymentForDate
+  // actually checks against internally.
+  const windowEntries = scheduledLoanRecurringOverpaymentRealDates(loan, addMonths(new Date(), -2), addMonths(new Date(), 12))
+  const windowDates = windowEntries.map((e) => e.date)
+  const periodDateFor = (realDate: string) => windowEntries.find((e) => e.date === realDate)?.periodDate ?? realDate
+  const realDateFor = (periodDate: string) => windowEntries.find((e) => e.periodDate === periodDate)?.date ?? periodDate
 
   return (
     // No border-t here, deliberately (2026-09-09 followup, Adam-reported
@@ -2166,18 +2175,24 @@ function LoanRecurringOverpaymentEditForm({
       {/* Adam's own spec — the only button above the editable fields. */}
       <PausedOccurrencesControl
         windowDates={windowDates}
-        currentlyPaused={new Set(value.pausedDates ?? [])}
+        currentlyPaused={new Set((value.pausedDates ?? []).map(realDateFor))}
         amountForDate={(date) => {
-          const resolved = resolveRecurringOverpaymentAmount(value, date)
+          const resolved = resolveRecurringOverpaymentAmount(value, periodDateFor(date))
           return resolved.type === 'fixed' ? resolved.amount : Math.round(((loan.principal * resolved.percent) / 100) * 100) / 100
         }}
         itemLabel="overpayments"
         nextPaymentPreview={(tentative) => {
-          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, tentative)
-          return windowDates.find((d) => !merged?.pausedDates?.includes(d)) ?? null
+          const periodWindow = windowEntries.map((e) => e.periodDate)
+          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, periodWindow, tentative.map(periodDateFor))
+          const nextPeriod = periodWindow.find((pd) => !merged?.pausedDates?.includes(pd))
+          return nextPeriod ? realDateFor(nextPeriod) : null
         }}
         onSave={(pausedDates) => {
-          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, pausedDates)
+          const merged = setPausedLoanRecurringOverpaymentDates(
+            { ...loan, recurringOverpayment: value },
+            windowEntries.map((e) => e.periodDate),
+            pausedDates.map(periodDateFor),
+          )
           if (merged) onSave(merged)
         }}
       />

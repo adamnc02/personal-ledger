@@ -131,16 +131,25 @@ export function resolveRecurringOverpaymentAmount(r: LoanRecurringOverpayment, d
 // future") change also clears any amountOverrides entry dated on/after
 // `effectiveFrom`, so a prior single-occurrence override can't silently
 // outlive a later standing change that was meant to cover it too.
+// UAT 2026-09-09 (retest2-bills-single-before-allfuture-untouched) — same
+// fix as schedule.ts's applyTemplateAmountChange: DROPS every existing
+// candidate (amountHistory entries, and the current amount/
+// amountEffectiveFrom pair) whose OWN effectiveFrom is on/after the new
+// effectiveFrom, rather than just appending on top — otherwise a change
+// recorded further in the future than a new, earlier-effective edit kept
+// wrongly outranking it for any date on/after its own effectiveFrom. See
+// that function's own comment for the full repro and reasoning; applies
+// identically here.
 export function applyRecurringOverpaymentAmountChange(
   r: LoanRecurringOverpayment,
   newAmount: LoanRecurringOverpayment['amount'],
   effectiveFrom: string,
 ): Pick<LoanRecurringOverpayment, 'amount' | 'amountEffectiveFrom' | 'amountHistory' | 'amountOverrides'> {
-  const priorEntry = { effectiveFrom: r.amountEffectiveFrom ?? r.startDate, amount: r.amount }
+  const priorCandidates = [...(r.amountHistory ?? []), { effectiveFrom: r.amountEffectiveFrom ?? r.startDate, amount: r.amount }]
   return {
     amount: newAmount,
     amountEffectiveFrom: effectiveFrom,
-    amountHistory: [...(r.amountHistory ?? []), priorEntry],
+    amountHistory: priorCandidates.filter((c) => c.effectiveFrom < effectiveFrom),
     amountOverrides: (r.amountOverrides ?? []).filter((o) => o.date < effectiveFrom),
   }
 }
@@ -160,7 +169,7 @@ export function applyRecurringOverpaymentSingleAmountOverride(
 }
 
 /** The recurring overpayment amount for this exact payment date, given the balance remaining AFTER the scheduled payment and any one-off overpayment for that month — 0 if the loan has no recurring overpayment configured, this date falls outside its start/end window, or it's one of the individually paused dates (Phase 4). Percent-of-balance is deliberately computed fresh each period, never cached, same reasoning as a credit card's minimum payment: a fixed % of a shrinking balance shrinks in turn. */
-function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterScheduledAndOneOff: number): number {
+export function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterScheduledAndOneOff: number): number {
   const r = loan.recurringOverpayment
   if (!r || balanceAfterScheduledAndOneOff <= 0) return 0
   if (dateIso < r.startDate) return 0
@@ -181,15 +190,28 @@ function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterSc
  * window — deliberately ignoring pausedDates itself, unlike
  * recurringOverpaymentForDate above.
  */
-export function scheduledLoanRecurringOverpaymentDates(loan: Loan, rangeStart: Date, rangeEnd: Date): string[] {
+/**
+ * UAT 2026-09-09 (retest2-overpay-single-no-reamortise note) — used to
+ * return the LOAN's own schedule dates directly (`e.date`), same bug as
+ * recentAndUpcomingLoanRecurringOverpaymentDates fixed for the "which
+ * payment" picker: the "manage paused payments" window showed/paused the
+ * wrong day of the month whenever the overpayment's own real cadence
+ * differs from the loan's. Now returns both the REAL date (for display
+ * and for what the picker/pause-checklist UI should show) and the
+ * underlying `periodDate` (what pausedDates/recurringOverpaymentForDate
+ * actually compare against internally) — same duality as
+ * recentAndUpcomingLoanRecurringOverpaymentDates, see its own comment.
+ */
+export function scheduledLoanRecurringOverpaymentRealDates(loan: Loan, rangeStart: Date, rangeEnd: Date): { date: string; periodDate: string }[] {
   const r = loan.recurringOverpayment
   if (!r) return []
   const schedule = buildLoanSchedule(loan)
+  const realDates = recurringOverpaymentRealDates(loan, schedule)
   const rangeStartIso = toIso(rangeStart)
   const rangeEndIso = toIso(rangeEnd)
   return schedule
-    .map((e) => e.date)
-    .filter((date) => date >= rangeStartIso && date <= rangeEndIso && date >= r.startDate && (!r.endDate || date <= r.endDate))
+    .filter((e) => e.date >= rangeStartIso && e.date <= rangeEndIso && e.date >= r.startDate && (!r.endDate || e.date <= r.endDate))
+    .map((e) => ({ date: realDates.get(e.date) ?? e.date, periodDate: e.date }))
 }
 
 /**
@@ -224,16 +246,25 @@ export function resolveMonthlyPayment(loan: Loan, dateIso: string): number {
  * loan's own equivalent of a bill's anchorDate) for the very first edit's
  * "prior value" entry.
  */
+// UAT 2026-09-09 (retest2-bills-single-before-allfuture-untouched) — same
+// fix as schedule.ts's applyTemplateAmountChange (see its comment for the
+// full repro): DROPS every existing candidate whose OWN effectiveFrom is
+// on/after the new effectiveFrom, rather than just appending on top —
+// otherwise a payment change recorded further in the future than a new,
+// earlier-effective edit would keep wrongly outranking it for any date
+// on/after its own effectiveFrom. Proactively applied here too even
+// though not yet reported against this specific field — identical latent
+// flaw, same fix, per Adam's own instruction to apply this consistently.
 export function applyLoanMonthlyPaymentChange(
   loan: Loan,
   newAmount: number,
   effectiveFrom: string,
 ): Pick<Loan, 'monthlyPayment' | 'monthlyPaymentEffectiveFrom' | 'monthlyPaymentHistory'> {
-  const priorEntry = { effectiveFrom: loan.monthlyPaymentEffectiveFrom ?? loan.startDate, amount: loan.monthlyPayment }
+  const priorCandidates = [...(loan.monthlyPaymentHistory ?? []), { effectiveFrom: loan.monthlyPaymentEffectiveFrom ?? loan.startDate, amount: loan.monthlyPayment }]
   return {
     monthlyPayment: newAmount,
     monthlyPaymentEffectiveFrom: effectiveFrom,
-    monthlyPaymentHistory: [...(loan.monthlyPaymentHistory ?? []), priorEntry],
+    monthlyPaymentHistory: priorCandidates.filter((c) => c.effectiveFrom < effectiveFrom),
   }
 }
 

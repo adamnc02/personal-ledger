@@ -6,7 +6,7 @@
 
 import { newRecurringTemplate, scheduledTemplateDates, setPausedTemplateOccurrences, generateTransactionsForTemplate } from '../src/lib/schedule'
 import { newPension, scheduledPensionDates, setPausedPensionOccurrences, generatePensionTransactions } from '../src/lib/pensionLedger'
-import { buildLoanSchedule, scheduledLoanRecurringOverpaymentDates, setPausedLoanRecurringOverpaymentDates } from '../src/lib/ledgerLoans'
+import { buildLoanSchedule, scheduledLoanRecurringOverpaymentRealDates, setPausedLoanRecurringOverpaymentDates } from '../src/lib/ledgerLoans'
 import { BILLS_CATEGORY_ID, INCOME_CATEGORY_ID } from '../src/types/ledger'
 import type { Loan } from '../src/types/ledger'
 
@@ -85,8 +85,8 @@ const loanWithRecurring: Loan = {
   interestConventionId: 'flat_monthly',
   recurringOverpayment: { startDate: '2026-01-01', amount: { type: 'fixed', amount: 100 } },
 }
-const loanWindowDates = scheduledLoanRecurringOverpaymentDates(loanWithRecurring, new Date('2026-01-01'), new Date('2026-06-01'))
-check('scheduledLoanRecurringOverpaymentDates finds monthly payment dates in the window', loanWindowDates.length >= 5, true)
+const loanWindowDates = scheduledLoanRecurringOverpaymentRealDates(loanWithRecurring, new Date('2026-01-01'), new Date('2026-06-01')).map((e) => e.periodDate)
+check('scheduledLoanRecurringOverpaymentRealDates finds monthly payment dates in the window', loanWindowDates.length >= 5, true)
 
 const pausedMarch = setPausedLoanRecurringOverpaymentDates(loanWithRecurring, loanWindowDates, [loanWindowDates[2]])
 const loanWithPause: Loan = { ...loanWithRecurring, recurringOverpayment: pausedMarch! }
