@@ -796,6 +796,7 @@ function LoanEditPanel({
   const [loggingOverpayment, setLoggingOverpayment] = useState(overpaymentPrefill?.mode === 'payoff')
   const [settlingLoan, setSettlingLoan] = useState(false)
   const [calibratingLoan, setCalibratingLoan] = useState(false)
+  const navigate = useNavigate()
   // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
   // when nothing's changed — this panel's Save was a plain always-on
   // button with no dirty/validity gating at all before this.
@@ -895,6 +896,27 @@ function LoanEditPanel({
           onCancel={() => setLoggingOverpayment(false)}
         />
       )}
+
+      {/* 2026-09-09 followup (Adam-reported) — a real trigger to start a
+          NEW recurring overpayment for this loan needs to stay reachable
+          from here, same as the one-off log button above; it just no
+          longer opens its own inline editor (that's still gone — see the
+          comment on the deleted RecurringOverpaymentEditor). Instead it
+          hands off to the exact same Overpayments-pill wizard the What-if
+          page's "Make this a real recurring overpayment" button already
+          uses, pre-selecting this loan (target only, no amount) so the
+          person still picks amount/from/recast/date themselves. */}
+      <button
+        onClick={() =>
+          navigate('/expenses', {
+            state: { overpaymentPrefill: { targetKind: 'loan', targetId: loan.id, mode: 'recurring', amount: 0 } },
+          })
+        }
+        className="text-xs font-medium self-start"
+        style={{ color: 'var(--color-coral)' }}
+      >
+        + Log a recurring overpayment
+      </button>
 
       {loan.active ? (
         <>

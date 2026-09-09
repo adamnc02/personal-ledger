@@ -1341,6 +1341,14 @@ function OverpaymentCreateForm({
   onSaveRecurring: (loanId: string, recurringOverpayment: LoanRecurringOverpayment) => void
 }) {
   const prefillLoan = prefill ? loans.find((l) => l.id === prefill.loanId) : undefined
+  // 2026-09-09 followup (Adam-reported) — two different prefill shapes
+  // land here now: the What-if page's "Make this a real recurring
+  // overpayment" hands over a real amount too (so it's safe to skip
+  // straight past Amount/To), while the Borrowing page's own "+ Log a
+  // recurring overpayment" trigger only knows WHICH loan — amount is
+  // still 0/unset, so the person needs the normal Amount step, just with
+  // To already answered for them.
+  const hasPrefillAmount = !!prefillLoan && (prefill?.amount ?? 0) > 0
   const [mode, setMode] = useState<OverpaymentMode>(prefillLoan ? 'recurring' : 'one_off')
   // Recurring is loan-only — a credit card target is never offered once
   // Recurring is picked.
@@ -1349,8 +1357,10 @@ function OverpaymentCreateForm({
       ? loans.map((l) => ({ kind: 'loan' as const, id: l.id, label: `Loan: ${l.name}` }))
       : [...loans.map((l) => ({ kind: 'loan' as const, id: l.id, label: `Loan: ${l.name}` })), ...cards.map((c) => ({ kind: 'card' as const, id: c.id, label: `Credit Card: ${c.name}` }))]
 
-  const [step, setStep] = useState<OverpaymentFormStep>(prefillLoan ? (prefillLoan.location === 'joint' ? 'recast' : 'from') : 'amount')
-  const [amount, setAmount] = useState(prefillLoan ? String(prefill!.amount) : '')
+  const [step, setStep] = useState<OverpaymentFormStep>(
+    prefillLoan ? (hasPrefillAmount ? (prefillLoan.location === 'joint' ? 'recast' : 'from') : 'amount') : 'amount',
+  )
+  const [amount, setAmount] = useState(hasPrefillAmount ? String(prefill!.amount) : '')
   const [recurringAmountType, setRecurringAmountType] = useState<'fixed' | 'percent_of_balance'>('fixed')
   const [recurringPercent, setRecurringPercent] = useState('5')
   const [target, setTarget] = useState<OverpaymentTarget | null>(prefillLoan ? { kind: 'loan', id: prefillLoan.id, label: `Loan: ${prefillLoan.name}` } : null)
@@ -1383,6 +1393,14 @@ function OverpaymentCreateForm({
   // one eligible target (Adam-requested) — no point making a single-
   // option list something you have to tap through.
   function afterAmount() {
+    // Target already answered (Borrowing page's own "+ Log a recurring
+    // overpayment" trigger pre-selects its loan) — re-run the same
+    // routing pickTarget always does (joint loans skip From) rather than
+    // asking the person to pick the loan they just came from again.
+    if (target) {
+      pickTarget(target)
+      return
+    }
     if (targets.length === 1) {
       pickTarget(targets[0])
       return
