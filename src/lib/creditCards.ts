@@ -883,6 +883,25 @@ export interface CreditCardMinimumChargeRow {
   // happened" vs "projected" distinction if it wants to, not because the
   // edit flow itself needs the caller to know which path it'll take.
   materialized: boolean
+  // BUGFIX (2026-09-09, "assume the minimum gets paid" projection,
+  // Adam-requested) — the TRUE balance owed as of this due date. For a
+  // materialized row this is just cardBalanceAsOf (real activity always
+  // wins, unconditionally). For a projected row, cardBalanceAsOf would be
+  // wrong here: it replays ONLY real, logged activity, so any due date
+  // beyond the next one silently assumes NOTHING gets paid at all between
+  // now and then — overstating both the balance and the interest that
+  // compounds on it, since in reality the contractual minimum is paid
+  // every cycle whether or not Adam has logged it (same principle
+  // `simulateCardPayoffMonths`, the What-if page's own projection,
+  // already uses). Sourced from `generateMinimumPaymentTransactions`'s own
+  // `onCycle` hook — the exact figure ITS simulation already treats as
+  // "the true running balance right before this cycle's own minimum gets
+  // deducted," so this can never disagree with the schedule the rows
+  // above were generated from. This is what buildCreditCardBalanceDueRows/
+  // buildCreditCardDueOverviewRows (the Borrowing page's "Payment due"
+  // section, and its Clear button's own payoff amount) use — never
+  // cardBalanceAsOf directly for a projected row.
+  projectedBalanceDue: number
 }
 
 /**
@@ -922,11 +941,30 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   // showed an empty future for a card that genuinely owed £228.07. Any
   // figure that did appear was a manual minimumPaymentOverride being
   // echoed back, never something the modal had computed.
-  const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions).filter((t) => !storedDates.has(t.date))
+  //
+  // BUGFIX (2026-09-09, "assume the minimum gets paid" projection) —
+  // `onCycle` captures `workingBalanceBeforePayment` for every simulated
+  // due date (whether or not a row ends up generated for it) — the true
+  // running balance the generator's OWN simulation used right before that
+  // cycle's own minimum was deducted from it. This is the "assume every
+  // prior cycle's minimum got paid" figure Adam asked for, and reusing
+  // this function's own internal simulation (rather than re-deriving it
+  // separately) is what guarantees it can never disagree with the
+  // schedule these rows themselves came from.
+  const workingBalanceByDate = new Map<string, number>()
+  const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions, ({ dateIso, workingBalanceBeforePayment }) =>
+    workingBalanceByDate.set(dateIso, workingBalanceBeforePayment),
+  ).filter((t) => !storedDates.has(t.date))
 
   const rows: CreditCardMinimumChargeRow[] = [
-    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true })),
-    ...generated.map((t) => ({ date: t.date, amount: t.amount, status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const), materialized: false })),
+    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true, projectedBalanceDue: cardBalanceAsOf(card, transactions, new Date(t.date)) })),
+    ...generated.map((t) => ({
+      date: t.date,
+      amount: t.amount,
+      status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const),
+      materialized: false,
+      projectedBalanceDue: workingBalanceByDate.get(t.date) ?? cardBalanceAsOf(card, transactions, new Date(t.date)),
+    })),
   ]
   return rows.sort((a, b) => a.date.localeCompare(b.date))
 }
@@ -958,7 +996,7 @@ export function buildCreditCardBalanceDueRows(card: CreditCard, transactions: Tr
   const minimumRows = buildCreditCardMinimumChargeRows(card, transactions, asOfDate)
   return minimumRows
     .filter((r) => r.status === 'pending')
-    .map((r) => ({ date: r.date, balanceDue: cardBalanceAsOf(card, transactions, new Date(r.date)), minimum: r.amount }))
+    .map((r) => ({ date: r.date, balanceDue: r.projectedBalanceDue, minimum: r.amount }))
     .filter((r) => r.balanceDue > r.minimum + 0.01)
     .map((r) => ({ date: r.date, balanceDue: r.balanceDue }))
 }
@@ -977,12 +1015,22 @@ export interface CreditCardDueOverviewRow {
  * styling. Deliberately UNFILTERED by "meaningfully more than minimum"
  * (unlike buildCreditCardBalanceDueRows above, which only surfaces dates
  * worth an early payoff nudge) — this is a plain schedule overview, every
- * due date gets its own row with the real balance owed as of that date,
- * same as the info modal now shows for minimum charges alone.
+ * due date gets its own row with the balance owed as of that date, same
+ * as the info modal now shows for minimum charges alone.
+ *
+ * BUGFIX (2026-09-09, "assume the minimum gets paid" projection) — used
+ * to read `cardBalanceAsOf` directly here, which overstated every row
+ * beyond the very next one (see `CreditCardMinimumChargeRow.projectedBalanceDue`'s
+ * own comment). Reads `projectedBalanceDue` instead — real activity for a
+ * materialized (already-happened) row, the assumed-minimum-paid
+ * projection for anything still upcoming. This is also what sizes the
+ * Clear button's own payoff transaction for an upcoming row, so clearing
+ * it genuinely zeroes the card rather than leaving an interest-inflated
+ * residual behind.
  */
 export function buildCreditCardDueOverviewRows(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): CreditCardDueOverviewRow[] {
   const rows = buildCreditCardMinimumChargeRows(card, transactions, asOfDate)
-  return rows.map((r) => ({ date: r.date, balanceDue: cardBalanceAsOf(card, transactions, new Date(r.date)), isPast: r.status === 'cleared' }))
+  return rows.map((r) => ({ date: r.date, balanceDue: r.projectedBalanceDue, isPast: r.status === 'cleared' }))
 }
 
 /** Convenience wrapper over withLiveBalance for a whole list — the shape almost every read site actually wants. Same rule applies: display/compute only, never persisted. */
