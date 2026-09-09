@@ -99,6 +99,60 @@ export interface LoanScheduleEntry {
 
 const MAX_SCHEDULE_ENTRIES = 720 // 60 years — generous safety cap, not a real limit
 
+/**
+ * What a recurring overpayment's `amount` resolves to on a specific date,
+ * once an `amountOverrides`/`amountHistory` entry exists — an exact-date
+ * override wins outright (the "just a single payment" case), otherwise
+ * mirrors resolveMonthlyPayment/resolveTemplateAmount's history walk
+ * (later array index wins on an exact-date tie).
+ */
+export function resolveRecurringOverpaymentAmount(r: LoanRecurringOverpayment, dateIso: string): LoanRecurringOverpayment['amount'] {
+  const override = r.amountOverrides?.find((o) => o.date === dateIso)
+  if (override) return override.amount
+
+  const candidates: { effectiveFrom: string; amount: LoanRecurringOverpayment['amount'] }[] = [...(r.amountHistory ?? [])]
+  if (r.amountEffectiveFrom) candidates.push({ effectiveFrom: r.amountEffectiveFrom, amount: r.amount })
+  if (candidates.length === 0) return r.amount
+
+  const applicable = candidates
+    .map((c, index) => ({ ...c, index }))
+    .filter((c) => c.effectiveFrom <= dateIso)
+    .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom) || b.index - a.index)
+  return applicable[0]?.amount ?? r.amount
+}
+
+/**
+ * Builds the patch for a PERMANENT ("all future payments") recurring-
+ * overpayment amount change — preserves the old amount as a history
+ * entry, mirroring applyLoanMonthlyPaymentChange/applyTemplateAmountChange.
+ */
+export function applyRecurringOverpaymentAmountChange(
+  r: LoanRecurringOverpayment,
+  newAmount: LoanRecurringOverpayment['amount'],
+  effectiveFrom: string,
+): Pick<LoanRecurringOverpayment, 'amount' | 'amountEffectiveFrom' | 'amountHistory'> {
+  const priorEntry = { effectiveFrom: r.amountEffectiveFrom ?? r.startDate, amount: r.amount }
+  return {
+    amount: newAmount,
+    amountEffectiveFrom: effectiveFrom,
+    amountHistory: [...(r.amountHistory ?? []), priorEntry],
+  }
+}
+
+/**
+ * Builds the patch for a SINGLE-occurrence ("just a single payment")
+ * recurring-overpayment amount change — leaves the standing amount/
+ * amountHistory completely untouched, only recording a one-date override.
+ */
+export function applyRecurringOverpaymentSingleAmountOverride(
+  r: LoanRecurringOverpayment,
+  amount: LoanRecurringOverpayment['amount'],
+  date: string,
+): Pick<LoanRecurringOverpayment, 'amountOverrides'> {
+  const withoutExisting = (r.amountOverrides ?? []).filter((o) => o.date !== date)
+  return { amountOverrides: [...withoutExisting, { date, amount }] }
+}
+
 /** The recurring overpayment amount for this exact payment date, given the balance remaining AFTER the scheduled payment and any one-off overpayment for that month — 0 if the loan has no recurring overpayment configured, this date falls outside its start/end window, or it's one of the individually paused dates (Phase 4). Percent-of-balance is deliberately computed fresh each period, never cached, same reasoning as a credit card's minimum payment: a fixed % of a shrinking balance shrinks in turn. */
 function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterScheduledAndOneOff: number): number {
   const r = loan.recurringOverpayment
@@ -106,8 +160,9 @@ function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterSc
   if (dateIso < r.startDate) return 0
   if (r.endDate && dateIso > r.endDate) return 0
   if (r.pausedDates?.includes(dateIso)) return 0
-  if (r.amount.type === 'fixed') return round2(Math.min(r.amount.amount, balanceAfterScheduledAndOneOff))
-  return round2((balanceAfterScheduledAndOneOff * r.amount.percent) / 100)
+  const amount = resolveRecurringOverpaymentAmount(r, dateIso)
+  if (amount.type === 'fixed') return round2(Math.min(amount.amount, balanceAfterScheduledAndOneOff))
+  return round2((balanceAfterScheduledAndOneOff * amount.percent) / 100)
 }
 
 /**

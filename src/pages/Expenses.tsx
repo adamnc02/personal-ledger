@@ -23,7 +23,15 @@ import { EffectiveDatedChangeFlow, type RecurringChangeField } from '../componen
 import { addYears, addDays, addMonths } from 'date-fns'
 import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard, LoanRecurringOverpayment, Category } from '../types/ledger'
 import type { LoggedPayment } from './Loans'
-import { previewOverpaymentRecast, previewRecurringOverpaymentRecast, scheduledLoanRecurringOverpaymentDates, setPausedLoanRecurringOverpaymentDates } from '../lib/ledgerLoans'
+import {
+  previewOverpaymentRecast,
+  previewRecurringOverpaymentRecast,
+  scheduledLoanRecurringOverpaymentDates,
+  setPausedLoanRecurringOverpaymentDates,
+  recentAndUpcomingLoanPaymentDates,
+  applyRecurringOverpaymentAmountChange,
+  applyRecurringOverpaymentSingleAmountOverride,
+} from '../lib/ledgerLoans'
 
 const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   cash: 'Cash',
@@ -1943,6 +1951,12 @@ function LoanRecurringOverpaymentEditForm({
   const [showEndDate, setShowEndDate] = useState(!!value.endDate)
   const [endDate, setEndDate] = useState(value.endDate ?? '')
   const [pendingConfirm, setPendingConfirm] = useState<{ changes: RecurringChangeField[]; commit: () => void } | null>(null)
+  // 2026-09-09 — an amount change now goes through the full shared
+  // scope->date->confirm flow (real amountHistory/amountOverrides exist
+  // now, unlike before), replacing the hardcoded todayIso() this used to
+  // commit against. Every other field keeps the existing flat "confirm
+  // today, apply immediately" path below (unaffected, not effective-dated).
+  const [changingAmount, setChangingAmount] = useState(false)
 
   const amount: LoanRecurringOverpayment['amount'] = amountType === 'fixed' ? { type: 'fixed', amount: Number(fixedAmount) || 0 } : { type: 'percent_of_balance', percent: Number(percent) || 0 }
   const draft: LoanRecurringOverpayment = { startDate, endDate: endDate || undefined, amount, location, potId: location === 'pot' ? potId : undefined, recastMode, pausedDates: value.pausedDates }
@@ -1959,20 +1973,42 @@ function LoanRecurringOverpaymentEditForm({
     return a.type === 'fixed' ? `£${formatCurrency(a.amount)}` : `${a.percent}% of balance`
   }
 
-  function handleSave() {
-    // 2026-09-09 followup (Adam-reported) — "used for anything RECURRING
-    // in the app that changed" applies to EVERY field here, not just
-    // location: same confirm-diff modal Bills/recurring transfers show,
-    // one line per changed field.
+  const amountChanged = JSON.stringify(draft.amount) !== JSON.stringify(value.amount)
+
+  // Every OTHER field's diff — location/recast/dates — shown alongside
+  // the amount diff whichever path handles the save, so one shared
+  // confirm step still covers everything changed together (same
+  // convention BillEditPanel/LoanEditPanel use for amount+location).
+  function nonAmountChanges(): RecurringChangeField[] {
     const locationChanged = draft.location !== value.location || (draft.location === 'pot' && draft.potId !== value.potId)
     const changes: RecurringChangeField[] = []
-    if (JSON.stringify(draft.amount) !== JSON.stringify(value.amount)) changes.push({ label: 'Amount', from: amountLabel(value.amount), to: amountLabel(draft.amount) })
     if (locationChanged) changes.push({ label: 'Paid from', from: overpaymentFromLabel(loan, pots, value.location, value.potId), to: overpaymentFromLabel(loan, pots, draft.location, draft.potId) })
     if (draft.recastMode !== (value.recastMode ?? 'reduce_term')) {
       changes.push({ label: 'How it\'s applied', from: value.recastMode === 'reduce_payment' ? 'Keep the same length' : 'Keep payment the same', to: draft.recastMode === 'reduce_payment' ? 'Keep the same length' : 'Keep payment the same' })
     }
     if (draft.startDate !== value.startDate) changes.push({ label: 'Start date', from: value.startDate, to: draft.startDate })
     if (draft.endDate !== value.endDate) changes.push({ label: 'End date', from: value.endDate ?? 'None', to: draft.endDate ?? 'None' })
+    return changes
+  }
+
+  // Recurring-overpayment dates are a subset of the loan's own payment
+  // dates (scheduledLoanRecurringOverpaymentDates derives its own
+  // candidates from the identical buildLoanSchedule(loan) output), so
+  // reusing recentAndUpcomingLoanPaymentDates is safe — filtered to this
+  // overpayment's own active window so a picked date can't predate it.
+  const amountChangeOccurrences = recentAndUpcomingLoanPaymentDates(loan, new Date()).filter((o) => o.date >= value.startDate && (!value.endDate || o.date <= value.endDate))
+
+  function handleSave() {
+    // 2026-09-09 followup (Adam-reported) — "used for anything RECURRING
+    // in the app that changed" applies to EVERY field here, not just
+    // location: same confirm-diff modal Bills/recurring transfers show,
+    // one line per changed field.
+    if (amountChanged && amountChangeOccurrences.length > 0) {
+      setChangingAmount(true)
+      return
+    }
+    const changes = nonAmountChanges()
+    if (amountChanged) changes.unshift({ label: 'Amount', from: amountLabel(value.amount), to: amountLabel(draft.amount) })
 
     const commit = () => onSave(draft)
     if (changes.length > 0) {
@@ -1991,6 +2027,33 @@ function LoanRecurringOverpaymentEditForm({
     // wide, and it's the first thing rendered here, so adding a second
     // one on this wrapper doubled up the line right above it.
     <div className="px-3 pb-3 flex flex-col gap-3">
+      {changingAmount && (
+        <EffectiveDatedChangeFlow
+          scopeStep={{
+            description: `${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)}. Just a single payment, or every payment from then on?`,
+            singleLabel: 'Just a single payment',
+          }}
+          occurrences={amountChangeOccurrences}
+          dateStepDescription={`${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)}. Which payment should this apply from?`}
+          buildChanges={() => {
+            const changes = nonAmountChanges()
+            changes.unshift({ label: 'Amount', from: amountLabel(value.amount), to: amountLabel(draft.amount) })
+            return changes
+          }}
+          onCancelAll={() => {
+            setChangingAmount(false)
+            onCancel()
+          }}
+          onCommit={(effectiveFrom, scope) => {
+            if (scope === 'single') {
+              onSave({ ...draft, amount: value.amount, ...applyRecurringOverpaymentSingleAmountOverride(value, draft.amount, effectiveFrom) })
+            } else {
+              onSave({ ...draft, ...applyRecurringOverpaymentAmountChange(value, draft.amount, effectiveFrom) })
+            }
+            setChangingAmount(false)
+          }}
+        />
+      )}
       {pendingConfirm && (
         <RecurringChangeConfirmModal
           effectiveFrom={todayIso()}
