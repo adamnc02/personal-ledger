@@ -17,6 +17,7 @@ import {
   recentAndUpcomingOccurrences,
   applyTemplateAmountChange,
   applyTemplateSingleOccurrenceAmountChange,
+  resolveOccurrenceAmount,
   templateOccurrencePreviews,
   setPausedTemplateOccurrences,
   scheduledTemplateDates,
@@ -28,7 +29,7 @@ import { LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, re
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfirmModal'
-import { EffectiveDatedChangeFlow, type RecurringChangeField } from '../components/EffectiveDatedChangeFlow'
+import { EffectiveDatedChangeFlow, type RecurringChangeField, type ChangeScope } from '../components/EffectiveDatedChangeFlow'
 import { addYears, addDays, addMonths } from 'date-fns'
 import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard, LoanRecurringOverpayment, Category } from '../types/ledger'
 import type { LoggedPayment } from './Loans'
@@ -40,6 +41,7 @@ import {
   recentAndUpcomingLoanPaymentDates,
   applyRecurringOverpaymentAmountChange,
   applyRecurringOverpaymentSingleAmountOverride,
+  resolveRecurringOverpaymentAmount,
 } from '../lib/ledgerLoans'
 
 const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
@@ -301,6 +303,7 @@ export function Expenses() {
     logLoanOverpayment,
     logCreditCardLumpPayment,
     updateLoan,
+    assignLoanRecurringOverpaymentLocation,
   } = useLedgerData()
   const [mode, setMode] = useState<PageMode>('transactions')
   const [adding, setAdding] = useState(false)
@@ -653,6 +656,7 @@ export function Expenses() {
                     category={data.categories.find((c) => c.id === loan.categoryId)}
                     value={loan.recurringOverpayment!}
                     onUpdate={(v) => updateLoan(loan.id, { recurringOverpayment: v })}
+                    onAssignLocation={(effectiveFrom, location, potId) => assignLoanRecurringOverpaymentLocation(loan.id, location, effectiveFrom, potId)}
                     onRemove={() => updateLoan(loan.id, { recurringOverpayment: undefined })}
                   />
                 ))}
@@ -1435,11 +1439,17 @@ function OverpaymentCreateForm({
     // to a pot-sourced, unsplit amount"). So there's nothing to actually
     // pick — skip straight past the From step, same "don't make a
     // single-option list something to tap through" rule as the To step.
+    // UAT 2026-09-09 (ed-overpay-just-single) — a RECURRING overpayment
+    // never offers the recast choice at all now (Adam's own call, see
+    // ledgerLoans.ts's buildLoanSchedule doc comment on why reduce_payment
+    // is no longer honoured for one) — always reduce_term, straight to
+    // the date step. A ONE-OFF overpayment keeps its own choice, below.
     const loan = t.kind === 'loan' ? loans.find((l) => l.id === t.id) : undefined
     if (mode === 'recurring' && loan?.location === 'joint') {
       setFromLocation(undefined)
       setFromPotId(undefined)
-      setStep('recast')
+      setRecastMode('reduce_term')
+      setStep('date')
     } else if (mode === 'recurring') {
       setStep('from')
     } else {
@@ -1577,7 +1587,8 @@ function OverpaymentCreateForm({
             onClick={() => {
               setFromLocation('personal')
               setFromPotId(undefined)
-              setStep('recast')
+              setRecastMode('reduce_term')
+              setStep('date')
             }}
             className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
             style={{ background: 'var(--color-surface)' }}
@@ -1590,7 +1601,8 @@ function OverpaymentCreateForm({
               onClick={() => {
                 setFromLocation('pot')
                 setFromPotId(p.id)
-                setStep('recast')
+                setRecastMode('reduce_term')
+                setStep('date')
               }}
               className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
               style={{ background: 'var(--color-surface)' }}
@@ -1888,6 +1900,7 @@ function LoanRecurringOverpaymentRow({
   category,
   value,
   onUpdate,
+  onAssignLocation,
   onRemove,
 }: {
   loan: Loan
@@ -1895,6 +1908,7 @@ function LoanRecurringOverpaymentRow({
   category: Category | undefined
   value: LoanRecurringOverpayment
   onUpdate: (v: LoanRecurringOverpayment) => void
+  onAssignLocation: (effectiveFrom: string, location: 'personal' | 'pot', potId?: string) => void
   onRemove: () => void
 }) {
   const [isEditing, setIsEditing] = useState(false)
@@ -1929,6 +1943,7 @@ function LoanRecurringOverpaymentRow({
               setIsEditing(false)
               triggerFlash()
             }}
+            onAssignLocation={onAssignLocation}
           />
         )}
         <SavedFlashOverlay active={flashActive} message={flashMessage} />
@@ -1942,12 +1957,14 @@ function LoanRecurringOverpaymentEditForm({
   pots,
   value,
   onSave,
+  onAssignLocation,
   onCancel,
 }: {
   loan: Loan
   pots: Pot[]
   value: LoanRecurringOverpayment
   onSave: (v: LoanRecurringOverpayment) => void
+  onAssignLocation: (effectiveFrom: string, location: 'personal' | 'pot', potId?: string) => void
   onCancel: () => void
 }) {
   const [amountType, setAmountType] = useState<'fixed' | 'percent_of_balance'>(value.amount.type)
@@ -1955,7 +1972,6 @@ function LoanRecurringOverpaymentEditForm({
   const [percent, setPercent] = useState(value.amount.type === 'percent_of_balance' ? String(value.amount.percent) : '')
   const [location, setLocation] = useState(value.location)
   const [potId, setPotId] = useState(value.potId)
-  const [recastMode, setRecastMode] = useState<'reduce_term' | 'reduce_payment'>(value.recastMode ?? 'reduce_term')
   const [startDate, setStartDate] = useState(value.startDate)
   const [showEndDate, setShowEndDate] = useState(!!value.endDate)
   const [endDate, setEndDate] = useState(value.endDate ?? '')
@@ -1968,14 +1984,22 @@ function LoanRecurringOverpaymentEditForm({
   const [changingAmount, setChangingAmount] = useState(false)
 
   const amount: LoanRecurringOverpayment['amount'] = amountType === 'fixed' ? { type: 'fixed', amount: Number(fixedAmount) || 0 } : { type: 'percent_of_balance', percent: Number(percent) || 0 }
-  const draft: LoanRecurringOverpayment = { startDate, endDate: endDate || undefined, amount, location, potId: location === 'pot' ? potId : undefined, recastMode, pausedDates: value.pausedDates }
+  // UAT 2026-09-09 (ed-overpay-just-single) — recastMode is no longer
+  // user-editable for a RECURRING overpayment: Adam's own call, after
+  // seeing 'reduce_payment' re-amortise every future contractual payment
+  // the moment a single-occurrence amount override landed. A ONE-OFF
+  // overpayment (LoanOverpaymentForm, this file's own separate form)
+  // keeps its recast choice — that one genuinely is a single, deliberate
+  // event. A recurring one recomputing the payment every period it fires
+  // is exactly the runaway-complexity case ledgerLoans.ts's own
+  // buildLoanSchedule comment already warns about; always reduce_term.
+  const draft: LoanRecurringOverpayment = { startDate, endDate: endDate || undefined, amount, location, potId: location === 'pot' ? potId : undefined, recastMode: 'reduce_term', pausedDates: value.pausedDates }
   const dirty =
     JSON.stringify(draft.amount) !== JSON.stringify(value.amount) ||
     draft.startDate !== value.startDate ||
     draft.endDate !== value.endDate ||
     draft.location !== value.location ||
-    draft.potId !== value.potId ||
-    draft.recastMode !== (value.recastMode ?? 'reduce_term')
+    draft.potId !== value.potId
   const amountValid = amountType === 'fixed' ? Number(fixedAmount) > 0 : Number(percent) > 0
 
   function amountLabel(a: LoanRecurringOverpayment['amount']): string {
@@ -1983,21 +2007,41 @@ function LoanRecurringOverpaymentEditForm({
   }
 
   const amountChanged = JSON.stringify(draft.amount) !== JSON.stringify(value.amount)
+  // UAT 2026-09-09 (ed-overpay-scope-step) — "Location should be treated
+  // the same as amount for recurring overpayments": now goes through the
+  // same picker-first date choice + real, retroactive transaction rewrite
+  // (reassignLoanRecurringOverpaymentTransactions via onAssignLocation)
+  // that Bills'/Loans' own location changes already use — previously a
+  // flat, non-effective-dated setting. Still no scope ("just a single
+  // payment") step of its own, matching every other location field in
+  // the app — see EffectiveDatedChangeFlow's scopeStep prop below.
+  const locationChanged = draft.location !== value.location || (draft.location === 'pot' && draft.potId !== value.potId)
 
-  // Every OTHER field's diff — location/recast/dates — shown alongside
-  // the amount diff whichever path handles the save, so one shared
-  // confirm step still covers everything changed together (same
-  // convention BillEditPanel/LoanEditPanel use for amount+location).
-  function nonAmountChanges(): RecurringChangeField[] {
-    const locationChanged = draft.location !== value.location || (draft.location === 'pot' && draft.potId !== value.potId)
+  // Every OTHER field's diff — just dates now (recast is no longer user-
+  // editable, location has its own dedicated builder below) — shown
+  // alongside the amount/location diff whichever path handles the save,
+  // so one shared confirm step still covers everything changed together
+  // (same convention BillEditPanel/LoanEditPanel use for amount+location).
+  // `scope` is only ever passed from the picker flow below — dates have
+  // no single-occurrence write of their own, so whenever "just a single
+  // payment" was chosen for the amount, they need the same explicit
+  // "this still applies permanently" note (ed-overpay-just-single
+  // wording follow-up).
+  function dateChanges(scope?: ChangeScope | null): RecurringChangeField[] {
+    const note = scope === 'single' ? 'This applies permanently from this date, not just to the single payment above.' : undefined
     const changes: RecurringChangeField[] = []
-    if (locationChanged) changes.push({ label: 'Paid from', from: overpaymentFromLabel(loan, pots, value.location, value.potId), to: overpaymentFromLabel(loan, pots, draft.location, draft.potId) })
-    if (draft.recastMode !== (value.recastMode ?? 'reduce_term')) {
-      changes.push({ label: 'How it\'s applied', from: value.recastMode === 'reduce_payment' ? 'Keep the same length' : 'Keep payment the same', to: draft.recastMode === 'reduce_payment' ? 'Keep the same length' : 'Keep payment the same' })
-    }
-    if (draft.startDate !== value.startDate) changes.push({ label: 'Start date', from: value.startDate, to: draft.startDate })
-    if (draft.endDate !== value.endDate) changes.push({ label: 'End date', from: value.endDate ?? 'None', to: draft.endDate ?? 'None' })
+    if (draft.startDate !== value.startDate) changes.push({ label: 'Start date', from: value.startDate, to: draft.startDate, note })
+    if (draft.endDate !== value.endDate) changes.push({ label: 'End date', from: value.endDate ?? 'None', to: draft.endDate ?? 'None', note })
     return changes
+  }
+
+  function locationChangeField(scope?: ChangeScope | null): RecurringChangeField {
+    return {
+      label: 'Paid from',
+      from: overpaymentFromLabel(loan, pots, value.location, value.potId),
+      to: overpaymentFromLabel(loan, pots, draft.location, draft.potId),
+      note: scope === 'single' ? 'This applies permanently from this date, not just to the single payment above.' : undefined,
+    }
   }
 
   // Recurring-overpayment dates are a subset of the loan's own payment
@@ -2005,21 +2049,27 @@ function LoanRecurringOverpaymentEditForm({
   // candidates from the identical buildLoanSchedule(loan) output), so
   // reusing recentAndUpcomingLoanPaymentDates is safe — filtered to this
   // overpayment's own active window so a picked date can't predate it.
-  const amountChangeOccurrences = recentAndUpcomingLoanPaymentDates(loan, new Date()).filter((o) => o.date >= value.startDate && (!value.endDate || o.date <= value.endDate))
+  const pickerOccurrences = recentAndUpcomingLoanPaymentDates(loan, new Date()).filter((o) => o.date >= value.startDate && (!value.endDate || o.date <= value.endDate))
 
   function handleSave() {
     // 2026-09-09 followup (Adam-reported) — "used for anything RECURRING
     // in the app that changed" applies to EVERY field here, not just
     // location: same confirm-diff modal Bills/recurring transfers show,
     // one line per changed field.
-    if (amountChanged && amountChangeOccurrences.length > 0) {
+    if ((amountChanged || locationChanged) && pickerOccurrences.length > 0) {
       setChangingAmount(true)
       return
     }
-    const changes = nonAmountChanges()
+    const changes = dateChanges()
+    if (locationChanged) changes.unshift(locationChangeField())
     if (amountChanged) changes.unshift({ label: 'Amount', from: amountLabel(value.amount), to: amountLabel(draft.amount) })
 
-    const commit = () => onSave(draft)
+    const commit = () => {
+      // No occurrences to anchor a date to yet — apply immediately, dated
+      // today, same "nothing to pick from" guard Bills.tsx/LoanEditPanel use.
+      if (locationChanged) onAssignLocation(todayIso(), draft.location as 'personal' | 'pot', draft.potId)
+      onSave(draft)
+    }
     if (changes.length > 0) {
       setPendingConfirm({ changes, commit })
     } else {
@@ -2038,15 +2088,24 @@ function LoanRecurringOverpaymentEditForm({
     <div className="px-3 pb-3 flex flex-col gap-3">
       {changingAmount && (
         <EffectiveDatedChangeFlow
-          scopeStep={{
-            description: `${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)}. Just a single payment, or every payment from then on?`,
-            singleLabel: 'Just a single payment',
-          }}
-          occurrences={amountChangeOccurrences}
-          dateStepDescription={`${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)}. Which payment should this apply from?`}
-          buildChanges={() => {
-            const changes = nonAmountChanges()
-            changes.unshift({ label: 'Amount', from: amountLabel(value.amount), to: amountLabel(draft.amount) })
+          scopeStep={
+            amountChanged
+              ? {
+                  description: `${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)}. Just a single payment, or every payment from then on?`,
+                  singleLabel: 'Just a single payment',
+                }
+              : undefined
+          }
+          occurrences={pickerOccurrences}
+          dateStepDescription={
+            amountChanged
+              ? `${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)}. Which payment should this apply from?`
+              : `${loan.name}'s recurring overpayment is moving to ${overpaymentFromLabel(loan, pots, draft.location, draft.potId)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
+          }
+          buildChanges={(_effectiveFrom, scope) => {
+            const changes = dateChanges(scope)
+            if (locationChanged) changes.unshift(locationChangeField(scope))
+            if (amountChanged) changes.unshift({ label: 'Amount', from: amountLabel(value.amount), to: amountLabel(draft.amount) })
             return changes
           }}
           onCancelAll={() => {
@@ -2054,11 +2113,15 @@ function LoanRecurringOverpaymentEditForm({
             onCancel()
           }}
           onCommit={(effectiveFrom, scope) => {
-            if (scope === 'single') {
-              onSave({ ...draft, amount: value.amount, ...applyRecurringOverpaymentSingleAmountOverride(value, draft.amount, effectiveFrom) })
-            } else {
-              onSave({ ...draft, ...applyRecurringOverpaymentAmountChange(value, draft.amount, effectiveFrom) })
+            let patch: LoanRecurringOverpayment = draft
+            if (amountChanged) {
+              patch =
+                scope === 'single'
+                  ? { ...patch, amount: value.amount, ...applyRecurringOverpaymentSingleAmountOverride(value, draft.amount, effectiveFrom) }
+                  : { ...patch, ...applyRecurringOverpaymentAmountChange(value, draft.amount, effectiveFrom) }
             }
+            onSave(patch)
+            if (locationChanged) onAssignLocation(effectiveFrom, draft.location as 'personal' | 'pot', draft.potId)
             setChangingAmount(false)
           }}
         />
@@ -2088,7 +2151,10 @@ function LoanRecurringOverpaymentEditForm({
       <PausedOccurrencesControl
         windowDates={windowDates}
         currentlyPaused={new Set(value.pausedDates ?? [])}
-        amountForDate={() => (value.amount.type === 'fixed' ? value.amount.amount : Math.round(((loan.principal * value.amount.percent) / 100) * 100) / 100)}
+        amountForDate={(date) => {
+          const resolved = resolveRecurringOverpaymentAmount(value, date)
+          return resolved.type === 'fixed' ? resolved.amount : Math.round(((loan.principal * resolved.percent) / 100) * 100) / 100
+        }}
         itemLabel="overpayments"
         nextPaymentPreview={(tentative) => {
           const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, tentative)
@@ -2159,26 +2225,6 @@ function LoanRecurringOverpaymentEditForm({
           </select>
         )}
       </label>
-
-      <div>
-        <span className="text-xs text-[var(--color-ink-muted)]">How it's applied</span>
-        <div className="flex gap-2 mt-1">
-          <button
-            onClick={() => setRecastMode('reduce_payment')}
-            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-            style={{ background: recastMode === 'reduce_payment' ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: recastMode === 'reduce_payment' ? '#fff' : 'var(--color-ink-muted)' }}
-          >
-            Keep the same length
-          </button>
-          <button
-            onClick={() => setRecastMode('reduce_term')}
-            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-            style={{ background: recastMode === 'reduce_term' ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: recastMode === 'reduce_term' ? '#fff' : 'var(--color-ink-muted)' }}
-          >
-            Keep payment the same
-          </button>
-        </div>
-      </div>
 
       <div className="grid grid-cols-2 gap-2">
         <EditField label="Start date" type="date" value={startDate} onChange={setStartDate} />
@@ -2340,9 +2386,14 @@ function TransferRecurringRow({
             }}
             occurrences={recentAndUpcomingOccurrences(template, new Date())}
             dateStepDescription={`${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(Number(amount))}. Which payment should the new amount start from? Everything before it keeps the old amount.`}
-            buildChanges={() => {
+            buildChanges={(_effectiveFrom, scope) => {
               const changes: RecurringChangeField[] = [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(Number(amount))}` }]
-              if (locationsDirty) changes.push(...locationChangeFields())
+              if (locationsDirty) {
+                // Location has no single-occurrence write of its own —
+                // make that explicit alongside the amount's scope choice
+                // (UAT 2026-09-09, ed-transfers-unchanged).
+                changes.push(...locationChangeFields().map((f) => ({ ...f, note: scope === 'single' ? 'This applies permanently from this date, not just to the single payment above.' : undefined })))
+              }
               return changes
             }}
             affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
@@ -2485,7 +2536,7 @@ function TransferRecurringRow({
             <PausedOccurrencesControl
               windowDates={windowDates}
               currentlyPaused={currentlyPaused}
-              amountForDate={() => template.amount}
+              amountForDate={(date) => resolveOccurrenceAmount(template, date)}
               itemLabel="transfers"
               nextPaymentPreview={(tentative) => {
                 const previewTemplate: RecurringTemplate = { ...template, ...setPausedTemplateOccurrences(template, windowDates, tentative) }

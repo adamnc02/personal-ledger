@@ -22,6 +22,16 @@ export interface RecurringChangeField {
   label: string
   from: string
   to: string
+  /**
+   * UAT 2026-09-09 (ed-bills-amount-and-location) — for a field with no
+   * single-occurrence write of its own (e.g. Location, which always
+   * applies from the chosen date forward), shown under that field's row
+   * to make explicit that it's NOT scoped by the "just a single payment"
+   * choice above it, even though other fields in the same list are.
+   * Callers should set this whenever `scope === 'single'` but the field
+   * itself is being committed permanently anyway.
+   */
+  note?: string
 }
 
 interface ScopeStepConfig {
@@ -116,7 +126,18 @@ export function EffectiveDatedChangeFlow({
   return (
     <FlowSheet title="Are you sure?" onCancelAll={onCancelAll} onBack={!isFirstStep ? goBack : undefined} final>
       <p className="text-sm text-[var(--color-ink-muted)] mb-1">
-        All payments from and including {formatFullDate(resolvedEffectiveFrom)} will see the following change{changes.length === 1 ? '' : 's'}:
+        {
+          // UAT 2026-09-09 (ed-bills-amount-and-location) — "all payments
+          // from and including..." was shown even when "just a single
+          // payment" was chosen, which is simply wrong for that scope —
+          // exactly one payment is changing, not every one from that date
+          // on. Per-field notes (below) still cover the case where a
+          // field WITHOUT a single-occurrence write (e.g. Location) rides
+          // along in the same edit and applies permanently regardless.
+          scope === 'single'
+            ? `Only the payment on ${formatFullDate(resolvedEffectiveFrom)} will see the following change${changes.length === 1 ? '' : 's'}:`
+            : `All payments from and including ${formatFullDate(resolvedEffectiveFrom)} will see the following change${changes.length === 1 ? '' : 's'}:`
+        }
       </p>
       {affectsClearedBalance?.(resolvedEffectiveFrom) && (
         <p className="text-xs italic mb-3" style={{ color: 'var(--color-negative)' }}>
@@ -132,6 +153,7 @@ export function EffectiveDatedChangeFlow({
               <span className="text-[var(--color-ink-muted)]">→</span>
               <span className="font-semibold">{change.to}</span>
             </p>
+            {change.note && <p className="text-xs italic text-[var(--color-ink-faint)] mt-1">{change.note}</p>}
           </div>
         ))}
       </div>

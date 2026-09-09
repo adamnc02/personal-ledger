@@ -24,7 +24,7 @@ import {
   applyTemplateSingleOccurrenceAmountChange,
   scheduledTemplateDates,
   setPausedTemplateOccurrences,
-  resolveTemplateAmount,
+  resolveOccurrenceAmount,
   templateOccurrencePreviews,
 } from '../lib/schedule'
 import { addMonths } from 'date-fns'
@@ -660,13 +660,22 @@ function BillEditPanel({
         }
         occurrences={recentAndUpcomingOccurrences(template, new Date())}
         dateStepDescription={dateStepDescription}
-        buildChanges={() => {
+        buildChanges={(_effectiveFrom, scope) => {
           const changes: RecurringChangeField[] = []
           if (changeKind === 'amount') {
             changes.push({ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(draft.amount)}` })
           }
           if (locationChanged) {
-            changes.push({ label: 'Location', from: billLocationLabel(template.location, template.potId, pots), to: billLocationLabel(draft.location, draft.potId, pots) })
+            changes.push({
+              label: 'Location',
+              from: billLocationLabel(template.location, template.potId, pots),
+              to: billLocationLabel(draft.location, draft.potId, pots),
+              // Location has no single-occurrence write of its own — make
+              // that explicit whenever "just a single payment" was chosen
+              // for the amount, so this row isn't misread as scoped the
+              // same way (UAT 2026-09-09, ed-bills-amount-and-location).
+              note: scope === 'single' ? 'This applies permanently from this date, not just to the single payment above.' : undefined,
+            })
           }
           return changes
         }}
@@ -727,7 +736,7 @@ function BillEditPanel({
         <PausedOccurrencesControl
           windowDates={pauseWindowDates}
           currentlyPaused={currentlyPausedDates}
-          amountForDate={(date) => resolveTemplateAmount(template, date)}
+          amountForDate={(date) => resolveOccurrenceAmount(template, date)}
           itemLabel="payments"
           nextPaymentPreview={(tentative) => {
             const previewTemplate: RecurringTemplate = { ...template, ...setPausedTemplateOccurrences(template, pauseWindowDates, tentative) }
