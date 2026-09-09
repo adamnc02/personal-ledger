@@ -20,8 +20,10 @@ import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { addYears, addDays } from 'date-fns'
-import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2 } from '../types/ledger'
+import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard } from '../types/ledger'
 import type { LoggedPayment } from './Loans'
+import { RecurringOverpaymentEditor } from './Loans'
+import { previewOverpaymentRecast } from '../lib/ledgerLoans'
 
 const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   cash: 'Cash',
@@ -58,7 +60,7 @@ type RecurringFrequency = keyof typeof RECURRING_FREQUENCY_LABELS
 
 import { todayIso, toLocalIsoDate } from '../lib/date'
 
-type PageMode = 'transactions' | 'recurring' | 'transfer'
+type PageMode = 'transactions' | 'recurring' | 'transfer' | 'overpayments'
 
 // ── Cleared-month grouping (Adam-specified, 2026-09-03) ────────────────
 // Applies to every transaction-list pill (Transactions/Savings/Joint —
@@ -279,6 +281,9 @@ export function Expenses() {
     removeLoanOverpayment,
     updateCreditCardLumpPayment,
     removeCreditCardLumpPayment,
+    logLoanOverpayment,
+    logCreditCardLumpPayment,
+    updateLoan,
   } = useLedgerData()
   const [mode, setMode] = useState<PageMode>('transactions')
   const [adding, setAdding] = useState(false)
@@ -342,30 +347,32 @@ export function Expenses() {
   // creation wizard already uses.
   const transferLocationOptions = buildTransferLocationOptions(data.savingsPots, data.pots, !!data.jointAccount, data.primaryPersonId)
 
-  // 2026-09-09 session (Adam-specified) — loan/credit-card overpayments
-  // now live here too, same reasoning as the transfer rows above: the
-  // messy bit was showing a running list of past overpayments inline on
-  // the Borrowing page's expanded card, not the log button itself (that
-  // stays right where it is). Only loans/cards that actually HAVE a
-  // logged overpayment show a row — a loan/card with none yet stays
-  // invisible here, same "nothing to show yet" rule transferTransactions
-  // already follows.
+  // 2026-09-09 session (Adam-specified), followup same day — loan/
+  // credit-card overpayments got their own dedicated "Overpayments" pill
+  // (mirroring the Transfer pill's own shape: a picker-first creation
+  // flow plus the resulting log, rather than sharing the Transfers pill).
+  // `loansWithOverpayments`/`cardsWithLumpPayments` are only the ones
+  // with something to actually SHOW in the past-payments list;
+  // `activeLoans`/`activeCards` (below) are the full set offered as a
+  // destination when creating a NEW overpayment, since a loan/card with
+  // nothing logged yet is still a valid target.
   const loansWithOverpayments = data.loans.filter((l) => l.overpayments.length > 0)
   const cardsWithLumpPayments = data.creditCards.filter((c) => c.lumpPayments.length > 0)
+  const activeLoans = data.loans.filter((l) => l.active)
+  const activeCards = data.creditCards.filter((c) => c.active)
 
   // The Transfer pill appears once there's somewhere to transfer TO — a
-  // savings pot, the joint account, a pot — OR a loan/credit card with at
-  // least one overpayment logged against it, same "invisible until it
-  // would do something" rule the old Savings/Joint/Pots pills used
-  // individually.
+  // savings pot, the joint account, or a pot; the Overpayments pill
+  // appears once there's a loan or credit card to log one against — same
+  // "invisible until it would do something" rule the old Savings/Joint/
+  // Pots pills used individually.
   const pageModes: PageMode[] = [
     'transactions',
     'recurring',
-    ...(data.savingsPots.length > 0 || data.jointAccount || data.pots.length > 0 || loansWithOverpayments.length > 0 || cardsWithLumpPayments.length > 0
-      ? (['transfer'] as const)
-      : []),
+    ...(data.savingsPots.length > 0 || data.jointAccount || data.pots.length > 0 ? (['transfer'] as const) : []),
+    ...(activeLoans.length > 0 || activeCards.length > 0 ? (['overpayments'] as const) : []),
   ]
-  const modeLabel: Record<PageMode, string> = { transactions: 'Transactions', recurring: 'Recurring', transfer: 'Transfers' }
+  const modeLabel: Record<PageMode, string> = { transactions: 'Transactions', recurring: 'Recurring', transfer: 'Transfers', overpayments: 'Overpayments' }
 
   return (
     <div className="max-w-md mx-auto px-4 pt-6">
@@ -502,7 +509,7 @@ export function Expenses() {
             )}
           </div>
         </>
-      ) : (
+      ) : mode === 'transfer' ? (
         <>
           {adding && (
             <TransferForm
@@ -555,61 +562,88 @@ export function Expenses() {
                 />
               )}
             />
+          </div>
+        </>
+      ) : (
+        <>
+          {/* mode === 'overpayments' — 2026-09-09 session (Adam-specified),
+              followup same day: its own dedicated pill rather than sharing
+              Transfers, since a loan/credit-card overpayment isn't a
+              transfer between two account balances (see OverpaymentCreateForm's
+              own comment on why there's no "From" step for a one-off). */}
+          {adding && (
+            <OverpaymentCreateForm
+              loans={activeLoans}
+              cards={activeCards}
+              onCancel={() => setAdding(false)}
+              onSaveLoan={(loanId, amount, date, note, recastMode) => {
+                logLoanOverpayment(loanId, amount, date, note, recastMode)
+                setAdding(false)
+              }}
+              onSaveCard={(cardId, amount, date, note) => {
+                logCreditCardLumpPayment(cardId, amount, date, note)
+                setAdding(false)
+              }}
+            />
+          )}
 
-            {/* 2026-09-09 session (Adam-specified) — loan/credit-card
-                overpayments, logged from the Borrowing page's own "+ Log
-                an overpayment"/"+ Log a payment" button (unchanged, still
-                there), now live here rather than as an inline list on the
-                expanded card — same as a pot/savings pot/joint account
-                deposit never showing its own history on the Wallet page.
-                2026-09-09 followup (Adam-reported) — these used to render
-                via Loans.tsx's own LoggedPaymentList (a single grouped
-                card with a running total and an inline Delete button
-                inside its edit form), which read as a different UI
-                paradigm from the rest of this page. Restyled as flat,
-                individually swipeable rows via OverpaymentRowItem below,
-                matching TransferRowItem exactly. */}
-            {(loansWithOverpayments.length > 0 || cardsWithLumpPayments.length > 0) && (
-              <div className="flex flex-col gap-3 mt-2">
-                {loansWithOverpayments.map((loan) => (
-                  <div key={loan.id}>
-                    <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">{loan.name} overpayments</h3>
-                    <div className="flex flex-col gap-2">
-                      {loan.overpayments
-                        .slice()
-                        .sort((a, b) => b.date.localeCompare(a.date))
-                        .map((p) => (
-                          <OverpaymentRowItem
-                            key={p.id}
-                            payment={p}
-                            label={`${loan.name} overpayment`}
-                            onUpdate={(amount, date, note) => updateLoanOverpayment(loan.id, p.id, amount, date, note)}
-                            onRemove={() => removeLoanOverpayment(loan.id, p.id)}
-                          />
-                        ))}
-                    </div>
-                  </div>
-                ))}
-                {cardsWithLumpPayments.map((card) => (
-                  <div key={card.id}>
-                    <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">{card.name} payments</h3>
-                    <div className="flex flex-col gap-2">
-                      {card.lumpPayments
-                        .slice()
-                        .sort((a, b) => b.date.localeCompare(a.date))
-                        .map((p) => (
-                          <OverpaymentRowItem
-                            key={p.id}
-                            payment={p}
-                            label={`${card.name} payment`}
-                            onUpdate={(amount, date, note) => updateCreditCardLumpPayment(card.id, p.id, amount, date, note)}
-                            onRemove={() => removeCreditCardLumpPayment(card.id, p.id)}
-                          />
-                        ))}
-                    </div>
-                  </div>
-                ))}
+          {activeLoans.length > 0 && (
+            <div className="flex flex-col gap-3 mb-3">
+              {activeLoans.map((loan) => (
+                <div key={loan.id} className="rounded-2xl p-3" style={{ background: 'var(--color-surface)' }}>
+                  <p className="text-sm font-medium text-[var(--color-ink)] mb-2">{loan.name} — recurring overpayment</p>
+                  <RecurringOverpaymentEditor
+                    loan={loan}
+                    pots={data.pots}
+                    value={loan.recurringOverpayment}
+                    onChange={(recurringOverpayment) => updateLoan(loan.id, { recurringOverpayment })}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex flex-col gap-3">
+            {loansWithOverpayments.map((loan) => (
+              <div key={loan.id}>
+                <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">{loan.name} overpayments</h3>
+                <div className="flex flex-col gap-2">
+                  {loan.overpayments
+                    .slice()
+                    .sort((a, b) => b.date.localeCompare(a.date))
+                    .map((p) => (
+                      <OverpaymentRowItem
+                        key={p.id}
+                        payment={p}
+                        label={`${loan.name} overpayment`}
+                        onUpdate={(amount, date, note) => updateLoanOverpayment(loan.id, p.id, amount, date, note)}
+                        onRemove={() => removeLoanOverpayment(loan.id, p.id)}
+                      />
+                    ))}
+                </div>
               </div>
+            ))}
+            {cardsWithLumpPayments.map((card) => (
+              <div key={card.id}>
+                <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">{card.name} payments</h3>
+                <div className="flex flex-col gap-2">
+                  {card.lumpPayments
+                    .slice()
+                    .sort((a, b) => b.date.localeCompare(a.date))
+                    .map((p) => (
+                      <OverpaymentRowItem
+                        key={p.id}
+                        payment={p}
+                        label={`${card.name} payment`}
+                        onUpdate={(amount, date, note) => updateCreditCardLumpPayment(card.id, p.id, amount, date, note)}
+                        onRemove={() => removeCreditCardLumpPayment(card.id, p.id)}
+                      />
+                    ))}
+                </div>
+              </div>
+            ))}
+            {loansWithOverpayments.length === 0 && cardsWithLumpPayments.length === 0 && !adding && (
+              <p className="text-sm text-[var(--color-ink-muted)] text-center py-10">No overpayments logged yet.</p>
             )}
           </div>
         </>
@@ -1221,6 +1255,192 @@ function TransferForm({
           onCancel={reset}
         />
       )}
+    </div>
+  )
+}
+
+type OverpaymentTarget = { kind: 'loan'; id: string; label: string } | { kind: 'card'; id: string; label: string }
+type OverpaymentFormStep = 'amount' | 'to' | 'recast' | 'date' | 'final'
+
+/**
+ * 2026-09-09 followup (Adam-specified) — the Overpayments pill's own
+ * picker-first creation wizard, mirroring TransferForm's shape (amount →
+ * location(s) → date → final) as closely as the data actually supports.
+ * Deliberately has NO "From" step, unlike a transfer: a one-off loan
+ * overpayment has never had a funding-location field at all — it's
+ * hardcoded to personal (or joint, for a joint loan) cash out, per
+ * Adam's own 2026-09-03 call captured in applyLoanOverpayment's comment
+ * ("a lump payment structurally can't come from a pot"), and a credit-
+ * card lump payment has never had a location field either. Only a
+ * loan's RECURRING overpayment has a real From (Personal/Pot) field —
+ * that's handled by the existing RecurringOverpaymentEditor mounted
+ * alongside this form, not rebuilt here.
+ */
+function OverpaymentCreateForm({
+  loans,
+  cards,
+  onCancel,
+  onSaveLoan,
+  onSaveCard,
+}: {
+  loans: Loan[]
+  cards: CreditCard[]
+  onCancel: () => void
+  onSaveLoan: (loanId: string, amount: number, date: string, note: string | undefined, recastMode: 'reduce_term' | 'reduce_payment') => void
+  onSaveCard: (cardId: string, amount: number, date: string, note?: string) => void
+}) {
+  const targets: OverpaymentTarget[] = [
+    ...loans.map((l) => ({ kind: 'loan' as const, id: l.id, label: `Loan: ${l.name}` })),
+    ...cards.map((c) => ({ kind: 'card' as const, id: c.id, label: `Credit Card: ${c.name}` })),
+  ]
+
+  const [step, setStep] = useState<OverpaymentFormStep>('amount')
+  const [amount, setAmount] = useState('')
+  const [target, setTarget] = useState<OverpaymentTarget | null>(null)
+  const [recastMode, setRecastMode] = useState<'reduce_term' | 'reduce_payment'>('reduce_term')
+  const [date, setDate] = useState(todayIso())
+  const [note, setNote] = useState('')
+
+  const amountNumber = Number(amount)
+
+  function reset() {
+    setStep('amount')
+    setAmount('')
+    setTarget(null)
+    setRecastMode('reduce_term')
+    setDate(todayIso())
+    setNote('')
+    onCancel()
+  }
+
+  function commit() {
+    if (!target) return
+    if (target.kind === 'loan') {
+      onSaveLoan(target.id, amountNumber, date, note.trim() || undefined, recastMode)
+    } else {
+      onSaveCard(target.id, amountNumber, date, note.trim() || undefined)
+    }
+    reset()
+  }
+
+  if (targets.length === 0) {
+    return (
+      <div className="mb-6 p-4 rounded-2xl flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-[var(--color-ink)]">New overpayment</h2>
+          <button onClick={onCancel} className="text-[var(--color-ink-muted)]">
+            <X size={18} />
+          </button>
+        </div>
+        <p className="text-xs text-[var(--color-ink-faint)]">Add a loan or credit card first — there's nothing to log an overpayment against yet.</p>
+      </div>
+    )
+  }
+
+  if (step === 'amount') {
+    return (
+      <div className="mb-6 p-4 rounded-2xl flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-[var(--color-ink)]">New overpayment</h2>
+          <button onClick={reset} className="text-[var(--color-ink-muted)]">
+            <X size={18} />
+          </button>
+        </div>
+        <EditField key="overpayment-amount" label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+        <FormButtonRow onCancel={reset} onSave={() => setStep('to')} saveLabel="Continue" saveDisabled={!(amountNumber > 0)} />
+      </div>
+    )
+  }
+
+  if (step === 'to') {
+    return (
+      <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">To</span>
+          <button onClick={reset} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          {targets.map((t) => (
+            <button
+              key={`${t.kind}:${t.id}`}
+              onClick={() => {
+                setTarget(t)
+                setStep(t.kind === 'loan' ? 'recast' : 'date')
+              }}
+              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+              style={{ background: 'var(--color-surface)' }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (step === 'recast' && target?.kind === 'loan') {
+    const loan = loans.find((l) => l.id === target.id)!
+    const preview = previewOverpaymentRecast(loan, amountNumber, date)
+    return (
+      <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">How should this overpayment be applied?</span>
+          <button onClick={reset} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <button
+          onClick={() => {
+            setRecastMode('reduce_payment')
+            setStep('date')
+          }}
+          className="rounded-xl p-3 text-left"
+          style={{ background: 'var(--color-surface)' }}
+        >
+          <p className="text-sm font-semibold text-[var(--color-ink)]">Keep the same length</p>
+          <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+            New monthly payment: £{preview.reducePayment.newMonthlyPayment != null ? formatCurrency(preview.reducePayment.newMonthlyPayment) : '—'}
+          </p>
+        </button>
+        <button
+          onClick={() => {
+            setRecastMode('reduce_term')
+            setStep('date')
+          }}
+          className="rounded-xl p-3 text-left"
+          style={{ background: 'var(--color-surface)' }}
+        >
+          <p className="text-sm font-semibold text-[var(--color-ink)]">Keep monthly payment the same</p>
+          <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+            Ends {preview.reduceTerm.payoffDate ? formatMonthYear(preview.reduceTerm.payoffDate) : '—'} · estimated final repayment £
+            {preview.reduceTerm.finalPayment != null ? formatCurrency(preview.reduceTerm.finalPayment) : '—'}
+          </p>
+        </button>
+        <button onClick={() => setStep('to')} className="text-xs self-start text-[var(--color-ink-muted)]">
+          Back
+        </button>
+      </div>
+    )
+  }
+
+  if (step === 'date') {
+    return <DateStep value={date} onChange={setDate} onCancel={reset} onContinue={() => setStep('final')} />
+  }
+
+  // final — Note + Save
+  return (
+    <div className="mb-6 p-4 rounded-2xl flex flex-col gap-4" style={{ background: 'var(--color-surface)' }}>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-[var(--color-ink)]">New overpayment</h2>
+        <button onClick={reset} className="text-[var(--color-ink-muted)]">
+          <X size={18} />
+        </button>
+      </div>
+      <EditField key="overpayment-note" label="Note (optional)" type="text" value={note} onChange={setNote} />
+      <p className="text-xs text-[var(--color-ink-faint)]">{target?.label} — £{formatCurrency(amountNumber)} on {date}.</p>
+      <FormButtonRow onCancel={reset} onSave={commit} />
     </div>
   )
 }

@@ -1916,7 +1916,7 @@ export type LoggedPayment = { id: string; date: string; amount: number; note?: s
 // starts with sensible defaults; toggling it off clears it entirely
 // (passes undefined, same as never having set one). ──
 
-function RecurringOverpaymentEditor({
+export function RecurringOverpaymentEditor({
   loan,
   pots,
   value,
