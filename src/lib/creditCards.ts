@@ -814,6 +814,28 @@ export function buildCreditCardBalanceDueRows(card: CreditCard, transactions: Tr
     .map((r) => ({ date: r.date, balanceDue: r.balanceDue }))
 }
 
+export interface CreditCardDueOverviewRow {
+  date: string
+  balanceDue: number
+  /** Whether this date has already happened — a past row is informational only (no Clear action), an upcoming one can be pre-paid via onClearBalance. */
+  isPast: boolean
+}
+
+/**
+ * 2026-09-09 session (Adam-specified) — feeds the Borrowing page's own
+ * "most recent + next 3 (or 4 if none recent) payment due dates" section
+ * on the expanded credit card, mirroring the Salary page's PayPeriodsSection
+ * styling. Deliberately UNFILTERED by "meaningfully more than minimum"
+ * (unlike buildCreditCardBalanceDueRows above, which only surfaces dates
+ * worth an early payoff nudge) — this is a plain schedule overview, every
+ * due date gets its own row with the real balance owed as of that date,
+ * same as the info modal now shows for minimum charges alone.
+ */
+export function buildCreditCardDueOverviewRows(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): CreditCardDueOverviewRow[] {
+  const rows = buildCreditCardMinimumChargeRows(card, transactions, asOfDate)
+  return rows.map((r) => ({ date: r.date, balanceDue: cardBalanceAsOf(card, transactions, new Date(r.date)), isPast: r.status === 'cleared' }))
+}
+
 /** Convenience wrapper over withLiveBalance for a whole list — the shape almost every read site actually wants. Same rule applies: display/compute only, never persisted. */
 export function withLiveBalances(cards: CreditCard[], transactions: Transaction[], asOfDate: Date = new Date()): CreditCard[] {
   return cards.map((card) => withLiveBalance(card, transactions, asOfDate))
