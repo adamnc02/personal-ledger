@@ -253,14 +253,29 @@ export function cardBalanceAsOf(card: CreditCard, transactions: Transaction[], a
         // Skipping this call entirely (for the grace case) must not also
         // resurrect the pre-Batch-8 stuck-forever-at-a-penny bug. Checked
         // independently for each balance — they can genuinely differ
-        // (`windowBalance` lags `balance` until a window closes).
+        // (`windowBalance` lags `balance` until a window closes). Uses
+        // Math.abs — see the BUGFIX comment on `windowBalance`'s payment
+        // application just below for why a genuinely negative value must
+        // survive this snap, not just a tiny positive one.
         if (balance <= NEGLIGIBLE_BALANCE) balance = 0
-        if (hasStatementWindow && windowBalance <= NEGLIGIBLE_BALANCE) windowBalance = 0
+        if (hasStatementWindow && Math.abs(windowBalance) <= NEGLIGIBLE_BALANCE) windowBalance = 0
       }
     }
     for (const t of activity.filter((a) => a.date === date)) {
       balance = t.type === 'credit_card_spend' ? round2(balance + t.amount) : round2(Math.max(0, balance - t.amount))
-      if (hasStatementWindow && t.type === 'credit_card_payment') windowBalance = round2(Math.max(0, windowBalance - t.amount))
+      // BUGFIX (2026-09-09, UAT-reported: clearing an early due date
+      // wrongly zeroed a later, genuinely separate one) — deliberately
+      // NOT clamped to 0 like `balance` just above. A payment sized off
+      // `balance` (the true running total, e.g. via buildCreditCardDueOverviewRows'
+      // Clear button) can be MORE than `windowBalance` currently reflects,
+      // because `windowBalance` only picks up a purchase once its own
+      // window closes — `balance` already includes it the moment it's
+      // spent. Clamping here would silently discard that difference;
+      // letting it go negative instead means it nets cleanly to zero once
+      // the delayed purchase's window finally closes and folds it in
+      // (see the spend-queue fold below), rather than that purchase
+      // resurrecting a bogus "still owed" figure once it arrives.
+      if (hasStatementWindow && t.type === 'credit_card_payment') windowBalance = round2(windowBalance - t.amount)
     }
     if (hasStatementWindow && closeDates.includes(date)) {
       while (spendQueueIndex < spendQueue.length && spendQueue[spendQueueIndex].date <= date) {
@@ -455,7 +470,28 @@ export function generateMinimumPaymentTransactions(
   // here and picked up by `pendingSpendForStatement` below once its own
   // window closes during the simulation, same as any other in-range spend.
   const statementOpeningCloseIso = mostRecentStatementCloseOnOrBefore(card, rangeStartIso)
-  let statementBalance = statementOpeningCloseIso != null ? cardBalanceAsOf(card, transactions, new Date(statementOpeningCloseIso)) : workingBalance
+  // BUGFIX (2026-09-09, UAT-reported: clearing an early due date wrongly
+  // wiped a later, genuinely separate one) — `cardBalanceAsOf` at the
+  // close date only replays activity UP TO that close, so it has no way
+  // to know about a real PAYMENT dated after it but on/before rangeStart
+  // (e.g. a lump payment clearing an earlier balance, made a few days
+  // before this fresh simulation's own rangeStart). Payments are never
+  // window-gated — they apply immediately, same as the main walk's own
+  // lump-payment loop below — so any dated in that gap must still reduce
+  // the opening figure. Deliberately NOT clamped to 0: a payment sized
+  // off the TRUE running balance (which already includes a purchase
+  // whose window hasn't closed yet) can be MORE than this window-gated
+  // opening figure — letting it go negative here means it nets cleanly
+  // to zero once that purchase's window closes and folds in below,
+  // instead of resurrecting it as fresh, unpaid debt.
+  const paymentsBetweenCloseAndRangeStart =
+    statementOpeningCloseIso != null
+      ? transactions
+          .filter((t) => t.creditCardId === card.id && t.type === 'credit_card_payment' && t.date > statementOpeningCloseIso && t.date <= rangeStartIso)
+          .reduce((sum, t) => round2(sum + t.amount), 0)
+      : 0
+  let statementBalance =
+    statementOpeningCloseIso != null ? round2(cardBalanceAsOf(card, transactions, new Date(statementOpeningCloseIso)) - paymentsBetweenCloseAndRangeStart) : workingBalance
   // Same cut, applied to logged lump payments: one dated on or before
   // rangeStart is already inside workingBalance above (its transaction
   // was replayed into it), so folding it in again here would
@@ -622,7 +658,10 @@ export function generateMinimumPaymentTransactions(
       statementBalance = applyMonthlyInterest(statementBalance, card.interestRatePercent)
     } else {
       if (workingBalance <= NEGLIGIBLE_BALANCE) workingBalance = 0
-      if (statementBalance <= NEGLIGIBLE_BALANCE) statementBalance = 0
+      // Math.abs — see the BUGFIX comment on the lump-payment loop just
+      // below for why a genuinely negative statementBalance must survive
+      // this snap, not just a tiny positive one.
+      if (Math.abs(statementBalance) <= NEGLIGIBLE_BALANCE) statementBalance = 0
     }
     // Apply any still-pending lump payments dated on/before this
     // payment date, in date order, BEFORE computing this month's
@@ -631,7 +670,20 @@ export function generateMinimumPaymentTransactions(
     // confirmed against real practice) — applies to both balances.
     while (lumpIndex < pendingLumpPayments.length && pendingLumpPayments[lumpIndex].date <= paymentDateIso) {
       workingBalance = round2(Math.max(0, workingBalance - pendingLumpPayments[lumpIndex].amount))
-      statementBalance = round2(Math.max(0, statementBalance - pendingLumpPayments[lumpIndex].amount))
+      // BUGFIX (2026-09-09, UAT-reported: clearing an early due date
+      // wrongly zeroed a later, genuinely separate one) — deliberately
+      // NOT clamped to 0 like `workingBalance` just above. A lump payment
+      // sized off the true running balance (e.g. via
+      // buildCreditCardDueOverviewRows' Clear button) can be MORE than
+      // `statementBalance` currently reflects, because `statementBalance`
+      // only picks up a purchase once its own window closes —
+      // `workingBalance` already includes it the moment it's spent.
+      // Clamping here would silently discard that difference; letting it
+      // go negative instead means it nets cleanly to zero once the
+      // delayed purchase's window finally closes and folds it in (see the
+      // statement-side spend fold above), rather than that purchase
+      // resurrecting a bogus "still owed" minimum charge once it arrives.
+      statementBalance = round2(statementBalance - pendingLumpPayments[lumpIndex].amount)
       lumpIndex++
     }
 
@@ -716,7 +768,10 @@ export function generateMinimumPaymentTransactions(
           note: `${card.name} - Minimum Charge`,
         })
         workingBalance = round2(Math.max(0, workingBalance - amount))
-        statementBalance = round2(Math.max(0, statementBalance - amount))
+        // Not clamped — same reasoning as the lump-payment loop above
+        // (the deadlock guard's `Math.max(statementBalance, workingBalance)`
+        // amount can exceed statementBalance on its own).
+        statementBalance = round2(statementBalance - amount)
       }
     }
     // BUGFIX (2026-09-09, statement-window grace-timing) — captured HERE,

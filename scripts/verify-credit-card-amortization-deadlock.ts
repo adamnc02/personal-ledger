@@ -98,7 +98,7 @@ import {
   recordCreditCardSpend,
   recordCreditCardLumpPayment,
   buildCreditCardBalanceDueRows,
-  buildCreditCardMinimumChargeRows as _buildMinRows,
+  buildCreditCardMinimumChargeRows,
 } from '../src/lib/creditCards'
 import type { CreditCard, Transaction } from '../src/types/ledger'
 
@@ -270,9 +270,9 @@ let freshCard: CreditCard = { ...clearCard, id: 'card-3f', currentBalance: 0, lu
 const freshSpend = recordCreditCardSpend(freshCard, 20, '2026-09-09', 'fresh spend')
 freshCard = freshSpend.updatedCard
 const freshTransactions: (Omit<Transaction, 'id'> & { id: string })[] = [{ ...freshSpend.transaction, id: 'f0' }]
-const rowsAsOfBeforeSpend = _buildMinRows(freshCard, freshTransactions, new Date(2026, 8, 1))
-const rowsAsOfSpendDay = _buildMinRows(freshCard, freshTransactions, new Date(2026, 8, 9))
-const rowsAsOfMidCycle = _buildMinRows(freshCard, freshTransactions, new Date(2026, 8, 15))
+const rowsAsOfBeforeSpend = buildCreditCardMinimumChargeRows(freshCard, freshTransactions, new Date(2026, 8, 1))
+const rowsAsOfSpendDay = buildCreditCardMinimumChargeRows(freshCard, freshTransactions, new Date(2026, 8, 9))
+const rowsAsOfMidCycle = buildCreditCardMinimumChargeRows(freshCard, freshTransactions, new Date(2026, 8, 15))
 check('No minimum-charge row generated on 14th Sept (asOfDate before the spend) — first real charge is 14th Oct', rowsAsOfBeforeSpend[0]?.date, '2026-10-14')
 check('...same first-charge date when asOfDate falls ON the spend day (rangeStart used to skip window-gating here)', rowsAsOfSpendDay[0]?.date, '2026-10-14')
 check('...same first-charge date when asOfDate falls after the spend, mid-cycle', rowsAsOfMidCycle[0]?.date, '2026-10-14')
@@ -338,6 +338,63 @@ const graceSpend2Result = recordCreditCardSpend(gracePaidCard, 15, '2026-10-20',
 gracePaidCard = graceSpend2Result.updatedCard
 gracePaidTransactions.push({ ...graceSpend2Result.transaction, id: 'g2' })
 check('Paying in full by the due date re-earns the grace period for the NEXT cycle too', cardBalanceAsOf(gracePaidCard, gracePaidTransactions, new Date(2026, 10, 14)), 15)
+
+// ---- 8. UAT 2026-09-09 (Adam-reported) — clearing an early due date in full must NOT wipe out a later, genuinely separate one ----
+// Root cause: a lump payment sized off the TRUE running balance
+// (workingBalance/`balance`, which already includes a purchase the
+// moment it's spent) can be MORE than the window-gated statementBalance
+// currently reflects (which only picks that purchase up once its OWN
+// window closes). The old code clamped the excess away instead of
+// carrying it forward as a credit, so once the delayed purchase's window
+// finally closed and tried to fold in, it looked like fresh, unpaid debt
+// — generating a phantom minimum charge forever, even though the true
+// balance was genuinely zero.
+let twoSpendCard: CreditCard = {
+  id: 'card-5',
+  name: 'Two Spends Visa',
+  categoryId: 'cat-cc',
+  color: '#8b5cf6',
+  interestRatePercent: 20,
+  currentBalance: 0,
+  balanceAsOfDate: '2026-09-01',
+  minimumPayment: { type: 'percent_of_balance', percent: 5 },
+  paymentDayOfMonth: 14,
+  statementStartDay: 19,
+  statementEndDay: 18,
+  ownerId: 'adam',
+  lumpPayments: [],
+  active: true,
+}
+const tsSpend1 = recordCreditCardSpend(twoSpendCard, 70, '2026-10-01', 'spend 1 -> due 14th Nov')
+twoSpendCard = tsSpend1.updatedCard
+let twoSpendTransactions: (Omit<Transaction, 'id'> & { id: string })[] = [{ ...tsSpend1.transaction, id: 'ts0' }]
+const tsSpend2 = recordCreditCardSpend(twoSpendCard, 85, '2026-11-10', 'spend 2 -> due 14th Dec')
+twoSpendCard = tsSpend2.updatedCard
+twoSpendTransactions.push({ ...tsSpend2.transaction, id: 'ts1' })
+
+const nov14Rows = buildCreditCardMinimumChargeRows(twoSpendCard, twoSpendTransactions, new Date(2026, 8, 9))
+const nov14Row = nov14Rows.find((r) => r.date === '2026-11-14')
+check('Before clearing: 14th Nov correctly shows the true combined balance (£70 + £85)', nov14Row?.projectedBalanceDue, 155)
+
+const tsClear = recordCreditCardLumpPayment(twoSpendCard, nov14Row!.projectedBalanceDue, '2026-11-14', 'Statement cleared')
+twoSpendCard = tsClear.updatedCard
+twoSpendTransactions.push({ ...tsClear.transaction, id: 'ts2' })
+const afterClearRows = buildCreditCardMinimumChargeRows(twoSpendCard, twoSpendTransactions, new Date(2026, 10, 15))
+check('After clearing 14th Nov in full: NO phantom minimum charge rows appear at all (the £85 was already inside the £155 paid)', afterClearRows.length, 0)
+
+// The partial-payment counterpart — a genuinely separate remaining debt must still show correctly.
+let partialCard: CreditCard = { ...twoSpendCard, id: 'card-6', lumpPayments: [] }
+const partialSpend1 = recordCreditCardSpend(partialCard, 70, '2026-10-01', 'spend 1')
+partialCard = partialSpend1.updatedCard
+let partialTransactions: (Omit<Transaction, 'id'> & { id: string })[] = [{ ...partialSpend1.transaction, id: 'p0' }]
+const partialSpend2 = recordCreditCardSpend(partialCard, 85, '2026-11-10', 'spend 2')
+partialCard = partialSpend2.updatedCard
+partialTransactions.push({ ...partialSpend2.transaction, id: 'p1' })
+const partialClear = recordCreditCardLumpPayment(partialCard, 70, '2026-11-14', 'Partial payment — only the first spend')
+partialCard = partialClear.updatedCard
+partialTransactions.push({ ...partialClear.transaction, id: 'p2' })
+const dec14Row = buildCreditCardMinimumChargeRows(partialCard, partialTransactions, new Date(2026, 10, 15)).find((r) => r.date === '2026-12-14')
+check('Paying only the FIRST spend at 14th Nov still leaves the SECOND (£85) genuinely due at 14th Dec', dec14Row?.projectedBalanceDue, 85)
 
 console.log(failures === 0 ? '\nAll credit-card amortisation-deadlock checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)
