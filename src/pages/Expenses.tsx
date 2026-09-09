@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { createPortal } from 'react-dom'
-import { formatCurrency, formatFullDate, formatMonthYear } from '../lib/format'
+import { formatCurrency, formatMonthYear } from '../lib/format'
 import { Plus, Trash2, X, ChevronDown, ChevronUp, ArrowRight, ArrowLeftRight } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { EditField } from '../components/EditField'
@@ -19,7 +18,8 @@ import { transferLocationLabel, buildTransferLocationOptions, transferLocationKe
 import { LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
-import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
+import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfirmModal'
+import { EffectiveDatedChangeFlow, type RecurringChangeField } from '../components/EffectiveDatedChangeFlow'
 import { addYears, addDays, addMonths } from 'date-fns'
 import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard, LoanRecurringOverpayment, Category } from '../types/ledger'
 import type { LoggedPayment } from './Loans'
@@ -2173,6 +2173,10 @@ function TransferRecurringRow({
   const [transferTo, setTransferTo] = useState(template.transferTo)
   const [pickingSide, setPickingSide] = useState<'from' | 'to' | null>(null)
   const [choosingEffectiveDate, setChoosingEffectiveDate] = useState(false)
+  // A location-only change has no amountHistory-style mechanism to anchor
+  // a date picker to (see the comment below), so it just shows the confirm
+  // step directly, applying immediately today.
+  const [locationOnlyConfirm, setLocationOnlyConfirm] = useState(false)
   // UAT follow-up (2026-09-08) — same "are you sure, here's what's
   // changing" confirmation Bills.tsx/Loans.tsx/RecurringTransactionEditPanel
   // already show before a recurring change commits (Adam's own spec:
@@ -2188,8 +2192,6 @@ function TransferRecurringRow({
   // confirmed, same as a loan's recurring-overpayment "Paid from" field —
   // a standing arrangement's setting, not a historized fact about a past
   // payment.
-  const [pendingConfirm, setPendingConfirm] = useState<{ effectiveFrom: string; changes: RecurringChangeField[]; commit: () => void } | null>(null)
-
   // UAT 2026-09-08 (followup-confirm-recurring-transfer, same fix as
   // Bills.tsx's own cancelEverything) — Cancel on the effective-date
   // picker or the confirm modal must fully discard the edit and collapse
@@ -2199,7 +2201,7 @@ function TransferRecurringRow({
     setTransferFrom(template.transferFrom)
     setTransferTo(template.transferTo)
     setChoosingEffectiveDate(false)
-    setPendingConfirm(null)
+    setLocationOnlyConfirm(false)
     setOpen(false)
   }
 
@@ -2251,15 +2253,7 @@ function TransferRecurringRow({
     // applies immediately (today), rather than asking for a date that
     // has nothing to anchor to.
     if (transferFrom && transferTo) {
-      setPendingConfirm({
-        effectiveFrom: todayIso(),
-        changes: locationChangeFields(),
-        commit: () => {
-          onUpdate({ transferFrom, transferTo })
-          triggerFlash()
-          setOpen(false)
-        },
-      })
+      setLocationOnlyConfirm(true)
     }
   }
 
@@ -2267,40 +2261,39 @@ function TransferRecurringRow({
     <SwipeToDelete onDelete={onRemove} confirmLabel={template.name}>
       <div className="relative rounded-2xl px-4 py-3" style={{ background: 'var(--color-surface)' }}>
         {choosingEffectiveDate && (
-          <RecurringEffectiveDateModal
-            template={template}
-            newAmount={Number(amount)}
-            onCancel={cancelEverything}
-            onChoose={(effectiveFrom) => {
+          <EffectiveDatedChangeFlow
+            occurrences={recentAndUpcomingOccurrences(template, new Date())}
+            dateStepDescription={`${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(Number(amount))}. Which payment should the new amount start from? Everything before it keeps the old amount.`}
+            buildChanges={() => {
               const changes: RecurringChangeField[] = [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(Number(amount))}` }]
               if (locationsDirty) changes.push(...locationChangeFields())
-              setPendingConfirm({
-                effectiveFrom,
-                changes,
-                commit: () => {
-                  const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...applyTemplateAmountChange(template, Number(amount), effectiveFrom) }
-                  if (locationsDirty && transferFrom && transferTo) {
-                    updates.transferFrom = transferFrom
-                    updates.transferTo = transferTo
-                  }
-                  onUpdate(updates)
-                  triggerFlash()
-                  setOpen(false)
-                },
-              })
+              return changes
+            }}
+            affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
+            onCancelAll={cancelEverything}
+            onCommit={(effectiveFrom) => {
+              const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...applyTemplateAmountChange(template, Number(amount), effectiveFrom) }
+              if (locationsDirty && transferFrom && transferTo) {
+                updates.transferFrom = transferFrom
+                updates.transferTo = transferTo
+              }
+              onUpdate(updates)
+              triggerFlash()
+              setOpen(false)
               setChoosingEffectiveDate(false)
             }}
           />
         )}
-        {pendingConfirm && (
+        {locationOnlyConfirm && (
           <RecurringChangeConfirmModal
-            effectiveFrom={pendingConfirm.effectiveFrom}
-            changes={pendingConfirm.changes}
-            affectsClearedBalance={pendingConfirm.effectiveFrom <= todayIso()}
+            effectiveFrom={todayIso()}
+            changes={locationChangeFields()}
             onCancel={cancelEverything}
             onConfirm={() => {
-              pendingConfirm.commit()
-              setPendingConfirm(null)
+              if (transferFrom && transferTo) onUpdate({ transferFrom, transferTo })
+              triggerFlash()
+              setOpen(false)
+              setLocationOnlyConfirm(false)
             }}
           />
         )}
@@ -2597,62 +2590,6 @@ function RecurringTransactionForm({
   )
 }
 
-/**
- * "Which payment should this apply from?" — the recurring-transaction
- * counterpart to Bills.tsx's BillEffectiveDateModal, shown only when the
- * STANDING amount has genuinely changed and there's at least one real
- * occurrence (past or upcoming) to anchor the choice to. Deliberately the
- * same portal/nav-padding pattern for the same reason (see that
- * component's own comment) — this modal sits inside a swipeable row's
- * tree too.
- */
-function RecurringEffectiveDateModal({
-  template,
-  newAmount,
-  onCancel,
-  onChoose,
-}: {
-  template: RecurringTemplate
-  newAmount: number
-  onCancel: () => void
-  onChoose: (effectiveFrom: string) => void
-}) {
-  const occurrences = recentAndUpcomingOccurrences(template, new Date())
-
-  return createPortal(
-    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onCancel}>
-      <div
-        className="w-full max-w-md rounded-t-3xl p-5"
-        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-1">Apply this change from…</h3>
-        <p className="text-sm text-[var(--color-ink-muted)] mb-4">
-          {template.name} is changing from £{formatCurrency(template.amount)} to £{formatCurrency(newAmount)}. Which payment should the new amount start from? Everything before it
-          keeps the old amount.
-        </p>
-        <div className="flex flex-col gap-2">
-          {occurrences.map((o) => (
-            <button
-              key={o.date}
-              onClick={() => onChoose(o.date)}
-              className="w-full py-2.5 rounded-full text-sm font-semibold flex items-center justify-center gap-2"
-              style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)' }}
-            >
-              {formatFullDate(o.date)}
-              {o.isPast && <span className="text-xs font-normal text-[var(--color-ink-muted)]">(most recent)</span>}
-            </button>
-          ))}
-        </div>
-        <button onClick={onCancel} className="w-full py-2 mt-2 text-xs text-[var(--color-ink-muted)]">
-          Cancel
-        </button>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-
 type RecurringTxDraft = Omit<RecurringTemplate, 'id'>
 
 function draftFromRecurringTemplate(template: RecurringTemplate): RecurringTxDraft {
@@ -2677,15 +2614,10 @@ function RecurringTransactionEditPanel({
   onCancel: () => void
 }) {
   const [draft, setDraft] = useState<RecurringTxDraft>(() => draftFromRecurringTemplate(template))
-  const [choosingEffectiveDate, setChoosingEffectiveDate] = useState(false)
-  // UAT follow-up (2026-09-08) — same "are you sure, here's what's
-  // changing" confirmation Bills.tsx/Loans.tsx already show before a
-  // recurring change commits (Adam's own spec: "used for anything
-  // RECURRING in the app that changed, relating to bills / transactions
-  // / loans / transfers"). Holds a closure that performs the exact same
-  // commit this Save button always did, same shape as Bills.tsx's
-  // pendingConfirm.
-  const [pendingConfirm, setPendingConfirm] = useState<{ effectiveFrom: string; changes: RecurringChangeField[]; commit: () => void } | null>(null)
+  // UAT follow-up (2026-09-08), generalised 2026-09-09 into
+  // EffectiveDatedChangeFlow — true while a genuine STANDING amount
+  // change is being routed through "which payment does this apply from."
+  const [changingAmount, setChangingAmount] = useState(false)
   // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
   // when nothing's changed, same as BillEditPanel's own dirty check.
   const dirty = JSON.stringify(draft) !== JSON.stringify(draftFromRecurringTemplate(template))
@@ -2700,8 +2632,7 @@ function RecurringTransactionEditPanel({
   // the row, not just step back to the previous screen.
   function cancelEverything() {
     setDraft(draftFromRecurringTemplate(template))
-    setChoosingEffectiveDate(false)
-    setPendingConfirm(null)
+    setChangingAmount(false)
     onCancel()
   }
 
@@ -2710,40 +2641,23 @@ function RecurringTransactionEditPanel({
     // through "which payment should this apply from" — every other field
     // (name, category, frequency, active, etc.) saves immediately.
     if (draft.amount !== template.amount && recentAndUpcomingOccurrences(template, new Date()).length > 0) {
-      setChoosingEffectiveDate(true)
+      setChangingAmount(true)
       return
     }
     onSave(draft)
   }
 
-  if (pendingConfirm) {
+  if (changingAmount) {
     return (
-      <RecurringChangeConfirmModal
-        effectiveFrom={pendingConfirm.effectiveFrom}
-        changes={pendingConfirm.changes}
-        affectsClearedBalance={pendingConfirm.effectiveFrom <= todayIso()}
-        onCancel={cancelEverything}
-        onConfirm={() => {
-          pendingConfirm.commit()
-          setPendingConfirm(null)
-          setChoosingEffectiveDate(false)
-        }}
-      />
-    )
-  }
-
-  if (choosingEffectiveDate) {
-    return (
-      <RecurringEffectiveDateModal
-        template={template}
-        newAmount={draft.amount}
-        onCancel={cancelEverything}
-        onChoose={(effectiveFrom) => {
-          setPendingConfirm({
-            effectiveFrom,
-            changes: [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(draft.amount)}` }],
-            commit: () => onSave({ ...draft, ...applyTemplateAmountChange(template, draft.amount, effectiveFrom) }),
-          })
+      <EffectiveDatedChangeFlow
+        occurrences={recentAndUpcomingOccurrences(template, new Date())}
+        dateStepDescription={`${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`}
+        buildChanges={() => [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(draft.amount)}` }]}
+        affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
+        onCancelAll={cancelEverything}
+        onCommit={(effectiveFrom) => {
+          onSave({ ...draft, ...applyTemplateAmountChange(template, draft.amount, effectiveFrom) })
+          setChangingAmount(false)
         }}
       />
     )

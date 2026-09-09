@@ -1,6 +1,9 @@
 import { createPortal } from 'react-dom'
 import { formatFullDate } from '../lib/format'
 import { FormButtonRow } from './FormButtons'
+import type { RecurringChangeField } from './EffectiveDatedChangeFlow'
+
+export type { RecurringChangeField }
 
 // Batch 7 (2026-09-07, Bug 8) — shared "are you sure?" confirmation for
 // any RECURRING bill/loan/transfer change that takes effect from a chosen
@@ -13,13 +16,6 @@ import { FormButtonRow } from './FormButtons'
 // describe an amount, a location, a frequency, or anything else a future
 // caller wants to show without this component needing to know what kind
 // of value it's rendering.
-export interface RecurringChangeField {
-  /** Short sub-header, e.g. "Amount", "Location" — rendered upper-case. */
-  label: string
-  from: string
-  to: string
-}
-
 export function RecurringChangeConfirmModal({
   effectiveFrom,
   changes,

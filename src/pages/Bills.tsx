@@ -15,7 +15,7 @@ import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
-import { RecurringChangeConfirmModal, EffectiveDateOccurrenceModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
+import { EffectiveDatedChangeFlow, type RecurringChangeField } from '../components/EffectiveDatedChangeFlow'
 import { peopleWithIncomeCount } from '../lib/household'
 import { shouldOfferLocationPicker } from '../lib/pickerFirst'
 import { recentAndUpcomingOccurrences, applyTemplateAmountChange, scheduledTemplateDates, setPausedTemplateOccurrences, resolveTemplateAmount, templateOccurrencePreviews } from '../lib/schedule'
@@ -556,13 +556,11 @@ function BillEditPanel({
   onCancel: () => void
 }) {
   const [draft, setDraft] = useState<BillDraft>(() => draftFromTemplate(template))
-  const [choosingEffectiveDate, setChoosingEffectiveDate] = useState<'amount' | 'location' | null>(null)
-  // Batch 7 (2026-09-07, Bug 8) — a second confirmation step, shown after
-  // picking the effective date, listing exactly what's changing (current
-  // → new) before committing. Holds the effectiveFrom already chosen plus
-  // a closure that actually commits, so onConfirm doesn't need to
-  // re-derive which branch (amount/location/both) it came from.
-  const [pendingConfirm, setPendingConfirm] = useState<{ effectiveFrom: string; changes: RecurringChangeField[]; commit: () => void } | null>(null)
+  // Batch 7 (2026-09-07, Bug 8), generalised 2026-09-09 into the shared
+  // EffectiveDatedChangeFlow — which field(s) triggered the "which payment
+  // does this apply from" flow, so the flow's buildChanges/onCommit know
+  // what to diff/write without re-deriving it.
+  const [changeKind, setChangeKind] = useState<'amount' | 'location' | null>(null)
   // Same 2-months-back/12-months-forward window Salary.tsx's pause
   // pickers use — see PausedOccurrencesControl's own comment.
   const pauseWindowStart = addMonths(new Date(), -2)
@@ -582,8 +580,7 @@ function BillEditPanel({
   // the row, matching every other Cancel in the app.
   function cancelEverything() {
     setDraft(draftFromTemplate(template))
-    setChoosingEffectiveDate(null)
-    setPendingConfirm(null)
+    setChangeKind(null)
     onCancel()
   }
 
@@ -614,11 +611,11 @@ function BillEditPanel({
     // for something that in practice happens together (e.g. "this bill
     // moves to my Bills pot AND its amount just went up").
     if (draft.amount !== template.amount && recentAndUpcomingOccurrences(template, new Date()).length > 0) {
-      setChoosingEffectiveDate('amount')
+      setChangeKind('amount')
       return
     }
     if (locationChanged && recentAndUpcomingOccurrences(template, new Date()).length > 0) {
-      setChoosingEffectiveDate('location')
+      setChangeKind('location')
       return
     }
     // No occurrences to anchor a date to yet (a brand-new-ish template) —
@@ -631,67 +628,44 @@ function BillEditPanel({
     onSave(draft)
   }
 
-  if (pendingConfirm) {
+  if (changeKind) {
+    const dateStepDescription =
+      changeKind === 'amount'
+        ? `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
+        : `${template.name} is moving ${draft.location === 'pot' ? `to ${pots.find((p) => p.id === draft.potId)?.name ?? 'a pot'}` : draft.location === 'joint' ? 'to Joint' : 'to Personal'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
     return (
-      <RecurringChangeConfirmModal
-        effectiveFrom={pendingConfirm.effectiveFrom}
-        changes={pendingConfirm.changes}
-        affectsClearedBalance={pendingConfirm.effectiveFrom <= todayIso()}
-        onCancel={cancelEverything}
-        onConfirm={() => {
-          pendingConfirm.commit()
-          setPendingConfirm(null)
-          setChoosingEffectiveDate(null)
-        }}
-      />
-    )
-  }
-
-  if (choosingEffectiveDate) {
-    return (
-      <BillEffectiveDateModal
-        template={template}
-        description={
-          choosingEffectiveDate === 'amount'
-            ? `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
-            : `${template.name} is moving ${draft.location === 'pot' ? `to ${pots.find((p) => p.id === draft.potId)?.name ?? 'a pot'}` : draft.location === 'joint' ? 'to Joint' : 'to Personal'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
-        }
-        onCancel={cancelEverything}
-        onChoose={(effectiveFrom) => {
-          // Batch 7 (2026-09-07, Bug 8) — rather than committing straight
-          // away, build the "are you sure?" diff and let the confirm
-          // modal above be the thing that actually commits — this is
-          // also the guard against re-triggering the same commit twice
-          // (e.g. an accidental double-tap on the date picker) that Bug
-          // 8.1's duplicate-transaction fix doesn't cover on its own.
+      <EffectiveDatedChangeFlow
+        occurrences={recentAndUpcomingOccurrences(template, new Date())}
+        dateStepDescription={dateStepDescription}
+        buildChanges={() => {
           const changes: RecurringChangeField[] = []
-          if (choosingEffectiveDate === 'amount') {
+          if (changeKind === 'amount') {
             changes.push({ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(draft.amount)}` })
           }
           if (locationChanged) {
             changes.push({ label: 'Location', from: billLocationLabel(template.location, template.potId, pots), to: billLocationLabel(draft.location, draft.potId, pots) })
           }
-          setPendingConfirm({
-            effectiveFrom,
-            changes,
-            commit: () => {
-              if (choosingEffectiveDate === 'amount') {
-                const amountPatch = applyTemplateAmountChange(template, draft.amount, effectiveFrom)
-                if (locationChanged) {
-                  // Both changed — apply the amount patch immediately, then
-                  // the location reassignment separately (it carries its own
-                  // retroactive transaction rewrite, which a plain onSave
-                  // patch can't do — see this component's own comment above).
-                  onSave({ ...draft, ...amountPatch })
-                  onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
-                } else {
-                  onSave({ ...draft, ...amountPatch })
-                }
-              } else {
-                onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
-              }
-            },
-          })
+          return changes
+        }}
+        affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
+        onCancelAll={cancelEverything}
+        onCommit={(effectiveFrom) => {
+          if (changeKind === 'amount') {
+            const amountPatch = applyTemplateAmountChange(template, draft.amount, effectiveFrom)
+            if (locationChanged) {
+              // Both changed — apply the amount patch immediately, then
+              // the location reassignment separately (it carries its own
+              // retroactive transaction rewrite, which a plain onSave
+              // patch can't do — see this component's own comment above).
+              onSave({ ...draft, ...amountPatch })
+              onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+            } else {
+              onSave({ ...draft, ...amountPatch })
+            }
+          } else {
+            onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+          }
+          setChangeKind(null)
         }}
       />
     )
@@ -740,38 +714,6 @@ function BillEditPanel({
         <FormButtonRow onCancel={onCancel} onSave={handleSaveClick} saveDisabled={!dirty} />
       </div>
     </div>
-  )
-}
-
-/**
- * "Which payment should this apply from?" — shown for either an amount OR
- * a location change (Pots backlog item added the latter, 2026-09
- * session — `description` is now caller-supplied so this one modal covers
- * both without hardcoding amount-specific wording). Same portal/nav-padding
- * pattern as Salary.tsx's ConfirmSalaryChangeModal, for the same reason
- * (see that component's own comment) — this modal sits inside a swipeable
- * row's tree too.
- */
-function BillEffectiveDateModal({
-  template,
-  description,
-  onCancel,
-  onChoose,
-}: {
-  template: RecurringTemplate
-  description: string
-  onCancel: () => void
-  onChoose: (effectiveFrom: string) => void
-}) {
-  // UAT 2026-09-08 — thin wrapper now: the actual picker UI moved to the
-  // shared EffectiveDateOccurrenceModal so Pots/Loans could reuse it too.
-  return (
-    <EffectiveDateOccurrenceModal
-      description={description}
-      occurrences={recentAndUpcomingOccurrences(template, new Date())}
-      onCancel={onCancel}
-      onChoose={onChoose}
-    />
   )
 }
 
