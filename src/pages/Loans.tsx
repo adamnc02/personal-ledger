@@ -10,19 +10,16 @@ import {
   estimateSettlementFigure,
   findLenderCalibrationProfile,
   previewOverpaymentRecast,
-  previewRecurringOverpaymentRecast,
   buildLoanLedgerRows,
   loanFinishInfo,
   isLoanConfidentlyCalibrated,
   MAX_CALIBRATION_LINES,
-  scheduledLoanRecurringOverpaymentDates,
-  setPausedLoanRecurringOverpaymentDates,
   recentAndUpcomingLoanPaymentDates,
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
 import { nextMinimumChargeAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
-import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
+import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
 import { CategoryIcon } from '../components/CategoryIcon'
@@ -33,13 +30,11 @@ import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
-import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
 import { RecurringChangeConfirmModal, EffectiveDateOccurrenceModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { peopleWithIncomeCount } from '../lib/household'
 import { shouldOfferLocationPicker } from '../lib/pickerFirst'
-import { addMonths } from 'date-fns'
 
 import { todayIso } from '../lib/date'
 
@@ -603,19 +598,6 @@ function LoanRow({
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
             onCancel={() => isOpen && onToggle()}
-            // UAT 2026-09-08 (followup-confirm-loan-recurring-overpayment-
-            // location retest) — a recurring overpayment configured while
-            // the card is collapsed used to only land in LoanEditPanel's
-            // own local draft (never actually persisted), so it vanished
-            // the moment the card next collapsed and the draft got reset
-            // back to real, unconfigured data. Persists straight to the
-            // real loan, bypassing the fields-grid draft entirely — this
-            // action has its own Save/Cancel now (RecurringOverpaymentEditor
-            // itself), it doesn't need to piggyback on the loan's main one.
-            onSaveRecurringOverpayment={(recurringOverpayment, options) => {
-              onSave({ recurringOverpayment })
-              if (!options?.silent) triggerFlash()
-            }}
           />
 
         <SavedFlashOverlay active={flashActive} message={flashMessage} />
@@ -778,7 +760,6 @@ function LoanEditPanel({
   overpaymentPrefill,
   onPrefillConsumed,
   onCancel,
-  onSaveRecurringOverpayment,
 }: {
   loan: Loan
   /** UAT 2026-09-08 (6-bug4-loans) — gates only the Name/Amount/etc.
@@ -804,12 +785,6 @@ function LoanEditPanel({
   /** UAT 2026-09-08 (7-bug8.2-confirm-loans note) — this fields form had
    * no Cancel at all; collapses the card without saving. */
   onCancel: () => void
-  /** UAT 2026-09-08 (followup-confirm-loan-recurring-overpayment-location
-   * retest) — persists a recurring overpayment change straight to the
-   * real loan, bypassing this panel's own fields-grid draft (which only
-   * commits via the main Save button and would otherwise silently lose
-   * a recurring-overpayment edit made while the card is collapsed). */
-  onSaveRecurringOverpayment: (v: LoanRecurringOverpayment | undefined, options?: { silent?: boolean }) => void
 }) {
   // A 'recurring' prefill (from the What-if page's "Make this a real
   // recurring overpayment" button) seeds the draft's recurringOverpayment
@@ -925,20 +900,6 @@ function LoanEditPanel({
           onCancel={() => setLoggingOverpayment(false)}
         />
       )}
-
-      <RecurringOverpaymentEditor
-        loan={{ ...loan, ...draft }}
-        pots={pots}
-        value={draft.recurringOverpayment}
-        onChange={(recurringOverpayment, options) => {
-          // Keep the local draft in sync too, purely so `loan={{ ...loan,
-          // ...draft }}` above stays correct for any recast preview
-          // computed before the real `loan` prop itself re-renders with
-          // the persisted change.
-          update({ recurringOverpayment })
-          onSaveRecurringOverpayment(recurringOverpayment, options)
-        }}
-      />
 
       {loan.active ? (
         <>
@@ -1908,452 +1869,6 @@ function OverpaymentForm({
 // here since both loan overpayments and credit-card lump payments are
 // this exact {id, date, amount, note?} shape.
 export type LoggedPayment = { id: string; date: string; amount: number; note?: string }
-
-// ── Recurring/standing overpayment — distinct from the one-off log above.
-// A real ongoing commitment ("an extra £100 every month", or "an extra 5%
-// of whatever's left, every month") folded into the regular monthly
-// payment amount, not its own separate ledger line. Toggling it on
-// starts with sensible defaults; toggling it off clears it entirely
-// (passes undefined, same as never having set one). ──
-
-export function RecurringOverpaymentEditor({
-  loan,
-  pots,
-  value,
-  onChange,
-}: {
-  loan: Loan
-  pots: Pot[]
-  value: LoanRecurringOverpayment | undefined
-  /** UAT 2026-09-08 (followup-recurring-overpayment-persists retest) —
-   * `silent` suppresses the "Saved" flash for a commit that's really
-   * just one intermediate step of a multi-step flow (the creation
-   * wizard's location choice, immediately followed by the recast
-   * choice) — every commit still persists regardless of this flag, only
-   * the flash is skipped, so the flow doesn't visibly "save" twice for
-   * what reads as one action. */
-  onChange: (v: LoanRecurringOverpayment | undefined, options?: { silent?: boolean }) => void
-}) {
-  const [showEndDate, setShowEndDate] = useState(!!value?.endDate)
-  const [choosingRecast, setChoosingRecast] = useState(false)
-  // UAT follow-up (2026-09-08) — same "are you sure, here's what's
-  // changing" confirmation Bills.tsx/Loans.tsx's own main location
-  // field/Expenses.tsx already show before a recurring change commits
-  // (Adam's own spec: "used for anything RECURRING in the app that
-  // changed, relating to bills / transactions / loans / transfers").
-  // Unlike the loan's own `location` field, this one has no
-  // amountHistory-style effective-dating mechanism (see the field's own
-  // type comment in types/ledger.ts — "a flat overwrite, not
-  // effective-dated... describes a standing arrangement's setting rather
-  // than a fact about a specific past payment"), so this confirms then
-  // applies immediately, it doesn't ask for a date to anchor to.
-  const [pendingOverpaymentLocationConfirm, setPendingOverpaymentLocationConfirm] = useState<{ changes: RecurringChangeField[]; commit: () => void } | null>(null)
-  // UAT 2026-09-08 (followup-confirm-loan-recurring-overpayment-location
-  // note) — this editor's fields (amount, Paid from, payment date, end
-  // date) used to write straight through onChange on every keystroke,
-  // with no Save/Cancel at all; the "Paid from" dropdown alone got a
-  // confirm modal, but nothing actually gated committing to it. Now a
-  // real draft-then-save card, collapsed by default, matching every
-  // other editable card in the app — Remove/Change-recast/paused-dates
-  // stay as their own immediate actions below, unaffected.
-  const [editorOpen, setEditorOpen] = useState(false)
-  const [fieldsDraft, setFieldsDraft] = useState<{
-    amount: LoanRecurringOverpayment['amount']
-    location: 'personal' | 'pot' | undefined
-    potId: string | undefined
-    startDate: string
-    endDate: string | undefined
-  } | null>(null)
-  // Held separately from `value` itself: the amount has to be chosen
-  // BEFORE a LoanRecurringOverpayment is created at all — confirmed as a
-  // real bug that the old flow skipped straight to the recast-choice
-  // screen with a silently-defaulted £50 fixed amount the person never
-  // actually saw or chose, because clicking "+ Add a recurring
-  // overpayment" created `value` (with that £50 default baked in) AND
-  // opened the recast screen in the very same click.
-  const [draftAmount, setDraftAmount] = useState<LoanRecurringOverpayment['amount'] | null>(null)
-  // Picker-First Flows (2026-09 session) — the location step this field's
-  // own type comment already documented as intended ("Chosen via its own
-  // location-picker-first step when the recurring overpayment is
-  // created") but was never actually built; only ever reachable
-  // afterward, via the inline "Paid from" dropdown further down in the
-  // live editor. Held the same way pendingAmount is: nothing is written
-  // to `value` until the whole wizard (amount → location → recast)
-  // completes. Widened 2026-09-05 (Adam-reported): this step always
-  // shows now, not just when the owner happens to have a pot — see the
-  // render branch below.
-  const [pendingAmount, setPendingAmount] = useState<LoanRecurringOverpayment['amount'] | null>(null)
-  const ownerPots = pots.filter((p) => p.personId === loan.ownerId)
-
-  function overpaymentLocationLabel(location: 'personal' | 'pot' | undefined, potId: string | undefined): string {
-    if (location === 'pot') return ownerPots.find((p) => p.id === potId)?.name ?? 'a pot'
-    if (location === 'personal') return 'Personal'
-    return "Follows the loan's own location"
-  }
-
-  if (!value && !draftAmount && !pendingAmount) {
-    return (
-      <button onClick={() => setDraftAmount({ type: 'fixed', amount: 50 })} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-        + Add a recurring overpayment
-      </button>
-    )
-  }
-
-  // The amount step now genuinely comes first — nothing is created or
-  // saved yet at this point, it's purely local draft state until
-  // "Continue" commits it and moves on to Location (if the owner has a
-  // pot to choose from) or straight to the recast choice.
-  if (!value && draftAmount) {
-    return (
-      <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-        <span className="text-xs font-medium text-[var(--color-ink)]">Recurring overpayment amount</span>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setDraftAmount(draftAmount.type === 'fixed' ? draftAmount : { type: 'fixed', amount: 50 })}
-            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-            style={{ background: draftAmount.type === 'fixed' ? 'var(--color-coral)' : 'var(--color-surface)', color: draftAmount.type === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
-          >
-            Fixed amount
-          </button>
-          <button
-            onClick={() => setDraftAmount(draftAmount.type === 'percent_of_balance' ? draftAmount : { type: 'percent_of_balance', percent: 5 })}
-            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-            style={{
-              background: draftAmount.type === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-surface)',
-              color: draftAmount.type === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
-            }}
-          >
-            % of balance
-          </button>
-        </div>
-        {draftAmount.type === 'fixed' ? (
-          <EditField label="Amount (£)" type="number" value={draftAmount.amount} onChange={(v) => setDraftAmount({ type: 'fixed', amount: Number(v) || 0 })} />
-        ) : (
-          <EditField label="Percent" type="number" value={draftAmount.percent} onChange={(v) => setDraftAmount({ type: 'percent_of_balance', percent: Number(v) || 0 })} />
-        )}
-        <div className="flex justify-end gap-3 mt-1">
-          <button onClick={() => setDraftAmount(null)} className="text-xs text-[var(--color-ink-muted)]">
-            Cancel
-          </button>
-          <button
-            disabled={draftAmount.type === 'fixed' ? !(draftAmount.amount > 0) : !(draftAmount.percent > 0)}
-            onClick={() => {
-              // UAT follow-up (2026-09-05, Adam-reported): used to skip
-              // straight to the recast choice whenever the owner had no
-              // pot of their own — but "Follows the loan" and "Personal"
-              // are still real, meaningful choices even with no pot to
-              // pick, so the location step should always show, not only
-              // once a pot happens to exist.
-              setPendingAmount(draftAmount)
-              setDraftAmount(null)
-            }}
-            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
-            style={{ background: 'var(--color-coral)' }}
-          >
-            Continue
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  // Picker-First Flows (2026-09 session), widened 2026-09-05 (Adam-
-  // reported) — always shown right after Amount, before the recast
-  // choice, regardless of whether the owner has a pot ("Follows the
-  // loan" and "Personal" are real choices either way; ownerPots below
-  // just adds more options when there's a pot to pick from). "Follows
-  // the loan" mirrors the field's own documented default
-  // (LoanRecurringOverpayment.location in types/ledger.ts) — explicitly
-  // offered here rather than just leaving it unset by omission, since a
-  // person choosing at set-up time deserves to see that as a real
-  // option, not a side effect of skipping the step.
-  if (!value && !draftAmount && pendingAmount) {
-    const commit = (patch: { location?: 'personal' | 'pot'; potId?: string }) => {
-      // silent: true — this is just step 2 of the creation wizard, the
-      // recast choice screen (its own onChange call) comes right after.
-      onChange({ startDate: todayIso(), amount: pendingAmount, ...patch }, { silent: true })
-      setPendingAmount(null)
-      setChoosingRecast(true)
-    }
-    return (
-      <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-        <span className="text-xs font-medium text-[var(--color-ink)]">Where should this come from?</span>
-        <div className="flex flex-col gap-1.5">
-          <button onClick={() => commit({})} className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]" style={{ background: 'var(--color-surface)' }}>
-            Follows the loan's own location
-          </button>
-          <button onClick={() => commit({ location: 'personal' })} className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]" style={{ background: 'var(--color-surface)' }}>
-            Personal
-          </button>
-          {ownerPots.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => commit({ location: 'pot', potId: p.id })}
-              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
-              style={{ background: 'var(--color-surface)' }}
-            >
-              {p.name}
-            </button>
-          ))}
-        </div>
-        <button
-          onClick={() => {
-            setDraftAmount(pendingAmount)
-            setPendingAmount(null)
-          }}
-          className="text-xs text-[var(--color-ink-muted)] self-start mt-1"
-        >
-          Back
-        </button>
-      </div>
-    )
-  }
-
-  if (!value) return null // unreachable — satisfies TS narrowing below
-
-  // D7's follow-up step (scope §9/§11.3 — recurring is in scope for the
-  // recast choice too, not one-off only): shown once, right after a
-  // recurring overpayment is first set up, with a real preview of each
-  // outcome computed via previewRecurringOverpaymentRecast. Reachable
-  // again later via the "Change" link below the live editor, so picking
-  // wrong at creation isn't a dead end.
-  if (choosingRecast) {
-    const preview = previewRecurringOverpaymentRecast(loan, value)
-    return (
-      <div className="rounded-xl p-3 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
-        <span className="text-xs font-medium text-[var(--color-ink)]">How should this recurring overpayment be applied?</span>
-        <button
-          onClick={() => {
-            onChange({ ...value, recastMode: 'reduce_payment' })
-            setChoosingRecast(false)
-          }}
-          className="rounded-lg p-3 text-left"
-          style={{ background: 'var(--color-surface)' }}
-        >
-          <p className="text-sm font-semibold text-[var(--color-ink)]">Keep the same length</p>
-          <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
-            New monthly payment: £{preview.reducePayment.newMonthlyPayment != null ? formatCurrency(preview.reducePayment.newMonthlyPayment) : '—'}
-          </p>
-        </button>
-        <button
-          onClick={() => {
-            onChange({ ...value, recastMode: 'reduce_term' })
-            setChoosingRecast(false)
-          }}
-          className="rounded-lg p-3 text-left"
-          style={{ background: 'var(--color-surface)' }}
-        >
-          <p className="text-sm font-semibold text-[var(--color-ink)]">Keep monthly payment the same</p>
-          <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
-            Ends {preview.reduceTerm.payoffDate ? formatMonthYear(preview.reduceTerm.payoffDate) : '—'} · estimated final repayment £
-            {preview.reduceTerm.finalPayment != null ? formatCurrency(preview.reduceTerm.finalPayment) : '—'}
-          </p>
-        </button>
-      </div>
-    )
-  }
-
-  return (
-    <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-      {pendingOverpaymentLocationConfirm && (
-        <RecurringChangeConfirmModal
-          effectiveFrom={todayIso()}
-          changes={pendingOverpaymentLocationConfirm.changes}
-          affectsClearedBalance={false}
-          onCancel={() => setPendingOverpaymentLocationConfirm(null)}
-          onConfirm={() => {
-            pendingOverpaymentLocationConfirm.commit()
-            setPendingOverpaymentLocationConfirm(null)
-          }}
-        />
-      )}
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-[var(--color-ink)]">Recurring overpayment</span>
-        <button
-          onClick={() => {
-            onChange(undefined)
-            setShowEndDate(false)
-            setEditorOpen(false)
-            setFieldsDraft(null)
-          }}
-          className="text-xs"
-          style={{ color: 'var(--color-negative)' }}
-        >
-          Remove
-        </button>
-      </div>
-      <div className="flex items-center justify-between -mt-1">
-        <p className="text-[11px] text-[var(--color-ink-faint)]">{value.recastMode === 'reduce_payment' ? 'Keeping the same length' : 'Keeping the monthly payment the same'}</p>
-        <button onClick={() => setChoosingRecast(true)} className="text-[11px] font-medium" style={{ color: 'var(--color-coral)' }}>
-          Change
-        </button>
-      </div>
-
-      {/* UAT 2026-09-08 (followup-confirm-loan-recurring-overpayment-
-          location note) — amount/Paid from/dates used to write straight
-          through onChange live; now a collapsed summary that opens into a
-          real draft with its own Save/Cancel, matching every other
-          editable card. */}
-      {!editorOpen ? (
-        <button
-          onClick={() => {
-            setFieldsDraft({ amount: value.amount, location: value.location, potId: value.potId, startDate: value.startDate, endDate: value.endDate })
-            setEditorOpen(true)
-          }}
-          className="w-full text-left px-3 py-2 rounded-xl text-xs"
-          style={{ background: 'var(--color-surface)', color: 'var(--color-ink)' }}
-        >
-          {value.amount.type === 'fixed' ? `£${formatCurrency(value.amount.amount)}` : `${value.amount.percent}% of balance`} · {overpaymentLocationLabel(value.location, value.potId)} · from{' '}
-          {value.startDate}
-          {value.endDate ? ` to ${value.endDate}` : ''}
-        </button>
-      ) : (
-        fieldsDraft && (
-          <div className="flex flex-col gap-2">
-            <div className="flex gap-2">
-              <button
-                onClick={() => setFieldsDraft((d) => (d ? { ...d, amount: d.amount.type === 'fixed' ? d.amount : { type: 'fixed', amount: 50 } } : d))}
-                className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-                style={{ background: fieldsDraft.amount.type === 'fixed' ? 'var(--color-coral)' : 'var(--color-surface)', color: fieldsDraft.amount.type === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
-              >
-                Fixed amount
-              </button>
-              <button
-                onClick={() => setFieldsDraft((d) => (d ? { ...d, amount: d.amount.type === 'percent_of_balance' ? d.amount : { type: 'percent_of_balance', percent: 5 } } : d))}
-                className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-                style={{
-                  background: fieldsDraft.amount.type === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-surface)',
-                  color: fieldsDraft.amount.type === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
-                }}
-              >
-                % of remaining balance
-              </button>
-            </div>
-
-            {fieldsDraft.amount.type === 'fixed' ? (
-              <EditField
-                label="Amount (£)"
-                type="number"
-                value={fieldsDraft.amount.amount}
-                onChange={(v) => setFieldsDraft((d) => (d ? { ...d, amount: { type: 'fixed', amount: Number(v) } } : d))}
-              />
-            ) : (
-              <EditField
-                label="Percent (%)"
-                type="number"
-                value={fieldsDraft.amount.percent}
-                onChange={(v) => setFieldsDraft((d) => (d ? { ...d, amount: { type: 'percent_of_balance', percent: Number(v) } } : d))}
-              />
-            )}
-
-            {/* Pots backlog item (2026-09 session) — independent of the
-                loan's OWN location (Adam-specified: "if a loan is tagged
-                to a pot, that means ONLY the monthly payment is paid from
-                the pot, not necessarily recurring overpayments").
-                Absent/'Follows loan' is the field's own documented
-                default (see LoanRecurringOverpayment.location in
-                types/ledger.ts) — a flat overwrite, not effective-dated —
-                see that same type comment for why. */}
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-[var(--color-ink-muted)]">Paid from</span>
-              <select
-                value={fieldsDraft.location === 'pot' ? `pot:${fieldsDraft.potId ?? ''}` : (fieldsDraft.location ?? '')}
-                onChange={(e) => {
-                  const raw = e.target.value
-                  const next: { location: 'personal' | 'pot' | undefined; potId: string | undefined } =
-                    raw === '' ? { location: undefined, potId: undefined } : raw === 'personal' ? { location: 'personal', potId: undefined } : { location: 'pot', potId: raw.slice(4) }
-                  setFieldsDraft((d) => (d ? { ...d, ...next } : d))
-                }}
-                className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-              >
-                <option value="" style={{ color: '#000' }}>
-                  Follows the loan's own location
-                </option>
-                <option value="personal" style={{ color: '#000' }}>
-                  Personal
-                </option>
-                {ownerPots.map((p) => (
-                  <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="grid grid-cols-2 gap-2">
-              <EditField label="Payment date" type="date" value={fieldsDraft.startDate} onChange={(v) => setFieldsDraft((d) => (d ? { ...d, startDate: v } : d))} />
-              {showEndDate ? (
-                <EditField label="End date" type="date" value={fieldsDraft.endDate ?? ''} onChange={(v) => setFieldsDraft((d) => (d ? { ...d, endDate: v || undefined } : d))} />
-              ) : (
-                <button onClick={() => setShowEndDate(true)} className="self-end text-xs font-medium pb-1" style={{ color: 'var(--color-coral)' }}>
-                  + Set an end date
-                </button>
-              )}
-            </div>
-            {showEndDate && fieldsDraft.endDate && (
-              <button onClick={() => setFieldsDraft((d) => (d ? { ...d, endDate: undefined } : d))} className="self-start text-xs text-[var(--color-ink-muted)]">
-                Clear end date (run indefinitely)
-              </button>
-            )}
-
-            <FormButtonRow
-              onCancel={() => {
-                setFieldsDraft(null)
-                setShowEndDate(!!value.endDate)
-                setEditorOpen(false)
-              }}
-              saveDisabled={JSON.stringify(fieldsDraft) === JSON.stringify({ amount: value.amount, location: value.location, potId: value.potId, startDate: value.startDate, endDate: value.endDate })}
-              onSave={() => {
-                const draft = fieldsDraft
-                const locationChanged = draft.location !== value.location || (draft.location === 'pot' && draft.potId !== value.potId)
-                const commit = () => {
-                  onChange({ ...value, amount: draft.amount, location: draft.location, potId: draft.potId, startDate: draft.startDate, endDate: draft.endDate })
-                  setFieldsDraft(null)
-                  setEditorOpen(false)
-                }
-                if (locationChanged) {
-                  setPendingOverpaymentLocationConfirm({
-                    changes: [{ label: 'Paid from', from: overpaymentLocationLabel(value.location, value.potId), to: overpaymentLocationLabel(draft.location, draft.potId) }],
-                    commit,
-                  })
-                } else {
-                  commit()
-                }
-              }}
-            />
-          </div>
-        )
-      )}
-
-      {/* Ad-hoc individual skips (Phase 4) — distinct from the end date
-          above: pausing one date doesn't mean the arrangement is over,
-          the next scheduled one still applies. */}
-      <PausedOccurrencesControl
-        windowDates={scheduledLoanRecurringOverpaymentDates(loan, addMonths(new Date(), -2), addMonths(new Date(), 12))}
-        currentlyPaused={new Set(value.pausedDates ?? [])}
-        amountForDate={(_date) => {
-          if (value.amount.type === 'fixed') return value.amount.amount
-          // Percent-of-balance has no single "amount" independent of the
-          // loan's balance at that date — showing the loan's CURRENT
-          // balance's share is a reasonable estimate for the picker, not
-          // a promise of the exact figure on the day.
-          return Math.round(((loan.principal * value.amount.percent) / 100) * 100) / 100
-        }}
-        itemLabel="overpayments"
-        nextPaymentPreview={(tentative) => {
-          const windowDates = scheduledLoanRecurringOverpaymentDates(loan, addMonths(new Date(), -2), addMonths(new Date(), 12))
-          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, tentative)
-          return windowDates.find((d) => !merged?.pausedDates?.includes(d)) ?? null
-        }}
-        onSave={(pausedDates) => {
-          const windowDates = scheduledLoanRecurringOverpaymentDates(loan, addMonths(new Date(), -2), addMonths(new Date(), 12))
-          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, pausedDates)
-          if (merged) onChange(merged)
-        }}
-      />
-    </div>
-  )
-}
 
 function MinimumPaymentEditor({ value, onChange }: { value: CreditCardMinimumPayment; onChange: (v: CreditCardMinimumPayment) => void }) {
   return (

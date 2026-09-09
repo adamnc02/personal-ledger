@@ -20,7 +20,7 @@ import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { addYears, addDays, addMonths } from 'date-fns'
-import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard, LoanRecurringOverpayment } from '../types/ledger'
+import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard, LoanRecurringOverpayment, Category } from '../types/ledger'
 import type { LoggedPayment } from './Loans'
 import { previewOverpaymentRecast, previewRecurringOverpaymentRecast, scheduledLoanRecurringOverpaymentDates, setPausedLoanRecurringOverpaymentDates } from '../lib/ledgerLoans'
 
@@ -604,6 +604,7 @@ export function Expenses() {
                     key={loan.id}
                     loan={loan}
                     pots={data.pots}
+                    category={data.categories.find((c) => c.id === loan.categoryId)}
                     value={loan.recurringOverpayment!}
                     onUpdate={(v) => updateLoan(loan.id, { recurringOverpayment: v })}
                     onRemove={() => updateLoan(loan.id, { recurringOverpayment: undefined })}
@@ -612,45 +613,32 @@ export function Expenses() {
             </div>
           )}
 
-          <div className="flex flex-col gap-3">
-            {loansWithOverpayments.map((loan) => (
-              <div key={loan.id}>
-                <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">{loan.name} overpayments</h3>
-                <div className="flex flex-col gap-2">
-                  {loan.overpayments
-                    .slice()
-                    .sort((a, b) => b.date.localeCompare(a.date))
-                    .map((p) => (
-                      <OverpaymentRowItem
-                        key={p.id}
-                        payment={p}
-                        label={`${loan.name} overpayment`}
-                        onUpdate={(amount, date, note) => updateLoanOverpayment(loan.id, p.id, amount, date, note)}
-                        onRemove={() => removeLoanOverpayment(loan.id, p.id)}
-                      />
-                    ))}
-                </div>
-              </div>
-            ))}
-            {cardsWithLumpPayments.map((card) => (
-              <div key={card.id}>
-                <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">{card.name} payments</h3>
-                <div className="flex flex-col gap-2">
-                  {card.lumpPayments
-                    .slice()
-                    .sort((a, b) => b.date.localeCompare(a.date))
-                    .map((p) => (
-                      <OverpaymentRowItem
-                        key={p.id}
-                        payment={p}
-                        label={`${card.name} payment`}
-                        onUpdate={(amount, date, note) => updateCreditCardLumpPayment(card.id, p.id, amount, date, note)}
-                        onRemove={() => removeCreditCardLumpPayment(card.id, p.id)}
-                      />
-                    ))}
-                </div>
-              </div>
-            ))}
+          {/* 2026-09-09 third followup (Adam-reported) — one flat list,
+              loans and cards mixed together sorted by date, same as the
+              Transfers pill's own single MonthCollapsedTransactionList —
+              no per-loan/per-card section dividers. */}
+          <div className="flex flex-col gap-2">
+            {[
+              ...loansWithOverpayments.flatMap((loan) =>
+                loan.overpayments.map((p) => ({ kind: 'loan' as const, entity: loan, payment: p })),
+              ),
+              ...cardsWithLumpPayments.flatMap((card) =>
+                card.lumpPayments.map((p) => ({ kind: 'card' as const, entity: card, payment: p })),
+              ),
+            ]
+              .sort((a, b) => b.payment.date.localeCompare(a.payment.date))
+              .map(({ kind, entity, payment }) => (
+                <OverpaymentRowItem
+                  key={payment.id}
+                  payment={payment}
+                  label={kind === 'loan' ? `${entity.name} overpayment` : `${entity.name} payment`}
+                  category={data.categories.find((c) => c.id === entity.categoryId)}
+                  onUpdate={(amount, date, note) =>
+                    kind === 'loan' ? updateLoanOverpayment(entity.id, payment.id, amount, date, note) : updateCreditCardLumpPayment(entity.id, payment.id, amount, date, note)
+                  }
+                  onRemove={() => (kind === 'loan' ? removeLoanOverpayment(entity.id, payment.id) : removeCreditCardLumpPayment(entity.id, payment.id))}
+                />
+              ))}
             {loansWithOverpayments.length === 0 && cardsWithLumpPayments.length === 0 && !adding && (
               <p className="text-sm text-[var(--color-ink-muted)] text-center py-10">No overpayments logged yet.</p>
             )}
@@ -1366,8 +1354,24 @@ function OverpaymentCreateForm({
 
   function pickTarget(t: OverpaymentTarget) {
     setTarget(t)
-    if (mode === 'recurring') setStep('from')
-    else setStep(t.kind === 'loan' ? 'recast' : 'date')
+    // A joint loan's recurring overpayment always follows the loan —
+    // it's ALWAYS jointly funded, never redirectable to Personal/a pot
+    // (see resolveRecurringOverpaymentSource's own comment in
+    // ledgerLoans.ts: "deliberately ignores this field entirely...
+    // rather than risking the per-person joint split math being applied
+    // to a pot-sourced, unsplit amount"). So there's nothing to actually
+    // pick — skip straight past the From step, same "don't make a
+    // single-option list something to tap through" rule as the To step.
+    const loan = t.kind === 'loan' ? loans.find((l) => l.id === t.id) : undefined
+    if (mode === 'recurring' && loan?.location === 'joint') {
+      setFromLocation(undefined)
+      setFromPotId(undefined)
+      setStep('recast')
+    } else if (mode === 'recurring') {
+      setStep('from')
+    } else {
+      setStep(t.kind === 'loan' ? 'recast' : 'date')
+    }
   }
 
   function recurringOverpaymentAmount(): LoanRecurringOverpayment['amount'] {
@@ -1498,17 +1502,6 @@ function OverpaymentCreateForm({
         <div className="flex flex-col gap-1.5">
           <button
             onClick={() => {
-              setFromLocation(undefined)
-              setFromPotId(undefined)
-              setStep('recast')
-            }}
-            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
-            style={{ background: 'var(--color-surface)' }}
-          >
-            Follows the loan's own location
-          </button>
-          <button
-            onClick={() => {
               setFromLocation('personal')
               setFromPotId(undefined)
               setStep('recast')
@@ -1577,7 +1570,10 @@ function OverpaymentCreateForm({
             {preview.reduceTerm.finalPayment != null ? formatCurrency(preview.reduceTerm.finalPayment) : '—'}
           </p>
         </button>
-        <button onClick={() => setStep(mode === 'recurring' ? 'from' : 'to')} className="text-xs self-start text-[var(--color-ink-muted)]">
+        <button
+          onClick={() => setStep(mode === 'recurring' && targetLoan.location !== 'joint' ? 'from' : 'to')}
+          className="text-xs self-start text-[var(--color-ink-muted)]"
+        >
           Back
         </button>
       </div>
@@ -1722,11 +1718,13 @@ function TransferRowItem({
 function OverpaymentRowItem({
   payment,
   label,
+  category,
   onUpdate,
   onRemove,
 }: {
   payment: LoggedPayment
   label: string
+  category: Category | undefined
   onUpdate: (amount: number, date: string, note?: string) => void
   onRemove: () => void
 }) {
@@ -1736,8 +1734,9 @@ function OverpaymentRowItem({
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={label}>
       <div className="relative rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
-        <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center justify-between p-3 text-left">
-          <div className="min-w-0">
+        <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center gap-3 p-3 text-left">
+          <CategoryIcon category={category} />
+          <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-[var(--color-ink)] truncate">{payment.note || label}</p>
             <p className="text-xs text-[var(--color-ink-muted)]">{payment.date}</p>
           </div>
@@ -1787,10 +1786,15 @@ function OverpaymentEditForm({
   )
 }
 
-function overpaymentFromLabel(pots: Pot[], location: 'personal' | 'pot' | undefined, potId: string | undefined): string {
+/** A joint loan's recurring overpayment ALWAYS follows the loan (see
+ * resolveRecurringOverpaymentSource's own comment) — the stored
+ * location/potId field is entirely ignored in that case, so the label
+ * must check the loan's own jointness first rather than trust what's
+ * stored. */
+function overpaymentFromLabel(loan: Loan, pots: Pot[], location: 'personal' | 'pot' | undefined, potId: string | undefined): string {
+  if (loan.location === 'joint') return 'Joint account'
   if (location === 'pot') return pots.find((p) => p.id === potId)?.name ?? 'a pot'
-  if (location === 'personal') return 'Personal'
-  return "loan's own location"
+  return 'Personal'
 }
 
 /**
@@ -1808,12 +1812,14 @@ function overpaymentFromLabel(pots: Pot[], location: 'personal' | 'pot' | undefi
 function LoanRecurringOverpaymentRow({
   loan,
   pots,
+  category,
   value,
   onUpdate,
   onRemove,
 }: {
   loan: Loan
   pots: Pot[]
+  category: Category | undefined
   value: LoanRecurringOverpayment
   onUpdate: (v: LoanRecurringOverpayment) => void
   onRemove: () => void
@@ -1828,11 +1834,12 @@ function LoanRecurringOverpaymentRow({
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={`${loan.name} recurring overpayment`}>
       <div className="relative rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
-        <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center justify-between p-3 text-left">
-          <div className="min-w-0">
+        <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center gap-3 p-3 text-left">
+          <CategoryIcon category={category} />
+          <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-[var(--color-ink)] truncate">{loan.name} — recurring overpayment</p>
             <p className="text-xs text-[var(--color-ink-muted)]">
-              {overpaymentFromLabel(ownerPots, value.location, value.potId)} · from {value.startDate}
+              {overpaymentFromLabel(loan, ownerPots, value.location, value.potId)} · from {value.startDate}
               {value.endDate ? ` to ${value.endDate}` : ''}
             </p>
           </div>
@@ -1896,7 +1903,7 @@ function LoanRecurringOverpaymentEditForm({
     const locationChanged = draft.location !== value.location || (draft.location === 'pot' && draft.potId !== value.potId)
     const commit = () => onSave(draft)
     if (locationChanged) {
-      setPendingConfirm({ changes: [{ label: 'Paid from', from: overpaymentFromLabel(pots, value.location, value.potId), to: overpaymentFromLabel(pots, draft.location, draft.potId) }], commit })
+      setPendingConfirm({ changes: [{ label: 'Paid from', from: overpaymentFromLabel(loan, pots, value.location, value.potId), to: overpaymentFromLabel(loan, pots, draft.location, draft.potId) }], commit })
     } else {
       commit()
     }
@@ -1964,35 +1971,37 @@ function LoanRecurringOverpaymentEditForm({
 
       <label className="flex flex-col gap-1">
         <span className="text-xs text-[var(--color-ink-muted)]">Paid from</span>
-        <select
-          value={location === 'pot' ? `pot:${potId ?? ''}` : (location ?? '')}
-          onChange={(e) => {
-            const raw = e.target.value
-            if (raw === '') {
-              setLocation(undefined)
-              setPotId(undefined)
-            } else if (raw === 'personal') {
-              setLocation('personal')
-              setPotId(undefined)
-            } else {
-              setLocation('pot')
-              setPotId(raw.slice(4))
-            }
-          }}
-          className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-        >
-          <option value="" style={{ color: '#000' }}>
-            Follows the loan's own location
-          </option>
-          <option value="personal" style={{ color: '#000' }}>
-            Personal
-          </option>
-          {pots.map((p) => (
-            <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
-              {p.name}
+        {loan.location === 'joint' ? (
+          // A joint loan's recurring overpayment is always jointly
+          // funded — the location field is entirely ignored in that
+          // case (see resolveRecurringOverpaymentSource), so there's
+          // nothing to actually pick.
+          <p className="text-sm text-[var(--color-ink)] py-1">Joint account</p>
+        ) : (
+          <select
+            value={location === 'pot' ? `pot:${potId ?? ''}` : 'personal'}
+            onChange={(e) => {
+              const raw = e.target.value
+              if (raw === 'personal') {
+                setLocation('personal')
+                setPotId(undefined)
+              } else {
+                setLocation('pot')
+                setPotId(raw.slice(4))
+              }
+            }}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          >
+            <option value="personal" style={{ color: '#000' }}>
+              Personal
             </option>
-          ))}
-        </select>
+            {pots.map((p) => (
+              <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        )}
       </label>
 
       <div>
