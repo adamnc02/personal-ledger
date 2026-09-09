@@ -98,5 +98,14 @@ const clearedTransactions = [...windowTransactions, { ...overpay.transaction, id
 const clearedSections = buildCreditCardCycleSections(clearedCard, clearedTransactions, cycles)
 check('After clearing the 14 Oct balance in full, the 14 Nov section closes at £0', clearedSections[2].closingBalance, 0)
 
+// ---- 2026-09-09 UAT retest — a lump payment dated on a due date must group with THAT cycle, not the following one ----
+// Root cause: payments aren't window-gated (they apply immediately),
+// but the general row filter used windowStart/windowEnd (a spend-only
+// concept) as its bound — a payment dated between a window's close and
+// its own due date (routine on a statement-window card) fell into the
+// NEXT cycle's section instead of the one it actually cleared.
+check('...and the "Statement cleared" payment itself appears in the 14 Oct section (the cycle it clears)', clearedSections[1].rows.some((r) => r.date === '2026-10-14' && r.type === 'credit_card_payment'), true)
+check('...NOT in the following 14 Nov section', clearedSections[2].rows.some((r) => r.date === '2026-10-14'), false)
+
 console.log(failures === 0 ? '\nAll credit-card cycle-totals checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

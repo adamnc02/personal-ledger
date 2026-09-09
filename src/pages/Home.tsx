@@ -733,7 +733,7 @@ function DeckDetail(props: {
       return <HouseholdDetail {...props} />
     case 'credit_card': {
       const card = data.creditCards.find((c) => c.id === entry.cardId)
-      return card ? <CreditCardDetail card={card} data={data} horizon={props.horizon} cycleTotals={props.cycleTotals} /> : null
+      return card ? <CreditCardDetail card={card} data={data} horizon={props.horizon} cycleTotals={props.cycleTotals} showCleared={props.showCleared} /> : null
     }
     case 'credit_cards_combined':
       return <CreditCardsCombinedDetail data={data} horizon={props.horizon} />
@@ -823,10 +823,15 @@ function DeckControls({
   const showHorizon = true
   const showGroupOrder = entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot'
   // UAT 2026-09-08 (Summary page cycle-end totals, Adam-specified) — a
-  // credit card gets ONLY the Cycle-end totals toggle, not the rest of
-  // the Group-by/Order-by/Show-cleared toolkit (no meaningful category
-  // to group a single card's own activity by), so it renders in its own
-  // spot below rather than inside the showGroupOrder cluster.
+  // credit card gets ONLY the Cycle-end totals toggle, not Group-by/
+  // Order-by (no meaningful category to group a single card's own
+  // activity by), so it renders in its own spot below rather than
+  // inside the showGroupOrder cluster. UAT 2026-09-09 (retest) — Show
+  // cleared IS offered for a credit card now, alongside it — every
+  // other list on this page hides cleared rows by default, and the
+  // credit card's own lists (flat and cycle-grouped) had no way to
+  // toggle that at all.
+  const showCreditCardControls = entry.kind === 'credit_card'
   const showCreditCardCycleTotals = entry.kind === 'credit_card' && canShowCycleTotals(entry, horizon, grouping, order)
   // Household is the only card with a genuine "group by person" —
   // Personal is already one person, and Joint deliberately shows no
@@ -847,8 +852,11 @@ function DeckControls({
   return (
     <div className="flex items-start justify-between mb-5 px-1">
       <div>{showHorizon && <CycleToggle value={horizon} onChange={setHorizon} />}</div>
-      {showCreditCardCycleTotals && (
-        <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />
+      {showCreditCardControls && (
+        <div className="flex flex-col items-end gap-1.5">
+          <ToggleSwitch label="Show cleared" checked={showCleared} onChange={setShowCleared} />
+          {showCreditCardCycleTotals && <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />}
+        </div>
       )}
       {showGroupOrder && (
         <div className="flex flex-col items-end gap-1.5">
@@ -1896,7 +1904,7 @@ function CardActivityRow({ t }: { t: Transaction }) {
  * current cycle labelled specially" shape as CycleGroupedList, for
  * visual consistency between the two.
  */
-function CreditCardCycleGroupedList({ sections }: { sections: CreditCardCycleSection[] }) {
+function CreditCardCycleGroupedList({ sections, showCleared }: { sections: CreditCardCycleSection[]; showCleared: boolean }) {
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
   const toggle = (key: string) =>
     setToggled((prev) => {
@@ -1924,25 +1932,34 @@ function CreditCardCycleGroupedList({ sections }: { sections: CreditCardCycleSec
             </button>
             {expanded && (
               <div className="px-3 pb-2 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-                {section.rows.map((r, ri) => {
-                  const isSpend = r.type === 'credit_card_spend'
-                  const isMinimumCharge = r.type === 'credit_card_payment' && !r.sourceType
-                  return (
-                    <div key={ri} className="flex items-center justify-between py-2">
-                      <div>
-                        <p className="text-sm text-[var(--color-ink)]">{r.note || (isSpend ? 'Spend' : isMinimumCharge ? 'Minimum charge' : 'Payment')}</p>
-                        <p className="text-[11px] text-[var(--color-ink-muted)]">
-                          {r.date}
-                          {r.status === 'pending' ? ' · Pending' : ''}
+                {/* UAT 2026-09-09 (retest) — "Show cleared" hides already-
+                    cleared rows here too, same as every other list on this
+                    page; `section.closingBalance` is untouched by this —
+                    it stays the real balance due regardless of which rows
+                    are currently visible. */}
+                {section.rows
+                  .filter((r) => showCleared || r.status !== 'cleared')
+                  .map((r, ri) => {
+                    const isSpend = r.type === 'credit_card_spend'
+                    const isMinimumCharge = r.type === 'credit_card_payment' && !r.sourceType
+                    return (
+                      <div key={ri} className="flex items-center justify-between py-2">
+                        <div>
+                          <p className="text-sm text-[var(--color-ink)]">{r.note || (isSpend ? 'Spend' : isMinimumCharge ? 'Minimum charge' : 'Payment')}</p>
+                          <p className="text-[11px] text-[var(--color-ink-muted)]">
+                            {r.date}
+                            {r.status === 'pending' ? ' · Pending' : ''}
+                          </p>
+                        </div>
+                        <p className="text-sm font-mono font-semibold" style={{ color: isSpend ? 'var(--color-negative)' : 'var(--color-positive)' }}>
+                          {isSpend ? '+' : '-'}£{formatCurrency(r.amount)}
                         </p>
                       </div>
-                      <p className="text-sm font-mono font-semibold" style={{ color: isSpend ? 'var(--color-negative)' : 'var(--color-positive)' }}>
-                        {isSpend ? '+' : '-'}£{formatCurrency(r.amount)}
-                      </p>
-                    </div>
-                  )
-                })}
-                {section.rows.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] text-center py-3">Nothing this period.</p>}
+                    )
+                  })}
+                {section.rows.filter((r) => showCleared || r.status !== 'cleared').length === 0 && (
+                  <p className="text-xs text-[var(--color-ink-faint)] text-center py-3">Nothing this period.</p>
+                )}
                 <div className="flex items-center justify-between py-2">
                   <span className="text-xs font-semibold text-[var(--color-ink)]">Balance due {formatCycleDate(key)}</span>
                   <span className="text-sm font-mono font-semibold text-[var(--color-ink)]">£{formatCurrency(section.closingBalance)}</span>
@@ -1957,7 +1974,7 @@ function CreditCardCycleGroupedList({ sections }: { sections: CreditCardCycleSec
   )
 }
 
-function CreditCardDetail({ card: storedCard, data, horizon, cycleTotals }: { card: CreditCard; data: AppDataV2; horizon: ProjectionHorizon; cycleTotals: boolean }) {
+function CreditCardDetail({ card: storedCard, data, horizon, cycleTotals, showCleared }: { card: CreditCard; data: AppDataV2; horizon: ProjectionHorizon; cycleTotals: boolean; showCleared: boolean }) {
   // Both halves of this ring are now derived from the same transaction
   // list under the same on-or-before-<asOf> rule: `paid` from the payment
   // transactions, `currentBalance` by replaying them against the anchor.
@@ -1987,9 +2004,18 @@ function CreditCardDetail({ card: storedCard, data, horizon, cycleTotals }: { ca
         t.creditCardId === card.id &&
         (t.type === 'credit_card_spend' || t.type === 'credit_card_payment') &&
         t.date >= cycleStart &&
-        t.date <= horizonEndIso,
+        t.date <= horizonEndIso &&
+        // UAT 2026-09-09 (retest) — the "Show cleared" toggle now applies
+        // here too (previously not offered for a credit card at all),
+        // same off-by-default "hide cleared rows" rule as every other
+        // list on this page.
+        (showCleared || t.status !== 'cleared'),
     )
-    .sort((a, b) => b.date.localeCompare(a.date))
+    // UAT 2026-09-09 (retest) — this used to sort descending; the
+    // cycle-grouped view's own rows (buildCreditCardCycleSections) are
+    // ascending, so the flat (cycle-totals off) list should read the
+    // same way rather than switching direction depending on the toggle.
+    .sort((a, b) => a.date.localeCompare(b.date))
   // The card's own colour overrides the category's colour for display
   // (types/ledger.ts: "categoryId: for icon; colour below overrides the
   // category's colour") — so the icon SHAPE comes from the category, but
@@ -2012,7 +2038,7 @@ function CreditCardDetail({ card: storedCard, data, horizon, cycleTotals }: { ca
       </h2>
 
       {cycleTotals ? (
-        <CreditCardCycleGroupedList sections={cardCycleSections} />
+        <CreditCardCycleGroupedList sections={cardCycleSections} showCleared={showCleared} />
       ) : (
         <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
           {activity.map((t) => (

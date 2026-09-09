@@ -1224,10 +1224,23 @@ export function buildCreditCardCycleSections(card: CreditCard, transactions: Tra
     ...generatedMinimums.map((t, i) => ({ ...t, id: `projected-${i}` })),
   ]
 
-  return cycles.map((cycle) => {
+  return cycles.map((cycle, cycleIndex) => {
     const windowStartIso = toIso(cycle.windowStart)
     const windowEndIso = toIso(cycle.windowEnd)
     const dueDateIso = toIso(cycle.dueDate)
+    // BUGFIX (2026-09-09, UAT-reported) — a lump payment dated between a
+    // window's close and its own due date (routine on a statement-window
+    // card — see windowEnd vs dueDate's own comment) was falling into
+    // the FOLLOWING cycle's section instead of the one it actually
+    // clears, since the general filter below bounds by windowStart/
+    // windowEnd (a spend-attribution concept a payment has no part of —
+    // payments are never window-gated, they apply immediately). A
+    // payment is grouped by which due-date cycle it's paying toward
+    // instead: everything after the PREVIOUS cycle's own due date, up to
+    // and including THIS cycle's — so a payment dated exactly on a due
+    // date lands in that same cycle's section, next to the balance it
+    // just cleared, not the next one.
+    const prevDueDateIso = cycleIndex > 0 ? toIso(cycles[cycleIndex - 1].dueDate) : null
     const rows = allRows
       .filter((r) => {
         // A minimum-charge row is EXPLICITLY dated on a due date by
@@ -1239,6 +1252,7 @@ export function buildCreditCardCycleSections(card: CreditCard, transactions: Tra
         // later section too, double-counting the same charge.
         const isMinimumChargeRow = r.type === 'credit_card_payment' && !r.sourceType
         if (isMinimumChargeRow) return r.date === dueDateIso
+        if (r.type === 'credit_card_payment') return (prevDueDateIso == null || r.date > prevDueDateIso) && r.date <= dueDateIso
         return r.date >= windowStartIso && r.date <= windowEndIso
       })
       .sort((a, b) => a.date.localeCompare(b.date))
