@@ -19,11 +19,10 @@ import { LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, re
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
-import { addYears, addDays } from 'date-fns'
-import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard } from '../types/ledger'
+import { addYears, addDays, addMonths } from 'date-fns'
+import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard, LoanRecurringOverpayment } from '../types/ledger'
 import type { LoggedPayment } from './Loans'
-import { RecurringOverpaymentEditor } from './Loans'
-import { previewOverpaymentRecast } from '../lib/ledgerLoans'
+import { previewOverpaymentRecast, previewRecurringOverpaymentRecast, scheduledLoanRecurringOverpaymentDates, setPausedLoanRecurringOverpaymentDates } from '../lib/ledgerLoans'
 
 const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   cash: 'Cash',
@@ -570,11 +569,16 @@ export function Expenses() {
               followup same day: its own dedicated pill rather than sharing
               Transfers, since a loan/credit-card overpayment isn't a
               transfer between two account balances (see OverpaymentCreateForm's
-              own comment on why there's no "From" step for a one-off). */}
+              own comment on why there's no "From" step for a one-off).
+              2026-09-09 second followup (Adam-reported) — creation
+              (one-off AND recurring) only ever happens via "+", same as
+              every other pill; there is deliberately no always-expanded
+              per-loan editor sitting at the top of the page any more. */}
           {adding && (
             <OverpaymentCreateForm
               loans={activeLoans}
               cards={activeCards}
+              pots={data.pots}
               onCancel={() => setAdding(false)}
               onSaveLoan={(loanId, amount, date, note, recastMode) => {
                 logLoanOverpayment(loanId, amount, date, note, recastMode)
@@ -584,22 +588,27 @@ export function Expenses() {
                 logCreditCardLumpPayment(cardId, amount, date, note)
                 setAdding(false)
               }}
+              onSaveRecurring={(loanId, recurringOverpayment) => {
+                updateLoan(loanId, { recurringOverpayment })
+                setAdding(false)
+              }}
             />
           )}
 
-          {activeLoans.length > 0 && (
-            <div className="flex flex-col gap-3 mb-3">
-              {activeLoans.map((loan) => (
-                <div key={loan.id} className="rounded-2xl p-3" style={{ background: 'var(--color-surface)' }}>
-                  <p className="text-sm font-medium text-[var(--color-ink)] mb-2">{loan.name} — recurring overpayment</p>
-                  <RecurringOverpaymentEditor
+          {activeLoans.some((l) => l.recurringOverpayment) && (
+            <div className="flex flex-col gap-2 mb-3">
+              {activeLoans
+                .filter((l) => l.recurringOverpayment)
+                .map((loan) => (
+                  <LoanRecurringOverpaymentRow
+                    key={loan.id}
                     loan={loan}
                     pots={data.pots}
-                    value={loan.recurringOverpayment}
-                    onChange={(recurringOverpayment) => updateLoan(loan.id, { recurringOverpayment })}
+                    value={loan.recurringOverpayment!}
+                    onUpdate={(v) => updateLoan(loan.id, { recurringOverpayment: v })}
+                    onRemove={() => updateLoan(loan.id, { recurringOverpayment: undefined })}
                   />
-                </div>
-              ))}
+                ))}
             </div>
           )}
 
@@ -1260,62 +1269,122 @@ function TransferForm({
 }
 
 type OverpaymentTarget = { kind: 'loan'; id: string; label: string } | { kind: 'card'; id: string; label: string }
-type OverpaymentFormStep = 'amount' | 'to' | 'recast' | 'date' | 'final'
+type OverpaymentFormStep = 'amount' | 'to' | 'from' | 'recast' | 'date' | 'final'
+type OverpaymentMode = 'one_off' | 'recurring'
+const OVERPAYMENT_MODES: { value: OverpaymentMode; label: string }[] = [
+  { value: 'one_off', label: 'One-off' },
+  { value: 'recurring', label: 'Recurring' },
+]
 
 /**
  * 2026-09-09 followup (Adam-specified) — the Overpayments pill's own
- * picker-first creation wizard, mirroring TransferForm's shape (amount →
- * location(s) → date → final) as closely as the data actually supports.
- * Deliberately has NO "From" step, unlike a transfer: a one-off loan
- * overpayment has never had a funding-location field at all — it's
- * hardcoded to personal (or joint, for a joint loan) cash out, per
- * Adam's own 2026-09-03 call captured in applyLoanOverpayment's comment
- * ("a lump payment structurally can't come from a pot"), and a credit-
- * card lump payment has never had a location field either. Only a
- * loan's RECURRING overpayment has a real From (Personal/Pot) field —
- * that's handled by the existing RecurringOverpaymentEditor mounted
- * alongside this form, not rebuilt here.
+ * picker-first creation wizard, mirroring TransferForm's shape (mode
+ * toggle → amount → location(s) → date → final) as closely as the data
+ * actually supports.
+ *
+ * One-off overpayments deliberately have NO "From" step, unlike a
+ * transfer: a one-off loan overpayment has never had a funding-location
+ * field at all — it's hardcoded to personal (or joint, for a joint loan)
+ * cash out, per Adam's own 2026-09-03 call captured in
+ * applyLoanOverpayment's comment ("a lump payment structurally can't
+ * come from a pot"), and a credit-card lump payment has never had a
+ * location field either.
+ *
+ * Recurring mode is loan-only (credit cards have no recurring-lump-
+ * payment concept in the data model) and DOES have a real From
+ * (Personal/Pot) step, since LoanRecurringOverpayment.location is a real
+ * field — see that type's own comment in types/ledger.ts for why it's
+ * deliberately Personal/Pot only, never Joint (same reasoning as the
+ * one-off case: "never joint... risking the per-person joint split math
+ * being applied to a pot-sourced, unsplit amount").
  */
 function OverpaymentCreateForm({
   loans,
   cards,
+  pots,
   onCancel,
   onSaveLoan,
   onSaveCard,
+  onSaveRecurring,
 }: {
   loans: Loan[]
   cards: CreditCard[]
+  pots: Pot[]
   onCancel: () => void
   onSaveLoan: (loanId: string, amount: number, date: string, note: string | undefined, recastMode: 'reduce_term' | 'reduce_payment') => void
   onSaveCard: (cardId: string, amount: number, date: string, note?: string) => void
+  onSaveRecurring: (loanId: string, recurringOverpayment: LoanRecurringOverpayment) => void
 }) {
-  const targets: OverpaymentTarget[] = [
-    ...loans.map((l) => ({ kind: 'loan' as const, id: l.id, label: `Loan: ${l.name}` })),
-    ...cards.map((c) => ({ kind: 'card' as const, id: c.id, label: `Credit Card: ${c.name}` })),
-  ]
+  const [mode, setMode] = useState<OverpaymentMode>('one_off')
+  // Recurring is loan-only — a credit card target is never offered once
+  // Recurring is picked.
+  const targets: OverpaymentTarget[] =
+    mode === 'recurring'
+      ? loans.map((l) => ({ kind: 'loan' as const, id: l.id, label: `Loan: ${l.name}` }))
+      : [...loans.map((l) => ({ kind: 'loan' as const, id: l.id, label: `Loan: ${l.name}` })), ...cards.map((c) => ({ kind: 'card' as const, id: c.id, label: `Credit Card: ${c.name}` }))]
 
   const [step, setStep] = useState<OverpaymentFormStep>('amount')
   const [amount, setAmount] = useState('')
+  const [recurringAmountType, setRecurringAmountType] = useState<'fixed' | 'percent_of_balance'>('fixed')
+  const [recurringPercent, setRecurringPercent] = useState('5')
   const [target, setTarget] = useState<OverpaymentTarget | null>(null)
+  const [fromLocation, setFromLocation] = useState<'personal' | 'pot' | undefined>(undefined)
+  const [fromPotId, setFromPotId] = useState<string | undefined>(undefined)
   const [recastMode, setRecastMode] = useState<'reduce_term' | 'reduce_payment'>('reduce_term')
   const [date, setDate] = useState(todayIso())
   const [note, setNote] = useState('')
 
-  const amountNumber = Number(amount)
+  const amountNumber = mode === 'recurring' && recurringAmountType === 'percent_of_balance' ? Number(recurringPercent) : Number(amount)
+  const targetLoan = target?.kind === 'loan' ? loans.find((l) => l.id === target.id) : undefined
+  const ownerPots = targetLoan ? pots.filter((p) => p.personId === targetLoan.ownerId) : []
 
   function reset() {
+    setMode('one_off')
     setStep('amount')
     setAmount('')
+    setRecurringAmountType('fixed')
+    setRecurringPercent('5')
     setTarget(null)
+    setFromLocation(undefined)
+    setFromPotId(undefined)
     setRecastMode('reduce_term')
     setDate(todayIso())
     setNote('')
     onCancel()
   }
 
+  // Advancing past "amount" auto-skips "to" entirely when there's only
+  // one eligible target (Adam-requested) — no point making a single-
+  // option list something you have to tap through.
+  function afterAmount() {
+    if (targets.length === 1) {
+      pickTarget(targets[0])
+      return
+    }
+    setStep('to')
+  }
+
+  function pickTarget(t: OverpaymentTarget) {
+    setTarget(t)
+    if (mode === 'recurring') setStep('from')
+    else setStep(t.kind === 'loan' ? 'recast' : 'date')
+  }
+
+  function recurringOverpaymentAmount(): LoanRecurringOverpayment['amount'] {
+    return recurringAmountType === 'fixed' ? { type: 'fixed', amount: Number(amount) } : { type: 'percent_of_balance', percent: Number(recurringPercent) }
+  }
+
   function commit() {
     if (!target) return
-    if (target.kind === 'loan') {
+    if (mode === 'recurring' && target.kind === 'loan') {
+      onSaveRecurring(target.id, {
+        startDate: date,
+        amount: recurringOverpaymentAmount(),
+        location: fromLocation,
+        potId: fromLocation === 'pot' ? fromPotId : undefined,
+        recastMode,
+      })
+    } else if (target.kind === 'loan') {
       onSaveLoan(target.id, amountNumber, date, note.trim() || undefined, recastMode)
     } else {
       onSaveCard(target.id, amountNumber, date, note.trim() || undefined)
@@ -1332,12 +1401,15 @@ function OverpaymentCreateForm({
             <X size={18} />
           </button>
         </div>
-        <p className="text-xs text-[var(--color-ink-faint)]">Add a loan or credit card first — there's nothing to log an overpayment against yet.</p>
+        <p className="text-xs text-[var(--color-ink-faint)]">
+          {mode === 'recurring' ? 'Add a loan first — there\'s nothing to set a recurring overpayment against yet.' : "Add a loan or credit card first — there's nothing to log an overpayment against yet."}
+        </p>
       </div>
     )
   }
 
   if (step === 'amount') {
+    const amountValid = mode === 'recurring' ? (recurringAmountType === 'fixed' ? Number(amount) > 0 : Number(recurringPercent) > 0) : amountNumber > 0
     return (
       <div className="mb-6 p-4 rounded-2xl flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
         <div className="flex items-center justify-between">
@@ -1346,8 +1418,45 @@ function OverpaymentCreateForm({
             <X size={18} />
           </button>
         </div>
-        <EditField key="overpayment-amount" label="Amount (£)" type="number" value={amount} onChange={setAmount} />
-        <FormButtonRow onCancel={reset} onSave={() => setStep('to')} saveLabel="Continue" saveDisabled={!(amountNumber > 0)} />
+        <div className="flex gap-2">
+          {OVERPAYMENT_MODES.map((m) => (
+            <button
+              key={m.value}
+              onClick={() => setMode(m.value)}
+              className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+              style={{ background: mode === m.value ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: mode === m.value ? '#fff' : 'var(--color-ink-muted)' }}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+        {mode === 'recurring' && (
+          <div className="flex gap-2">
+            <button
+              onClick={() => setRecurringAmountType('fixed')}
+              className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+              style={{ background: recurringAmountType === 'fixed' ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: recurringAmountType === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
+            >
+              Fixed amount
+            </button>
+            <button
+              onClick={() => setRecurringAmountType('percent_of_balance')}
+              className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+              style={{
+                background: recurringAmountType === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-bg-elevated)',
+                color: recurringAmountType === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
+              }}
+            >
+              % of balance
+            </button>
+          </div>
+        )}
+        {mode === 'recurring' && recurringAmountType === 'percent_of_balance' ? (
+          <EditField key="overpayment-percent" label="Percent (%)" type="number" value={recurringPercent} onChange={setRecurringPercent} />
+        ) : (
+          <EditField key="overpayment-amount" label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+        )}
+        <FormButtonRow onCancel={reset} onSave={afterAmount} saveLabel="Continue" saveDisabled={!amountValid} />
       </div>
     )
   }
@@ -1365,10 +1474,7 @@ function OverpaymentCreateForm({
           {targets.map((t) => (
             <button
               key={`${t.kind}:${t.id}`}
-              onClick={() => {
-                setTarget(t)
-                setStep(t.kind === 'loan' ? 'recast' : 'date')
-              }}
+              onClick={() => pickTarget(t)}
               className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
               style={{ background: 'var(--color-surface)' }}
             >
@@ -1380,9 +1486,62 @@ function OverpaymentCreateForm({
     )
   }
 
-  if (step === 'recast' && target?.kind === 'loan') {
-    const loan = loans.find((l) => l.id === target.id)!
-    const preview = previewOverpaymentRecast(loan, amountNumber, date)
+  if (step === 'from' && targetLoan) {
+    return (
+      <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">From</span>
+          <button onClick={reset} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <button
+            onClick={() => {
+              setFromLocation(undefined)
+              setFromPotId(undefined)
+              setStep('recast')
+            }}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            Follows the loan's own location
+          </button>
+          <button
+            onClick={() => {
+              setFromLocation('personal')
+              setFromPotId(undefined)
+              setStep('recast')
+            }}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            Personal
+          </button>
+          {ownerPots.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => {
+                setFromLocation('pot')
+                setFromPotId(p.id)
+                setStep('recast')
+              }}
+              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+              style={{ background: 'var(--color-surface)' }}
+            >
+              {p.name}
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (step === 'recast' && target?.kind === 'loan' && targetLoan) {
+    const preview =
+      mode === 'recurring'
+        ? previewRecurringOverpaymentRecast(targetLoan, { startDate: date, amount: recurringOverpaymentAmount(), location: fromLocation, potId: fromPotId })
+        : previewOverpaymentRecast(targetLoan, amountNumber, date)
     return (
       <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
         <div className="flex items-center justify-between">
@@ -1418,7 +1577,7 @@ function OverpaymentCreateForm({
             {preview.reduceTerm.finalPayment != null ? formatCurrency(preview.reduceTerm.finalPayment) : '—'}
           </p>
         </button>
-        <button onClick={() => setStep('to')} className="text-xs self-start text-[var(--color-ink-muted)]">
+        <button onClick={() => setStep(mode === 'recurring' ? 'from' : 'to')} className="text-xs self-start text-[var(--color-ink-muted)]">
           Back
         </button>
       </div>
@@ -1426,10 +1585,11 @@ function OverpaymentCreateForm({
   }
 
   if (step === 'date') {
-    return <DateStep value={date} onChange={setDate} onCancel={reset} onContinue={() => setStep('final')} />
+    return <DateStep value={date} onChange={setDate} onCancel={reset} onContinue={() => setStep('final')} continueLabel={mode === 'recurring' ? 'Continue' : 'Continue'} />
   }
 
-  // final — Note + Save
+  // final — recurring has no note field (LoanRecurringOverpayment has
+  // none); a one-off does.
   return (
     <div className="mb-6 p-4 rounded-2xl flex flex-col gap-4" style={{ background: 'var(--color-surface)' }}>
       <div className="flex items-center justify-between">
@@ -1438,8 +1598,13 @@ function OverpaymentCreateForm({
           <X size={18} />
         </button>
       </div>
-      <EditField key="overpayment-note" label="Note (optional)" type="text" value={note} onChange={setNote} />
-      <p className="text-xs text-[var(--color-ink-faint)]">{target?.label} — £{formatCurrency(amountNumber)} on {date}.</p>
+      {mode === 'one_off' && <EditField key="overpayment-note" label="Note (optional)" type="text" value={note} onChange={setNote} />}
+      <p className="text-xs text-[var(--color-ink-faint)]">
+        {target?.label}
+        {mode === 'recurring'
+          ? ` — ${recurringAmountType === 'fixed' ? `£${formatCurrency(amountNumber)}` : `${amountNumber}% of balance`} every month from ${date}.`
+          : ` — £${formatCurrency(amountNumber)} on ${date}.`}
+      </p>
       <FormButtonRow onCancel={reset} onSave={commit} />
     </div>
   )
@@ -1618,6 +1783,250 @@ function OverpaymentEditForm({
       </div>
       <EditField label="Note (optional)" value={note} onChange={setNote} />
       <FormButtonRow onCancel={onCancel} onSave={() => onSave(amountNumber, date, note || undefined)} saveDisabled={!(amountNumber > 0 && date) || !dirty} />
+    </div>
+  )
+}
+
+function overpaymentFromLabel(pots: Pot[], location: 'personal' | 'pot' | undefined, potId: string | undefined): string {
+  if (location === 'pot') return pots.find((p) => p.id === potId)?.name ?? 'a pot'
+  if (location === 'personal') return 'Personal'
+  return "loan's own location"
+}
+
+/**
+ * 2026-09-09 second followup (Adam-reported) — a loan's recurring
+ * overpayment, once created, shown as one row here: tap to expand,
+ * swipe to delete (SwipeToDelete's own built-in confirm), matching
+ * TransferRecurringRow exactly rather than Loans.tsx's own
+ * RecurringOverpaymentEditor (which stays as-is, unchanged, inline on
+ * the Borrowing page — that's a deliberately different surface with its
+ * own established UI, not rebuilt here). No separate Remove/Change
+ * buttons: deleting is the swipe gesture, and recast is just one more
+ * field in the same expanded editable form. The only button above the
+ * editable fields is "Manage paused overpayments" (Adam's own spec).
+ */
+function LoanRecurringOverpaymentRow({
+  loan,
+  pots,
+  value,
+  onUpdate,
+  onRemove,
+}: {
+  loan: Loan
+  pots: Pot[]
+  value: LoanRecurringOverpayment
+  onUpdate: (v: LoanRecurringOverpayment) => void
+  onRemove: () => void
+}) {
+  const [isEditing, setIsEditing] = useState(false)
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash('Recurring overpayment updated.')
+  const ownerPots = pots.filter((p) => p.personId === loan.ownerId)
+
+  const summary =
+    value.amount.type === 'fixed' ? `£${formatCurrency(value.amount.amount)}` : `${value.amount.percent}% of balance`
+
+  return (
+    <SwipeToDelete onDelete={onRemove} confirmLabel={`${loan.name} recurring overpayment`}>
+      <div className="relative rounded-2xl overflow-hidden" style={{ background: 'var(--color-surface)' }}>
+        <button onClick={() => setIsEditing((e) => !e)} className="w-full flex items-center justify-between p-3 text-left">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-[var(--color-ink)] truncate">{loan.name} — recurring overpayment</p>
+            <p className="text-xs text-[var(--color-ink-muted)]">
+              {overpaymentFromLabel(ownerPots, value.location, value.potId)} · from {value.startDate}
+              {value.endDate ? ` to ${value.endDate}` : ''}
+            </p>
+          </div>
+          <p className="text-sm font-mono font-semibold shrink-0 text-[var(--color-ink)]">{summary}</p>
+        </button>
+        {isEditing && (
+          <LoanRecurringOverpaymentEditForm
+            loan={loan}
+            pots={ownerPots}
+            value={value}
+            onCancel={() => setIsEditing(false)}
+            onSave={(v) => {
+              onUpdate(v)
+              setIsEditing(false)
+              triggerFlash()
+            }}
+          />
+        )}
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
+      </div>
+    </SwipeToDelete>
+  )
+}
+
+function LoanRecurringOverpaymentEditForm({
+  loan,
+  pots,
+  value,
+  onSave,
+  onCancel,
+}: {
+  loan: Loan
+  pots: Pot[]
+  value: LoanRecurringOverpayment
+  onSave: (v: LoanRecurringOverpayment) => void
+  onCancel: () => void
+}) {
+  const [amountType, setAmountType] = useState<'fixed' | 'percent_of_balance'>(value.amount.type)
+  const [fixedAmount, setFixedAmount] = useState(value.amount.type === 'fixed' ? String(value.amount.amount) : '')
+  const [percent, setPercent] = useState(value.amount.type === 'percent_of_balance' ? String(value.amount.percent) : '')
+  const [location, setLocation] = useState(value.location)
+  const [potId, setPotId] = useState(value.potId)
+  const [recastMode, setRecastMode] = useState<'reduce_term' | 'reduce_payment'>(value.recastMode ?? 'reduce_term')
+  const [startDate, setStartDate] = useState(value.startDate)
+  const [showEndDate, setShowEndDate] = useState(!!value.endDate)
+  const [endDate, setEndDate] = useState(value.endDate ?? '')
+  const [pendingConfirm, setPendingConfirm] = useState<{ changes: RecurringChangeField[]; commit: () => void } | null>(null)
+
+  const amount: LoanRecurringOverpayment['amount'] = amountType === 'fixed' ? { type: 'fixed', amount: Number(fixedAmount) || 0 } : { type: 'percent_of_balance', percent: Number(percent) || 0 }
+  const draft: LoanRecurringOverpayment = { startDate, endDate: endDate || undefined, amount, location, potId: location === 'pot' ? potId : undefined, recastMode, pausedDates: value.pausedDates }
+  const dirty =
+    JSON.stringify(draft.amount) !== JSON.stringify(value.amount) ||
+    draft.startDate !== value.startDate ||
+    draft.endDate !== value.endDate ||
+    draft.location !== value.location ||
+    draft.potId !== value.potId ||
+    draft.recastMode !== (value.recastMode ?? 'reduce_term')
+  const amountValid = amountType === 'fixed' ? Number(fixedAmount) > 0 : Number(percent) > 0
+
+  function handleSave() {
+    const locationChanged = draft.location !== value.location || (draft.location === 'pot' && draft.potId !== value.potId)
+    const commit = () => onSave(draft)
+    if (locationChanged) {
+      setPendingConfirm({ changes: [{ label: 'Paid from', from: overpaymentFromLabel(pots, value.location, value.potId), to: overpaymentFromLabel(pots, draft.location, draft.potId) }], commit })
+    } else {
+      commit()
+    }
+  }
+
+  const windowDates = scheduledLoanRecurringOverpaymentDates(loan, addMonths(new Date(), -2), addMonths(new Date(), 12))
+
+  return (
+    <div className="px-3 pb-3 flex flex-col gap-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
+      {pendingConfirm && (
+        <RecurringChangeConfirmModal
+          effectiveFrom={todayIso()}
+          changes={pendingConfirm.changes}
+          affectsClearedBalance={false}
+          onCancel={() => setPendingConfirm(null)}
+          onConfirm={() => {
+            pendingConfirm.commit()
+            setPendingConfirm(null)
+          }}
+        />
+      )}
+
+      {/* Adam's own spec — the only button above the editable fields. */}
+      <div className="pt-2">
+        <PausedOccurrencesControl
+          windowDates={windowDates}
+          currentlyPaused={new Set(value.pausedDates ?? [])}
+          amountForDate={() => (value.amount.type === 'fixed' ? value.amount.amount : Math.round(((loan.principal * value.amount.percent) / 100) * 100) / 100)}
+          itemLabel="overpayments"
+          nextPaymentPreview={(tentative) => {
+            const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, tentative)
+            return windowDates.find((d) => !merged?.pausedDates?.includes(d)) ?? null
+          }}
+          onSave={(pausedDates) => {
+            const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, windowDates, pausedDates)
+            if (merged) onSave(merged)
+          }}
+        />
+      </div>
+
+      <div className="flex gap-2">
+        <button
+          onClick={() => setAmountType('fixed')}
+          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+          style={{ background: amountType === 'fixed' ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: amountType === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
+        >
+          Fixed amount
+        </button>
+        <button
+          onClick={() => setAmountType('percent_of_balance')}
+          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+          style={{
+            background: amountType === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-bg-elevated)',
+            color: amountType === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
+          }}
+        >
+          % of balance
+        </button>
+      </div>
+      {amountType === 'fixed' ? (
+        <EditField label="Amount (£)" type="number" value={fixedAmount} onChange={setFixedAmount} />
+      ) : (
+        <EditField label="Percent (%)" type="number" value={percent} onChange={setPercent} />
+      )}
+
+      <label className="flex flex-col gap-1">
+        <span className="text-xs text-[var(--color-ink-muted)]">Paid from</span>
+        <select
+          value={location === 'pot' ? `pot:${potId ?? ''}` : (location ?? '')}
+          onChange={(e) => {
+            const raw = e.target.value
+            if (raw === '') {
+              setLocation(undefined)
+              setPotId(undefined)
+            } else if (raw === 'personal') {
+              setLocation('personal')
+              setPotId(undefined)
+            } else {
+              setLocation('pot')
+              setPotId(raw.slice(4))
+            }
+          }}
+          className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+        >
+          <option value="" style={{ color: '#000' }}>
+            Follows the loan's own location
+          </option>
+          <option value="personal" style={{ color: '#000' }}>
+            Personal
+          </option>
+          {pots.map((p) => (
+            <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <div>
+        <span className="text-xs text-[var(--color-ink-muted)]">How it's applied</span>
+        <div className="flex gap-2 mt-1">
+          <button
+            onClick={() => setRecastMode('reduce_payment')}
+            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+            style={{ background: recastMode === 'reduce_payment' ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: recastMode === 'reduce_payment' ? '#fff' : 'var(--color-ink-muted)' }}
+          >
+            Keep the same length
+          </button>
+          <button
+            onClick={() => setRecastMode('reduce_term')}
+            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+            style={{ background: recastMode === 'reduce_term' ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: recastMode === 'reduce_term' ? '#fff' : 'var(--color-ink-muted)' }}
+          >
+            Keep payment the same
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <EditField label="Start date" type="date" value={startDate} onChange={setStartDate} />
+        {showEndDate ? (
+          <EditField label="End date" type="date" value={endDate} onChange={setEndDate} />
+        ) : (
+          <button onClick={() => setShowEndDate(true)} className="self-end text-xs font-medium pb-1" style={{ color: 'var(--color-coral)' }}>
+            + Set an end date
+          </button>
+        )}
+      </div>
+
+      <FormButtonRow onCancel={onCancel} onSave={handleSave} saveDisabled={!dirty || !amountValid} />
     </div>
   )
 }
