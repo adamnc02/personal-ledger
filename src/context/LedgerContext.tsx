@@ -28,7 +28,7 @@ import type { Scenario } from '../types/models'
 import { defaultLedgerData, defaultPayCycleConfig, loadLedgerData, saveLedgerData } from '../lib/ledgerStorage'
 import { createCategory, removeCategorySafely } from '../lib/categories'
 import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/creditCards'
-import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, type CalibrationResult } from '../lib/ledgerLoans'
+import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, reassignLoanRecurringOverpaymentTransactions, type CalibrationResult } from '../lib/ledgerLoans'
 import { autoClearDuePayments } from '../lib/autoClear'
 import { reconcilePersonReferences } from '../lib/household'
 import { convertClearedSalaryToStandaloneIncome } from '../lib/salaryLedger'
@@ -349,6 +349,14 @@ interface LedgerContextValue {
     effectiveFrom: string,
     options?: { potId?: string; ownerId?: string; payee?: string; payeeSharePercent?: number },
   ) => void
+  // UAT 2026-09-09 (ed-overpay-scope-step) — a recurring overpayment's
+  // OWN `location` now goes through the same picker-first, retroactive-
+  // rewrite treatment as a Bill's/Loan's own location (Adam's own call:
+  // "Location should be treated the same as amount for recurring
+  // overpayments"). Only ever 'personal' or 'pot' — never 'joint', same
+  // restriction LoanRecurringOverpayment.location's own comment already
+  // documents.
+  assignLoanRecurringOverpaymentLocation: (loanId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
 }
 
 const LedgerContext = createContext<LedgerContextValue | null>(null)
@@ -1159,6 +1167,19 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     })
   }
 
+  const assignLoanRecurringOverpaymentLocation: LedgerContextValue['assignLoanRecurringOverpaymentLocation'] = (loanId, location, effectiveFrom, potId) => {
+    setDataState((prev) => {
+      const loan = prev.loans.find((l) => l.id === loanId)
+      if (!loan?.recurringOverpayment) return prev
+      const updatedLoan: Loan = { ...loan, recurringOverpayment: { ...loan.recurringOverpayment, location, potId: location === 'pot' ? potId : undefined } }
+      return {
+        ...prev,
+        loans: prev.loans.map((l) => (l.id === loanId ? updatedLoan : l)),
+        transactions: reassignLoanRecurringOverpaymentTransactions(prev.transactions, loanId, effectiveFrom, location, potId),
+      }
+    })
+  }
+
   const addScenario: LedgerContextValue['addScenario'] = (scenario) => {
     const id = nanoid(8)
     setDataState((prev) => ({ ...prev, scenarios: [...prev.scenarios, { ...scenario, id }] }))
@@ -1239,6 +1260,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     logPotWithdrawal,
     assignRecurringTemplateLocation,
     assignLoanLocation,
+    assignLoanRecurringOverpaymentLocation,
   }
 
   return <LedgerContext.Provider value={value}>{children}</LedgerContext.Provider>

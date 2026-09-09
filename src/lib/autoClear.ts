@@ -25,8 +25,8 @@
 // settled, a second pass finds nothing left to do and is a no-op.
 
 import { nanoid } from 'nanoid'
-import { generateTransactionsForTemplate } from './schedule'
-import { generateLoanPaymentTransactions } from './ledgerLoans'
+import { generateTransactionsForTemplate, resolveOccurrenceAmount } from './schedule'
+import { generateLoanPaymentTransactions, resolveRecurringOverpaymentSource } from './ledgerLoans'
 import { generateMinimumPaymentTransactions } from './creditCards'
 import { computeNetPayForPeriod, generateSalaryTransactions } from './salaryLedger'
 import { resolvePensionAmount, generatePensionTransactions } from './pensionLedger'
@@ -96,6 +96,80 @@ function reconcilePensionTransactions(data: AppDataV2): AppDataV2 {
   return changed ? { ...data, transactions } : data
 }
 
+/**
+ * Same reconciliation as reconcileSalaryTransactions/reconcilePensionTransactions
+ * above, for anything sourced from a RecurringTemplate (bills, recurring
+ * transactions, recurring transfers) — confirmed as the SAME gap, newly
+ * exposed rather than introduced by the 2026-09-09 unified effective-
+ * dating work (UAT ed-bills-all-future/ed-recurring-tx-unchanged): once an
+ * occurrence's date arrives, Step 2 below materializes it into a stored,
+ * cleared Transaction, and its dedupeKey then suppresses ever regenerating
+ * it — so a SECOND same-day edit (e.g. bumping an amount up then back
+ * down again before the day is over) left the already-materialized row
+ * showing the stale intermediate value forever, with nothing to indicate
+ * it had drifted from what the template now resolves to. Safe
+ * unconditionally, same reasoning as the salary/pension cases: confirmed
+ * there is no UI path anywhere in the app to hand-edit a materialized
+ * Transaction's amount when its sourceType is 'recurring_template' — only
+ * the owning template itself is ever editable, so there's no hand-entered
+ * figure here to trample. Matches by the occurrence's DISPLAY date (an
+ * override's own `date` if moved, else `originalDate`), same as
+ * walkOccurrences itself.
+ */
+function reconcileRecurringTemplateTransactions(data: AppDataV2): AppDataV2 {
+  let changed = false
+  const transactions = data.transactions.map((t) => {
+    if (t.sourceType !== 'recurring_template' || !t.sourceId) return t
+    const template = data.recurringTemplates.find((tpl) => tpl.id === t.sourceId)
+    if (!template) return t
+    const override = template.occurrenceOverrides?.find((o) => (o.date ?? o.originalDate) === t.date)
+    // A deleted occurrence has no live amount to reconcile against — that
+    // already-materialized row is a separate, pre-existing gap (deleting
+    // a future occurrence doesn't retroactively un-clear a past one),
+    // not this fix's concern.
+    if (override?.deleted) return t
+    const amount = override?.amount !== undefined ? override.amount : resolveOccurrenceAmount(template, override?.originalDate ?? t.date)
+    if (amount <= 0 || amount === t.amount) return t
+    changed = true
+    return { ...t, amount }
+  })
+  return changed ? { ...data, transactions } : data
+}
+
+/**
+ * Same reconciliation, for Loan-sourced transactions ('loan' — the
+ * regular scheduled payment — and 'loan_recurring_overpayment'). Reuses
+ * generateLoanPaymentTransactions directly (rather than re-deriving the
+ * schedule-walk/real-date logic here) so this can never drift from
+ * whatever that function actually generates — cached per loan since a
+ * loan with many materialized rows would otherwise rebuild the same full
+ * schedule once per row. Confirmed no hand-edit path exists for either
+ * sourceType (only 'loan_overpayment'/'loan_settlement' — genuinely
+ * hand-logged one-off events — are ever independently editable), so this
+ * is safe unconditionally, same as the template/salary/pension cases.
+ */
+function reconcileLoanTransactions(data: AppDataV2): AppDataV2 {
+  let changed = false
+  const candidatesByLoan = new Map<string, Omit<Transaction, 'id'>[]>()
+  const farFuture = new Date()
+  farFuture.setFullYear(farFuture.getFullYear() + 60)
+  const transactions = data.transactions.map((t) => {
+    if ((t.sourceType !== 'loan' && t.sourceType !== 'loan_recurring_overpayment') || !t.sourceId) return t
+    const loan = data.loans.find((l) => l.id === t.sourceId)
+    if (!loan) return t
+    let candidates = candidatesByLoan.get(loan.id)
+    if (!candidates) {
+      candidates = generateLoanPaymentTransactions(loan, new Date(0), farFuture)
+      candidatesByLoan.set(loan.id, candidates)
+    }
+    const match = candidates.find((c) => c.sourceType === t.sourceType && c.date === t.date)
+    if (!match || match.amount <= 0 || match.amount === t.amount) return t
+    changed = true
+    return { ...t, amount: match.amount }
+  })
+  return changed ? { ...data, transactions } : data
+}
+
 export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): AppDataV2 {
   const asOfIso = toLocalIsoDate(asOf)
   let result = data
@@ -104,7 +178,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
   // Runs FIRST, before anything is settled: a stored salary/pension row
   // that's drifted from its computed value should be corrected whether
   // or not there's also something new coming due this pass.
-  const reconciled = reconcilePensionTransactions(reconcileSalaryTransactions(data))
+  const reconciled = reconcileLoanTransactions(reconcileRecurringTemplateTransactions(reconcilePensionTransactions(reconcileSalaryTransactions(data))))
   if (reconciled !== data) {
     result = reconciled
     changed = true
@@ -162,9 +236,11 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
     for (const template of result.recurringTemplates.filter((t) => t.location === 'personal' && t.ownerId === person.id)) {
       candidates.push(...generateTransactionsForTemplate(template, rangeStart, asOf, payCycle))
     }
-    for (const loan of result.loans.filter((l) => l.location === 'personal' && l.ownerId === person.id)) {
-      // Same 'personal'-only filter as projection.ts's identical loop, and
-      // for the same reason — see that file's comment on this exact spot.
+    // UAT 2026-09-09 (ed-overpay-just-single) — also catches a POT-located
+    // loan whose recurring overpayment is independently redirected to
+    // 'personal' (same fix, same reasoning, as projection.ts's identical
+    // loop — see that file's comment on this exact spot).
+    for (const loan of result.loans.filter((l) => l.ownerId === person.id && (l.location === 'personal' || resolveRecurringOverpaymentSource(l).location === 'personal'))) {
       candidates.push(...generateLoanPaymentTransactions(loan, rangeStart, asOf).filter((t) => t.location === 'personal'))
     }
     for (const card of result.creditCards.filter((c) => c.ownerId === person.id)) {

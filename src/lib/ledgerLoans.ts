@@ -255,7 +255,7 @@ export function setPausedLoanRecurringOverpaymentDates(loan: Loan, windowDates: 
  * doesn't day-weight (flat monthly) ignores that span's exact length,
  * one that does (daily simple) uses it precisely, stub period included.
  *
- * RECAST (scope §9): each overpayment (one-off or recurring) carries its
+ * RECAST (scope §9): a ONE-OFF overpayment (LoanOverpayment) carries its
  * own recastMode. 'reduce_term' (the default) needs no special handling
  * at all here — the payment just stays `loan.monthlyPayment` and the
  * loop naturally reaches zero sooner. 'reduce_payment' is what needs the
@@ -267,11 +267,20 @@ export function setPausedLoanRecurringOverpaymentDates(loan: Loan, windowDates: 
  * re-derived from whatever payment happened to be in effect a moment
  * ago (that WAS the original approach, and it was a real bug — see the
  * inline comment at the call site for the runaway-feedback-loop failure
- * mode it caused). For a RECURRING reduce_payment overpayment this fires
- * again every single period it applies, so the effective payment can
- * genuinely change every month, not just once (scope §9's own
- * description of this combination) — but always still converges cleanly
- * on the loan's real final period, however many times it's recast.
+ * mode it caused).
+ *
+ * A RECURRING overpayment (LoanRecurringOverpayment) is ALWAYS treated as
+ * reduce_term here, regardless of what its own `recastMode` field says
+ * (UAT 2026-09-09, ed-overpay-just-single — Adam's own call, after a
+ * single one-off *occurrence override* on a recurring overpayment
+ * unexpectedly re-amortised every future contractual payment). Letting a
+ * recurring reduce_payment fire fresh every single period it applies is
+ * exactly the runaway-feedback-loop risk this comment already warned
+ * about for the one-off case, compounded by firing repeatedly rather than
+ * once — the UI no longer offers this choice for a recurring overpayment
+ * at all (LoanRecurringOverpaymentEditForm always writes reduce_term),
+ * and this ignores the field defensively for any already-persisted data
+ * that predates that change.
  */
 /**
  * The most recent past scheduled payment (if any) and the next 3 upcoming
@@ -371,7 +380,8 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
     balance = round2(Math.max(0, balance - overpaymentApplied))
 
     const recurringOverpaymentApplied = recurringOverpaymentForDate(loan, paymentDateIso, balance)
-    if (recurringOverpaymentApplied > 0 && loan.recurringOverpayment?.recastMode === 'reduce_payment') recastToReducePayment = true
+    // Deliberately never reads loan.recurringOverpayment?.recastMode —
+    // see this function's own doc comment above.
     balance = round2(Math.max(0, balance - recurringOverpaymentApplied))
 
     // If either kind of overpayment landing this period asked to recast
@@ -1048,7 +1058,35 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
  * solve "a joint loan's overpayment funded by one person's personal pot"
  * as a real feature nobody's asked for yet.
  */
-function resolveRecurringOverpaymentSource(loan: Loan): { location: BillLocation; potId?: string } {
+/**
+ * Rewrites every stored Transaction for a loan's RECURRING overpayment
+ * (sourceType 'loan_recurring_overpayment') dated on/after `effectiveFrom`
+ * to the new location/potId — cleared and pending alike, same "cleared
+ * ones included" rule Bills'/Loans' own location changes already follow
+ * (lib/locationChange.ts's reassignTransactionsForLocationChange, which
+ * this mirrors but scopes to this one distinct sourceType — never
+ * touching the loan's own regular 'loan'-sourced payments, which have
+ * their own independent location per LoanRecurringOverpayment.location's
+ * own comment). UAT 2026-09-09 (ed-overpay-scope-step) — a recurring
+ * overpayment's location previously had no such rewrite at all (a flat,
+ * non-effective-dated setting); Adam's own call reversed that: "Location
+ * should be treated the same as amount for recurring overpayments."
+ */
+export function reassignLoanRecurringOverpaymentTransactions(
+  transactions: Transaction[],
+  loanId: string,
+  effectiveFrom: string,
+  newLocation: BillLocation,
+  newPotId: string | undefined,
+): Transaction[] {
+  return transactions.map((t) => {
+    if (t.sourceType !== 'loan_recurring_overpayment' || t.sourceId !== loanId) return t
+    if (t.date < effectiveFrom) return t
+    return { ...t, location: newLocation, potId: newLocation === 'pot' ? newPotId : undefined }
+  })
+}
+
+export function resolveRecurringOverpaymentSource(loan: Loan): { location: BillLocation; potId?: string } {
   if (loan.location === 'joint') return { location: 'joint' }
   const explicit = loan.recurringOverpayment?.location
   if (!explicit) return { location: loan.location, potId: loan.location === 'pot' ? loan.potId : undefined }

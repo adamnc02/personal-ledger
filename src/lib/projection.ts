@@ -16,7 +16,7 @@
 import { addDays } from 'date-fns'
 import { nanoid } from 'nanoid'
 import { generateTransactionsForTemplate } from './schedule'
-import { generateLoanPaymentTransactions } from './ledgerLoans'
+import { generateLoanPaymentTransactions, resolveRecurringOverpaymentSource } from './ledgerLoans'
 import { generateMinimumPaymentTransactions } from './creditCards'
 import { generateSalaryTransactions } from './salaryLedger'
 import { generatePensionTransactions } from './pensionLedger'
@@ -175,7 +175,18 @@ export function computeProjectionToDate(
     // pass unconditionally for every template this loop generates.
     generated.push(...generateTransactionsForTemplate(template, rangeStart, horizonEndDate, payCycle))
   }
-  for (const loan of data.loans.filter((l) => l.location === 'personal' && l.ownerId === personId && l.active)) {
+  // UAT 2026-09-09 (ed-overpay-just-single) — pre-filtering loans by
+  // `l.location === 'personal'` alone missed the REVERSE case from the
+  // comment below: a POT-located loan whose recurring overpayment is
+  // independently redirected to 'personal' was excluded from this loop
+  // entirely, so that overpayment's personal-funded rows never appeared
+  // anywhere on the Home page at all — confirmed as a real, reported gap,
+  // not hypothetical. Also include a loan whenever
+  // resolveRecurringOverpaymentSource resolves to 'personal' for it, even
+  // if the loan's own location doesn't; the `.filter((t) =>
+  // t.location === 'personal')` below still does the real work of picking
+  // out only the rows that actually belong here.
+  for (const loan of data.loans.filter((l) => l.ownerId === personId && l.active && (l.location === 'personal' || resolveRecurringOverpaymentSource(l).location === 'personal'))) {
     // Filtered to 'personal' rows only, not just pre-filtered by the
     // loan's own location — Pots backlog item (2026-09-03): a
     // 'personal'-location loan's RECURRING OVERPAYMENT can now

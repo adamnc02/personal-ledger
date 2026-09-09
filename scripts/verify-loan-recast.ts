@@ -74,21 +74,27 @@ const overpaymentEntry = reducePaymentSchedule.find((e) => e.overpaymentApplied 
 check('An overpayment itself never carries an interest component, regardless of recast mode', overpaymentEntry?.overpaymentApplied, 1000)
 
 // ─────────────────────────────────────────────────────────────────────
-// 5. Recurring overpayment + reduce_payment: payment genuinely
-//    recomputes EVERY period it applies, not just once (scope §9's own
-//    explicit description of this combination)
+// 5. UAT 2026-09-09 (ed-overpay-just-single) — a RECURRING overpayment's
+//    recastMode is now ALWAYS ignored by buildLoanSchedule; it's treated
+//    as reduce_term unconditionally (Adam's own call, after a single-
+//    occurrence amount override on a recurring reduce_payment overpayment
+//    unexpectedly re-amortised every future contractual payment — the
+//    UI no longer offers this choice for a recurring overpayment at all).
+//    Confirmed even against a loan whose recurringOverpayment still has
+//    recastMode: 'reduce_payment' persisted (legacy data, or a stale
+//    value from before this change) — it must have zero effect.
 // ─────────────────────────────────────────────────────────────────────
 const recurringReducePaymentLoan: Loan = { ...baseLoan, recurringOverpayment: { startDate: '2026-08-02', amount: { type: 'fixed', amount: 50 }, recastMode: 'reduce_payment' } }
 const recurringSchedule = buildLoanSchedule(recurringReducePaymentLoan)
 const paymentsFromAug = recurringSchedule.slice(1, 5).map((e) => e.scheduledPayment)
-check('Recurring reduce_payment: the payment is DIFFERENT across consecutive periods (genuinely recomputing each time, not a one-off recast)', new Set(paymentsFromAug).size, paymentsFromAug.length)
-check('Recurring reduce_payment: each successive payment is strictly smaller (shrinking balance -> shrinking required payment)', paymentsFromAug.every((p, i) => i === 0 || p < paymentsFromAug[i - 1]), true)
+check('A stored reduce_payment recastMode on a RECURRING overpayment is ignored — the payment stays fixed across periods', new Set(paymentsFromAug).size, 1)
+check('...matching the loan\'s own regular monthlyPayment exactly (reduce_term behaviour), not a recomputed lower figure', paymentsFromAug.every((p) => p === baseLoan.monthlyPayment), true)
 
-// Recurring + reduce_term, for contrast: payment should stay fixed even with a recurring overpayment active.
+// Recurring + reduce_term (the default, and now the ONLY real behaviour for a recurring overpayment).
 const recurringReduceTermLoan: Loan = { ...baseLoan, recurringOverpayment: { startDate: '2026-08-02', amount: { type: 'fixed', amount: 50 }, recastMode: 'reduce_term' } }
 const recurringReduceTermSchedule = buildLoanSchedule(recurringReduceTermLoan)
 check('Recurring reduce_term: the regular payment stays fixed even though a recurring overpayment is landing every period', recurringReduceTermSchedule[2]?.scheduledPayment, baseLoan.monthlyPayment)
-check('Recurring reduce_term: this genuinely shortens the loan more than the recurring reduce_payment case (all the extra cash reduces balance directly, none of it goes toward a lower payment)', recurringReduceTermSchedule.length < recurringSchedule.length, true)
+check('A recurring overpayment stored as reduce_payment produces an IDENTICAL schedule to one stored as reduce_term — recastMode is a true no-op for recurring overpayments', recurringSchedule, recurringReduceTermSchedule)
 
 // ─────────────────────────────────────────────────────────────────────
 // 6. Preview functions: what the follow-up UI step reads BEFORE

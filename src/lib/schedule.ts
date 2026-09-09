@@ -93,6 +93,27 @@ export function resolveTemplateAmount(template: RecurringTemplate, dateIso: stri
   return applicable[0]?.amount ?? template.amount
 }
 
+/**
+ * What a SPECIFIC occurrence resolves to, checking `occurrenceOverrides`
+ * (a "just a single payment" edit, or any other per-occurrence override)
+ * before falling back to `resolveTemplateAmount`'s standing-history walk —
+ * the same order walkOccurrences already applies when generating real
+ * transactions. UAT 2026-09-09 (ed-bills-just-single) — display-only call
+ * sites (the "manage paused payments" preview) were calling
+ * resolveTemplateAmount directly, which has no awareness of
+ * occurrenceOverrides at all, so a single-occurrence amount change
+ * correctly updated the real ledger but silently never showed up there —
+ * this is the shared, correct resolver every such display should use
+ * instead. `originalDate` is the occurrence's UN-overridden scheduled
+ * date (the key occurrenceOverrides itself uses), not a possibly-moved
+ * display date.
+ */
+export function resolveOccurrenceAmount(template: RecurringTemplate, originalDate: string): number {
+  const override = template.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
+  if (override?.amount !== undefined) return override.amount
+  return resolveTemplateAmount(template, originalDate)
+}
+
 export interface RawOccurrence {
   originalDate: string // the naturally-scheduled date, before any per-occurrence override
   date: string // the displayed/effective date — same as originalDate unless overridden
