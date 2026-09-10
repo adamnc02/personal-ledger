@@ -115,9 +115,48 @@ export function resolveOccurrenceAmount(template: RecurringTemplate, originalDat
 }
 
 export interface RawOccurrence {
-  originalDate: string // the naturally-scheduled date, before any per-occurrence override
-  date: string // the displayed/effective date — same as originalDate unless overridden
+  originalDate: string // the naturally-scheduled date, before any per-occurrence override AND before any payday/cycle-start resolution
+  date: string // the displayed/effective date — resolved against payday/cycle-start (for a follows-payday/follows-cycle-start transfer) and/or overridden
   amount: number
+}
+
+/**
+ * What a `kind: 'transfer'` template's occurrence date resolves to once
+ * `followsPayday`/`followsCycleStart` is taken into account — a
+ * follows-payday transfer resolves its date against the actual payday
+ * on/after `rawDate`, rather than using that date directly, so a
+ * transfer can "land on payday" even when payday itself drifts
+ * (weekends/bank holidays, non-monthly pay frequencies); a
+ * follows-cycle-start transfer does the same against the person's
+ * budgeting-cycle boundary instead (Salary Sorter session, 2026-09) —
+ * for someone whose cycle doesn't track payday (PayCycleConfig.
+ * cycleStartFollowsPayday can differ from payday entirely). Falls back
+ * to `rawDate` untouched if no payCycle was supplied, or the template
+ * isn't a transfer, or neither flag is set. followsPayday takes
+ * precedence if both are somehow set (the two are meant to be mutually
+ * exclusive, enforced by the UI — this is just a defined tie-break
+ * rather than an unreachable branch).
+ *
+ * UAT 2026-09-10 (recurring-payday-date-editing) — this used to live
+ * ONLY inside generateTransactionsForTemplate, applied AFTER
+ * walkOccurrences returned, so every other consumer of walkOccurrences
+ * (templateOccurrencePreviews, and anything built on top of it) saw the
+ * raw, unresolved, naturally-walked date instead — the real generated
+ * transaction landed correctly, but "Manage upcoming payments" and any
+ * other preview surface showed the wrong date for a follows-payday/
+ * follows-cycle-start transfer. Extracted here so every caller of
+ * walkOccurrences (and scheduledTemplateDates, which does its own
+ * separate walk) applies the exact same resolution.
+ */
+export function resolveTemplateOccurrenceDate(rawDate: string, template: RecurringTemplate, payCycle?: PayCycleConfig): string {
+  const isTransferKind = template.kind === 'transfer'
+  if (isTransferKind && template.followsPayday && payCycle) {
+    return toIso(upcomingPaydays(payCycle, new Date(rawDate), 1)[0] ?? new Date(rawDate))
+  }
+  if (isTransferKind && template.followsCycleStart && payCycle) {
+    return toIso(nextCycleStartAfter(new Date(rawDate), payCycle))
+  }
+  return rawDate
 }
 
 /**
@@ -132,8 +171,18 @@ export interface RawOccurrence {
  * entirely, an edited one carries its overridden date/amount. Templates
  * with kind 'bill' (or absent) never carry occurrenceOverrides, so this
  * is a no-op for them.
+ *
+ * `payCycle`, when supplied, is threaded into resolveTemplateOccurrenceDate
+ * so a follows-payday/follows-cycle-start TRANSFER's displayed `date` is
+ * resolved the same way here as generateTransactionsForTemplate always
+ * did — `originalDate` (the override-matching key) is deliberately left
+ * as the natural, UNRESOLVED date; only `date` (what's actually shown or
+ * written to a real Transaction) is resolved. Note this resolves
+ * whatever the "natural or overridden" date already is — i.e. even a
+ * per-occurrence-moved date gets payday-resolved, matching
+ * generateTransactionsForTemplate's pre-existing behaviour exactly.
  */
-function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd: Date): RawOccurrence[] {
+function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd: Date, payCycle?: PayCycleConfig): RawOccurrence[] {
   if (!template.active) return []
   if (rangeEnd < rangeStart) return []
 
@@ -154,9 +203,10 @@ function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd
     const originalDate = toIso(cursor)
     const override = template.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
     if (!override?.deleted) {
+      const rawDate = override?.date ?? originalDate
       results.push({
         originalDate,
-        date: override?.date ?? originalDate,
+        date: resolveTemplateOccurrenceDate(rawDate, template, payCycle),
         amount: override?.amount ?? resolveTemplateAmount(template, originalDate),
       })
     }
@@ -190,26 +240,9 @@ export function generateTransactionsForTemplate(
   const fromLoc = isTransferKind ? template.transferFrom : undefined
   const toLoc = isTransferKind ? template.transferTo : undefined
 
-  return walkOccurrences(template, rangeStart, rangeEnd).map((occ) => {
-    // A follows-payday transfer resolves its date against the actual
-    // payday on/after the naturally-walked date, rather than using that
-    // date directly — this is what lets a transfer "land on payday" even
-    // when payday itself drifts (weekends/bank holidays, non-monthly pay
-    // frequencies). Falls back to the natural date if no payCycle was
-    // supplied. A follows-cycle-start transfer does the same against the
-    // person's budgeting-cycle boundary instead (Salary Sorter session,
-    // 2026-09) — for someone whose cycle doesn't track payday
-    // (PayCycleConfig.cycleStartFollowsPayday can differ from payday
-    // entirely). followsPayday takes precedence if both are somehow set.
-    const date =
-      isTransferKind && template.followsPayday && payCycle
-        ? toIso(upcomingPaydays(payCycle, new Date(occ.date), 1)[0] ?? new Date(occ.date))
-        : isTransferKind && template.followsCycleStart && payCycle
-          ? toIso(nextCycleStartAfter(new Date(occ.date), payCycle))
-          : occ.date
-
+  return walkOccurrences(template, rangeStart, rangeEnd, payCycle).map((occ) => {
     return {
-      date,
+      date: occ.date,
       amount: occ.amount,
       direction: isTransferKind ? (fromLoc?.type === 'personal' ? 'out' : 'in') : isTransactionKind ? (isIncome ? 'in' : 'out') : 'out',
       categoryId: isTransferKind ? categoryForTransfer(fromLoc, toLoc) : template.categoryId,
@@ -255,8 +288,8 @@ export function generateTransactionsForTemplate(
  * occurrence currently displays. 15 years covers even an annual
  * frequency's `count` occurrences comfortably.
  */
-export function templateOccurrencePreviews(template: RecurringTemplate, asOfDate: Date, count: number): RawOccurrence[] {
-  return walkOccurrences(template, asOfDate, addYears(asOfDate, 15)).slice(0, count)
+export function templateOccurrencePreviews(template: RecurringTemplate, asOfDate: Date, count: number, payCycle?: PayCycleConfig): RawOccurrence[] {
+  return walkOccurrences(template, asOfDate, addYears(asOfDate, 15), payCycle).slice(0, count)
 }
 
 /**
@@ -269,8 +302,17 @@ export function templateOccurrencePreviews(template: RecurringTemplate, asOfDate
  * date isn't a real occurrence any more, generator-side. Same shape and
  * purpose as savingsPotLedger.ts's scheduledDepositDates (Phase 4 —
  * generalizing the SavingsPot-only pause picker to Bills/Pensions too).
+ *
+ * `payCycle`, when supplied, resolves each natural date the same way
+ * walkOccurrences does for a follows-payday/follows-cycle-start
+ * TRANSFER template (UAT 2026-09-10) — this function has its own
+ * independent anchor-stepping loop rather than calling walkOccurrences
+ * (deliberately, to keep ignoring occurrenceOverrides per the comment
+ * above), so it needs the same resolution applied explicitly here too,
+ * or the pause picker's candidate dates would disagree with what
+ * "Manage upcoming payments" actually shows/generates.
  */
-export function scheduledTemplateDates(template: RecurringTemplate, rangeStart: Date, rangeEnd: Date): string[] {
+export function scheduledTemplateDates(template: RecurringTemplate, rangeStart: Date, rangeEnd: Date, payCycle?: PayCycleConfig): string[] {
   if (rangeEnd < rangeStart) return []
   const anchor = new Date(template.anchorDate)
   const anchorDay = anchor.getDate()
@@ -282,7 +324,7 @@ export function scheduledTemplateDates(template: RecurringTemplate, rangeStart: 
   }
   const results: string[] = []
   while (cursor <= rangeEnd && iterations < MAX_OCCURRENCES) {
-    results.push(toIso(cursor))
+    results.push(resolveTemplateOccurrenceDate(toIso(cursor), template, payCycle))
     cursor = nextOccurrence(cursor, template, anchorDay)
     iterations++
   }
