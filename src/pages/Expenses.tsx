@@ -2375,7 +2375,18 @@ function TransferRecurringRow({
   const locationsDirty = !locationsEqual(transferFrom, template.transferFrom) || !locationsEqual(transferTo, template.transferTo)
   const amountDirty = Number(amount) > 0 && Number(amount) !== template.amount
 
-  const windowDates = scheduledTemplateDates(template, new Date(), addYearsLocal(new Date(), 1))
+  // UAT 2026-09-10 (mup-samedate-transfer) — this used to start the window
+  // at `new Date()` (today, WITH the current time-of-day), matching
+  // neither Bills' own -2-months-back/+12-months-forward window nor even
+  // "today" itself: a cursor date is constructed at midnight, so it's
+  // always `< new Date()` (today's real wall-clock time) and gets skipped
+  // straight to the NEXT occurrence — meaning a recurring transfer's
+  // "Manage upcoming payments" could never show today's own occurrence,
+  // let alone any past one, breaking parity with Bills/Pension/Loan-
+  // overpayment/Pot/SavingsPot (all of which already use this same
+  // -2/+12 window) and making it impossible to review or single-
+  // occurrence-edit a transfer payment dated on or before today at all.
+  const windowDates = scheduledTemplateDates(template, addMonths(new Date(), -2), addMonths(new Date(), 12))
   const currentlyPaused = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && windowDates.includes(o.originalDate)).map((o) => o.originalDate))
   const nextOccurrence = templateOccurrencePreviews(template, new Date(), 1)[0]
 
@@ -2601,13 +2612,6 @@ function TransferRecurringRow({
     </SwipeToDelete>
   )
 }
-
-function addYearsLocal(date: Date, years: number): Date {
-  const d = new Date(date)
-  d.setFullYear(d.getFullYear() + years)
-  return d
-}
-
 
 // ── Recurring transactions — same schedule engine as Bills (RecurringTemplate with kind: 'transaction'), but generating plain expense/income occurrences, personal-only, with per-occurrence edit/delete on top of the standing "apply from" amount-change flow Bills already has. ──
 
