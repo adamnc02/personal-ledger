@@ -34,8 +34,14 @@ const bill = newRecurringTemplate({
 })
 const billWindowStart = new Date('2026-08-01')
 const billWindowEnd = new Date('2027-01-01')
-const billWindowDates = scheduledTemplateDates(bill, billWindowStart, billWindowEnd)
+// UAT 2026-09-11 (manage-upcoming-payments-override-key-bug) —
+// scheduledTemplateDates now returns { originalDate, date } pairs;
+// setPausedTemplateOccurrences still wants a flat string[] of the
+// natural .originalDate keys.
+const billWindowPairs = scheduledTemplateDates(bill, billWindowStart, billWindowEnd)
+const billWindowDates = billWindowPairs.map((p) => p.originalDate)
 check('scheduledTemplateDates finds the monthly 15ths in the window', billWindowDates.includes('2026-09-15') && billWindowDates.includes('2026-10-15'), true)
+check('scheduledTemplateDates .date matches .originalDate when no payCycle/resolution applies (bills never follow payday)', billWindowPairs.every((p) => p.date === p.originalDate), true)
 
 const billWithPause = { ...bill, ...setPausedTemplateOccurrences(bill, billWindowDates, ['2026-09-15']) }
 const billTxnsAfterPause = generateTransactionsForTemplate(billWithPause, billWindowStart, billWindowEnd)

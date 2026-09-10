@@ -96,7 +96,10 @@ for (const template of [followsPaydayTemplate, followsCycleStartTemplate]) {
   // ground truth for what the OTHER two surfaces must now also produce.
   const generated = generateTransactionsForTemplate(template, windowStart, windowEnd, payCycle).map((t) => t.date)
   const previews = templateOccurrencePreviews(template, windowStart, generated.length, payCycle).map((p) => p.date)
-  const scheduled = scheduledTemplateDates(template, windowStart, windowEnd, payCycle)
+  // UAT 2026-09-11 (manage-upcoming-payments-override-key-bug) —
+  // scheduledTemplateDates now returns { originalDate, date } pairs; only
+  // .date (the resolved/displayed date) is comparable to generated/previews.
+  const scheduled = scheduledTemplateDates(template, windowStart, windowEnd, payCycle).map((s) => s.date)
 
   assert(`${label}: sanity — at least one occurrence resolved in the window`, generated.length >= 4)
   check(`${label}: templateOccurrencePreviews agrees with generateTransactionsForTemplate`, previews, generated)
@@ -148,6 +151,14 @@ const templateWithPause: RecurringTemplate = {
 const scheduledIgnoringPause = scheduledTemplateDates(templateWithPause, windowStart, windowEnd, payCycle)
 const unpausedScheduled = scheduledTemplateDates(followsPaydayTemplate, windowStart, windowEnd, payCycle)
 check('scheduledTemplateDates ignores the pause entirely (same candidate list paused or not)', scheduledIgnoringPause, unpausedScheduled)
+// The pair shape's .originalDate must ALSO be identical paused-or-not
+// (it's the natural key occurrenceOverrides/walkOccurrences use — payday
+// resolution must never disturb it), independent of the .date check above.
+check(
+  'scheduledTemplateDates original (natural) dates also ignore the pause entirely',
+  scheduledIgnoringPause.map((s) => s.originalDate),
+  unpausedScheduled.map((s) => s.originalDate),
+)
 // templateOccurrencePreviews always returns exactly `count` items (it
 // keeps walking further out to fill the count, it doesn't stop at
 // `windowEnd`) — so a dropped occurrence shows up as the WHOLE list
@@ -167,7 +178,11 @@ assert('templateOccurrencePreviews (pause-aware) drops the resolved date the pau
 const naturalDates = ['2026-08-31', '2026-09-30', '2026-10-31', '2026-11-30', '2026-12-31']
 check('generateTransactionsForTemplate with no payCycle falls back to natural walked dates', generateTransactionsForTemplate(followsPaydayTemplate, windowStart, windowEnd).map((t) => t.date), naturalDates)
 check('templateOccurrencePreviews with no payCycle falls back to natural walked dates', templateOccurrencePreviews(followsPaydayTemplate, windowStart, naturalDates.length).map((p) => p.date), naturalDates)
-check('scheduledTemplateDates with no payCycle falls back to natural walked dates', scheduledTemplateDates(followsPaydayTemplate, windowStart, windowEnd), naturalDates)
+check(
+  'scheduledTemplateDates with no payCycle falls back to natural walked dates',
+  scheduledTemplateDates(followsPaydayTemplate, windowStart, windowEnd).map((s) => s.date),
+  naturalDates,
+)
 
 // ── A non-transfer kind (bill/transaction) ignores followsPayday/
 // followsCycleStart entirely at the engine level, even if somehow set,
