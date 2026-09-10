@@ -593,12 +593,21 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       )
     }
     case 'joint': {
-      const bounds = resolveCycleBounds(data, data.primaryPersonId, new Date())
+      // UAT 2026-09-11 — this used to always call resolveCycleBounds(...,
+      // new Date()) and hardcode the "This cycle" label, ignoring
+      // `horizon` entirely, unlike every other hero face (and unlike this
+      // same card's own pulldown, JointBreakdownCard above, which already
+      // threads horizon through horizonCycles correctly) — so neither the
+      // numbers nor the row label ever responded to the This cycle/Next 3
+      // cycles toggle. Matches JointBreakdownCard's own bounds-resolution
+      // now.
+      const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
+      const bounds = { start: cycles[0].start, end: cycles[cycles.length - 1].end }
       const summary = computeJointSummary(data, bounds.start, bounds.end)
       return (
         <BankCard variant="light" bankLabel={primaryPerson?.name ?? 'Me'} accountLabel="Joint">
           <div className="mt-6 space-y-1.5">
-            <CardRow label="This cycle" value={summary.totalOutgoings} light />
+            <CardRow label={HORIZON_LABELS[horizon]} value={summary.totalOutgoings} light />
             {summary.perPerson.map((p) => (
               <CardRow key={p.personId} label={p.name} value={p.amount} light />
             ))}
