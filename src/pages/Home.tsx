@@ -39,12 +39,24 @@ type DeckEntry =
   | { kind: 'savings_pot'; potId: string }
   | { kind: 'pot'; potId: string }
 
+// Deck order (Adam-specified, 2026-09-10): Personal, Joint*, Pots*,
+// Credit Card(s)*, Savings Pots*, Household*. Each conditional entry
+// keeps its own pre-existing visibility rule below — only the ORDER
+// changed, not which cards appear or when.
 function buildDeck(data: AppDataV2): DeckEntry[] {
   const deck: DeckEntry[] = [{ kind: 'personal' }]
 
   const hasJointItem = data.recurringTemplates.some((t) => t.location === 'joint') || data.loans.some((l) => l.location === 'joint' && l.active)
   if (data.people.length >= 2 && hasJointItem) deck.push({ kind: 'joint' })
-  if (data.people.length >= 2) deck.push({ kind: 'household' })
+
+  // Pots backlog item, Phase 7 (2026-09 session) — Adam's own spec: "it
+  // get's its own swipe card in the Summary page. It's ledger should
+  // match the same style as the Personal swipe card... There should be
+  // no pie chart." A Pot is architecturally its own thing (see Pot's own
+  // header comment in types/ledger.ts), so it gets its own deck kind
+  // rather than being folded into 'savings_pot'.
+  const myBillsPots = (data.pots ?? []).filter((p) => p.personId === data.primaryPersonId && p.active)
+  for (const p of myBillsPots) deck.push({ kind: 'pot', potId: p.id })
 
   const myCards = data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active)
   for (const c of myCards) deck.push({ kind: 'credit_card', cardId: c.id })
@@ -60,15 +72,7 @@ function buildDeck(data: AppDataV2): DeckEntry[] {
   const myPots = data.savingsPots.filter((p) => p.personId === data.primaryPersonId && p.active)
   for (const p of myPots) deck.push({ kind: 'savings_pot', potId: p.id })
 
-  // Pots backlog item, Phase 7 (2026-09 session) — Adam's own spec: "it
-  // get's its own swipe card in the Summary page. It's ledger should
-  // match the same style as the Personal swipe card... There should be
-  // no pie chart." Same "genuine deck entry, not bolted onto another
-  // card" treatment SavingsPot got above — a Pot is architecturally its
-  // own thing (see Pot's own header comment in types/ledger.ts), so it
-  // gets its own deck kind rather than being folded into 'savings_pot'.
-  const myBillsPots = (data.pots ?? []).filter((p) => p.personId === data.primaryPersonId && p.active)
-  for (const p of myBillsPots) deck.push({ kind: 'pot', potId: p.id })
+  if (data.people.length >= 2) deck.push({ kind: 'household' })
 
   return deck
 }
