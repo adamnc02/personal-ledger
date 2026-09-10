@@ -762,7 +762,7 @@
       "categoryId": "category-savings",
       "paymentMethod": "bank_transfer",
       "frequency": "monthly",
-      "anchorDate": "2026-05-10",
+      "anchorDate": "2026-08-31",
       "location": "personal",
       "ownerId": "tue8sV-d",
       "payee": "",
@@ -775,7 +775,8 @@
       "transferTo": {
         "type": "savings",
         "savingsPotId": "uat-savingspot-1"
-      }
+      },
+      "followsPayday": true
     },
     {
       "id": "uat-transaction-1",
