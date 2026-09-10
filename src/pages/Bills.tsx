@@ -749,6 +749,7 @@ function BillEditPanel({
             return templateOccurrencePreviews(previewTemplate, new Date(), 1)[0]?.date ?? null
           }}
           onSave={(pausedDates) => onSave(setPausedTemplateOccurrences(template, pauseWindowDates, pausedDates))}
+          onSaveAmount={(originalDate, newAmount) => onSave(applyTemplateSingleOccurrenceAmountChange(template, newAmount, originalDate))}
         />
       </div>
 

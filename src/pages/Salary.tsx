@@ -23,7 +23,7 @@ import { NumberInput } from '../components/NumberInput'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { EditField } from '../components/EditField'
 import { hasSalaryConfigured } from '../lib/household'
-import { pensionOccurrencePreviews, applyPensionAmountChange, newPension, scheduledPensionDates, setPausedPensionOccurrences, resolvePensionAmount } from '../lib/pensionLedger'
+import { pensionOccurrencePreviews, applyPensionAmountChange, newPension, scheduledPensionDates, setPausedPensionOccurrences, resolvePensionOccurrenceAmount, applyPensionSingleOccurrenceAmountChange } from '../lib/pensionLedger'
 import { JointAccountSetupModal } from '../components/JointAccountSetupModal'
 import { RebalanceAccountsModal, type RebalanceTarget } from '../components/RebalanceAccountsModal'
 import { formatFullDate } from '../lib/format'
@@ -37,7 +37,7 @@ import {
 } from '../lib/savingsPotLedger'
 import { buildExampleLedger } from '../lib/savingsInterest'
 import { newPot, potBalanceAsOf, potDepositOccurrencePreviews } from '../lib/potLedger'
-import { setPausedTemplateOccurrences, scheduledTemplateDates, templateOccurrencePreviews, recentAndUpcomingOccurrences } from '../lib/schedule'
+import { recentAndUpcomingOccurrences } from '../lib/schedule'
 import { recentAndUpcomingLoanPaymentDates } from '../lib/ledgerLoans'
 import { locationsEqual, transferLocationLabel, transferLocationKey, buildTransferLocationOptions, type TransferLocationOption } from '../lib/transferLedger'
 import { AmountStep, LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
@@ -427,13 +427,14 @@ function PensionRow({
             <PausedOccurrencesControl
               windowDates={pauseWindowDates}
               currentlyPaused={currentlyPausedPensionDates}
-              amountForDate={(date) => resolvePensionAmount(pension, date)}
+              amountForDate={(date) => resolvePensionOccurrenceAmount(pension, date)}
               itemLabel="payments"
               nextPaymentPreview={(tentative) => {
                 const previewPension: Pension = { ...pension, ...setPausedPensionOccurrences(pension, pauseWindowDates, tentative) }
                 return pensionOccurrencePreviews(previewPension, new Date(), 1)[0]?.date ?? null
               }}
               onSave={(pausedDates) => onSave(setPausedPensionOccurrences(pension, pauseWindowDates, pausedDates))}
+              onSaveAmount={(originalDate, newAmount) => onSave(applyPensionSingleOccurrenceAmountChange(pension, newAmount, originalDate))}
             />
           </div>
         )}
@@ -828,16 +829,20 @@ type RecurringCreateStep = 'closed' | 'type' | 'amount' | 'location' | 'frequenc
 function RecurringTransferEditor({
   location,
   defaultName,
-  templates,
   locationOptions,
   onAdd,
-  onUpdate,
-  onRemove,
+  // onUpdate/onRemove are no longer used by THIS component — they used
+  // to be threaded through to the now-removed RecurringExistingDeposit
+  // summary row (Wallet-page scope item, 2026-09-10). Kept in the prop
+  // type (rather than removed) since every call site already passes
+  // them and Transactions -> Transfer is now the only place that needs
+  // to update/remove an existing recurring transfer template.
+  onUpdate: _onUpdate,
+  onRemove: _onRemove,
   onSaved,
 }: {
   location: TransferLocation
   defaultName: string
-  templates: RecurringTemplate[]
   locationOptions: TransferLocationOption[]
   onAdd: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
   onUpdate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
@@ -847,16 +852,6 @@ function RecurringTransferEditor({
    * (Pot/Savings Pot/Joint) can flash "Saved". */
   onSaved?: () => void
 }) {
-  // UAT Batch 4 follow-up (2026-09-04, Adam-reported): this used to match
-  // ANY transfer touching this location and treat it as THE one slot —
-  // so configuring a recurring deposit made the "+ Add" button disappear
-  // entirely, with no way to also add a recurring withdrawal (or vice
-  // versa). A deposit (transferTo === location) and a withdrawal
-  // (transferFrom === location) are independent slots now; the "+"
-  // button only disappears once BOTH are configured.
-  const existingDeposit = templates.find((t) => t.kind === 'transfer' && locationsEqual(t.transferTo, location))
-  const existingWithdrawal = templates.find((t) => t.kind === 'transfer' && locationsEqual(t.transferFrom, location))
-  const bothConfigured = !!existingDeposit && !!existingWithdrawal
   const fixedKey = transferLocationKey(location)
 
   const [step, setStep] = useState<RecurringCreateStep>('closed')
@@ -896,32 +891,25 @@ function RecurringTransferEditor({
   }
 
   if (step === 'closed') {
+    // 2026-09-10 (Wallet-page scope item, folded into the "Manage upcoming
+    // payments" redesign session) — this used to render each already-
+    // configured template as an expandable RecurringExistingDeposit
+    // summary row here, and hid the "+ Add" button entirely once one
+    // deposit AND one withdrawal template existed for this location
+    // (bothConfigured). Per Adam's resolved call: recurring transfers are
+    // never visible or editable from the Wallet page any more — only from
+    // Transactions → Transfer — and there is no cap on how many can exist
+    // per location. The button is now always visible and always starts a
+    // fresh create flow (Deposit/Withdrawal choice → amount → location →
+    // frequency → date), same as the very first one ever created.
     return (
-      <>
-        {existingDeposit && <RecurringExistingDeposit template={existingDeposit} onUpdate={onUpdate} onRemove={onRemove} onSaved={onSaved} />}
-        {existingWithdrawal && <RecurringExistingDeposit template={existingWithdrawal} onUpdate={onUpdate} onRemove={onRemove} onSaved={onSaved} />}
-        {!bothConfigured && (
-          <button
-            onClick={() => {
-              // Skip the Deposit/Withdrawal choice entirely when only one
-              // direction is still available — nothing meaningful to pick.
-              if (existingDeposit && !existingWithdrawal) {
-                setType('withdrawal')
-                setStep('amount')
-              } else if (existingWithdrawal && !existingDeposit) {
-                setType('deposit')
-                setStep('amount')
-              } else {
-                setStep('type')
-              }
-            }}
-            className="text-xs font-medium self-start"
-            style={{ color: 'var(--color-coral)' }}
-          >
-            + Add a recurring transfer
-          </button>
-        )}
-      </>
+      <button
+        onClick={() => setStep('type')}
+        className="text-xs font-medium self-start"
+        style={{ color: 'var(--color-coral)' }}
+      >
+        + Add a recurring transfer
+      </button>
     )
   }
 
@@ -1002,151 +990,13 @@ function RecurringTransferEditor({
   return <DateStep value={date} onChange={setDate} onCancel={reset} onContinue={commitCreate} continueLabel="Create" />
 }
 
-/** The already-configured-template half of RecurringTransferEditor, above — split out once it needed its own draft/collapse state. Batch 3 (2026-09-04 UAT): this used to live-save every field the instant it changed and was always expanded; now a collapsed one-line summary by default (tap to expand), and edits are a local draft that only commits on Save/reverts on Cancel — matching every other editable card in this file (PotRow, SavingsPotRow) rather than being the one live-editing exception.
- *
- * Batch 4 (2026-09-04 UAT): gained the same mutually-exclusive
- * `followsCycleStart` checkbox the Transfer page's own recurring-transfer
- * form already has, worded identically ("Land on payday, even if it
- * moves" / "Land on the start of my budgeting cycle instead") — plus the
- * "On day of month" field greys out (and is functionally frozen, via
- * EditField's new `disabled`) whenever either checkbox is ticked, since
- * the day only matters when neither payday nor cycle-start governs the
- * date. */
-function RecurringExistingDeposit({
-  template,
-  onUpdate,
-  onRemove,
-  onSaved,
-}: {
-  template: RecurringTemplate
-  onUpdate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
-  onRemove: (id: string) => void
-  onSaved?: () => void
-}) {
-  const [expanded, setExpanded] = useState(false)
-  const [draftAmount, setDraftAmount] = useState(template.amount)
-  const [draftDay, setDraftDay] = useState(new Date(template.anchorDate).getDate())
-  const [draftFollowsPayday, setDraftFollowsPayday] = useState(!!template.followsPayday)
-  const [draftFollowsCycleStart, setDraftFollowsCycleStart] = useState(!!template.followsCycleStart)
-
-  function startEditing() {
-    setDraftAmount(template.amount)
-    setDraftDay(new Date(template.anchorDate).getDate())
-    setDraftFollowsPayday(!!template.followsPayday)
-    setDraftFollowsCycleStart(!!template.followsCycleStart)
-    setExpanded(true)
-  }
-
-  if (!expanded) {
-    return (
-      <button onClick={startEditing} className="rounded-xl p-3 flex items-center justify-between text-left" style={{ background: 'var(--color-bg-elevated)' }}>
-        <div>
-          <span className="text-xs font-medium text-[var(--color-ink)]">Recurring deposit</span>
-          <p className="text-xs text-[var(--color-ink-muted)]">
-            £{formatCurrency(template.amount)}/mo · day {new Date(template.anchorDate).getDate()}
-            {template.followsPayday ? ' · follows payday' : ''}
-            {template.followsCycleStart ? ' · follows cycle start' : ''}
-          </p>
-        </div>
-        <ChevronDown size={16} className="text-[var(--color-ink-muted)] shrink-0" />
-      </button>
-    )
-  }
-
-  const dayFieldDisabled = draftFollowsPayday || draftFollowsCycleStart
-  // UAT follow-up (2026-09-04, Adam-reported): Save used to gate on
-  // `draftAmount > 0` alone — always true for an already-saved template,
-  // so it sat at full brightness the instant this expanded, whether or
-  // not anything had actually changed.
-  const dirty =
-    draftAmount !== template.amount ||
-    draftDay !== new Date(template.anchorDate).getDate() ||
-    draftFollowsPayday !== !!template.followsPayday ||
-    draftFollowsCycleStart !== !!template.followsCycleStart
-
-  return (
-    <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-[var(--color-ink)]">Recurring deposit</span>
-        <button onClick={() => onRemove(template.id)} className="text-xs" style={{ color: 'var(--color-negative)' }}>
-          Remove
-        </button>
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <EditField label="Amount (£)" type="number" value={draftAmount} onChange={(v) => setDraftAmount(Number(v) || 0)} />
-        <EditField
-          label="On day of month"
-          type="number"
-          value={draftDay}
-          onChange={(v) => setDraftDay(Math.min(31, Math.max(1, Number(v) || 1)))}
-          disabled={dayFieldDisabled}
-        />
-      </div>
-      <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
-        <input
-          type="checkbox"
-          checked={draftFollowsPayday}
-          onChange={(e) => {
-            setDraftFollowsPayday(e.target.checked)
-            if (e.target.checked) setDraftFollowsCycleStart(false)
-          }}
-        />
-        Land on payday, even if it moves
-      </label>
-      <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
-        <input
-          type="checkbox"
-          checked={draftFollowsCycleStart}
-          onChange={(e) => {
-            setDraftFollowsCycleStart(e.target.checked)
-            if (e.target.checked) setDraftFollowsPayday(false)
-          }}
-        />
-        Land on the start of my budgeting cycle instead
-      </label>
-      <RecurringTransferPauseControl template={template} onUpdate={(updates) => onUpdate(template.id, updates)} />
-      <FormButtonRow
-        onCancel={() => setExpanded(false)}
-        onSave={() => {
-          const anchor = new Date(template.anchorDate)
-          anchor.setDate(draftDay)
-          onUpdate(template.id, {
-            amount: draftAmount,
-            anchorDate: toLocalIsoDate(anchor),
-            followsPayday: draftFollowsPayday,
-            followsCycleStart: draftFollowsCycleStart,
-          })
-          setExpanded(false)
-          onSaved?.()
-        }}
-        saveDisabled={!(draftAmount > 0) || !dirty}
-      />
-    </div>
-  )
-}
-
-/** Pause/resume checklist for a recurring transfer — same shared PausedOccurrencesControl widget every other recurring entity (Bills/Pensions/the old SavingsPot fields) already uses, against schedule.ts's generic template occurrence functions rather than an entity-specific pair. */
-function RecurringTransferPauseControl({ template, onUpdate }: { template: RecurringTemplate; onUpdate: (updates: Partial<Omit<RecurringTemplate, 'id'>>) => void }) {
-  const start = new Date()
-  const end = new Date()
-  end.setFullYear(end.getFullYear() + 1)
-  const windowDates = scheduledTemplateDates(template, start, end)
-  const currentlyPaused = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && windowDates.includes(o.originalDate)).map((o) => o.originalDate))
-
-  return (
-    <PausedOccurrencesControl
-      windowDates={windowDates}
-      currentlyPaused={currentlyPaused}
-      amountForDate={() => template.amount}
-      itemLabel="deposits"
-      nextPaymentPreview={(tentative) => {
-        const previewTemplate: RecurringTemplate = { ...template, ...setPausedTemplateOccurrences(template, windowDates, tentative) }
-        return templateOccurrencePreviews(previewTemplate, new Date(), 1)[0]?.date ?? null
-      }}
-      onSave={(pausedDates) => onUpdate(setPausedTemplateOccurrences(template, windowDates, pausedDates))}
-    />
-  )
-}
+// RecurringExistingDeposit / RecurringTransferPauseControl removed 2026-09-10
+// (Wallet-page scope item, folded into the "Manage upcoming payments" session) —
+// recurring transfers are no longer visible or editable from the Wallet page at
+// all (see RecurringTransferEditor above); this is where their expandable
+// summary row and its own PausedOccurrencesControl call site (#7 in the redesign
+// doc's inventory) used to live. Transactions -> Transfer remains the sole place
+// to see/edit/pause/remove these templates.
 
 function SavingsPotRow({
   pot,
@@ -1160,7 +1010,12 @@ function SavingsPotRow({
   onLogDeposit,
   onLogWithdrawal,
   locationOptions,
-  recurringTemplates,
+  // No longer read directly by this component — used to be threaded
+  // through to RecurringTransferEditor purely so it could compute
+  // existingDeposit/existingWithdrawal, both removed 2026-09-10 (Wallet-
+  // page scope item: no more per-location cap, no more summary rows).
+  // Kept in the prop type since the caller still passes it.
+  recurringTemplates: _recurringTemplates,
   onAddRecurringTransfer,
   onUpdateRecurringTemplate,
   onRemoveRecurringTemplate,
@@ -1266,7 +1121,6 @@ function SavingsPotRow({
           <RecurringTransferEditor
             location={{ type: 'savings', savingsPotId: pot.id }}
             defaultName={pot.name}
-            templates={recurringTemplates}
             locationOptions={locationOptions}
             onAdd={onAddRecurringTransfer}
             onUpdate={onUpdateRecurringTemplate}
@@ -2077,7 +1931,6 @@ function PotRow({
           <RecurringTransferEditor
             location={{ type: 'pot', potId: pot.id }}
             defaultName={pot.name}
-            templates={templates}
             locationOptions={locationOptions}
             onAdd={onAddRecurringTransfer}
             onUpdate={onUpdateRecurringTemplate}
@@ -3054,7 +2907,6 @@ export function Salary() {
             <RecurringTransferEditor
               location={{ type: 'joint' }}
               defaultName="Joint Account"
-              templates={data.recurringTemplates}
               locationOptions={transferLocationOptions}
               onAdd={addRecurringTransfer}
               onUpdate={updateRecurringTemplate}

@@ -8,8 +8,8 @@ import { CategoryIcon } from '../components/CategoryIcon'
 import { CategoryPicker } from '../components/CategoryPicker'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
-import { schedulePreviewWindow, scheduledDepositDates, depositOccurrencePreviews, setPausedDeposits } from '../lib/savingsPotLedger'
-import { schedulePotPreviewWindow, scheduledPotDepositDates, potDepositOccurrencePreviews, setPausedPotDeposits } from '../lib/potLedger'
+import { schedulePreviewWindow, scheduledDepositDates, depositOccurrencePreviews, setPausedDeposits, resolveSavingsPotDepositOccurrenceAmount, applySavingsPotSingleDepositAmountChange } from '../lib/savingsPotLedger'
+import { schedulePotPreviewWindow, scheduledPotDepositDates, potDepositOccurrencePreviews, setPausedPotDeposits, resolvePotDepositOccurrenceAmount, applyPotSingleDepositAmountChange } from '../lib/potLedger'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { visibleCategoriesFor } from '../lib/categories'
@@ -2195,6 +2195,20 @@ function LoanRecurringOverpaymentEditForm({
           )
           if (merged) onSave(merged)
         }}
+        // The picker/pill list shows the overpayment's own REAL date
+        // (windowEntries), but amountOverrides must be keyed by the
+        // underlying loan schedule entry's periodDate instead — the same
+        // real-vs-period-date translation the full edit flow above uses
+        // (see this file's own "do not lose this" history — two separate
+        // regressions came from skipping this translation). A single
+        // occurrence edit here always writes a FIXED £ override for that
+        // one date, even when the standing recurring amount is
+        // percent-of-balance — "just this one payment" is inherently a
+        // concrete number, not a re-statement of the percentage rule.
+        onSaveAmount={(realDate, newAmount) => {
+          const periodDate = periodDateFor(realDate)
+          onSave({ ...value, ...applyRecurringOverpaymentSingleAmountOverride(value, { type: 'fixed', amount: newAmount }, periodDate) })
+        }}
       />
 
       <div className="flex gap-2">
@@ -2578,6 +2592,7 @@ function TransferRecurringRow({
                 return templateOccurrencePreviews(previewTemplate, new Date(), 1)[0]?.date ?? null
               }}
               onSave={(pausedDates) => onUpdate(setPausedTemplateOccurrences(template, windowDates, pausedDates))}
+              onSaveAmount={(originalDate, newAmount) => onUpdate(applyTemplateSingleOccurrenceAmountChange(template, newAmount, originalDate))}
             />
           </div>
         )}
@@ -3115,13 +3130,14 @@ function SavingsRecurringDepositRow({ pot, onSave }: { pot: SavingsPot; onSave: 
           <PausedOccurrencesControl
             windowDates={windowDates}
             currentlyPaused={currentlyPaused}
-            amountForDate={() => pot.recurringDepositAmount ?? 0}
+            amountForDate={(date) => resolveSavingsPotDepositOccurrenceAmount(pot, date)}
             itemLabel="deposits"
             nextPaymentPreview={(tentative) => {
               const previewPot: SavingsPot = { ...pot, ...setPausedDeposits(pot, windowDates, tentative) }
               return depositOccurrencePreviews(previewPot, new Date(), 1)[0]?.date ?? null
             }}
             onSave={(pausedDates) => onSave(setPausedDeposits(pot, windowDates, pausedDates))}
+            onSaveAmount={(originalDate, newAmount) => onSave(applySavingsPotSingleDepositAmountChange(pot, newAmount, originalDate))}
           />
         </div>
       )}
@@ -3178,13 +3194,14 @@ function PotRecurringDepositRow({ pot, onSave }: { pot: Pot; onSave: (updates: P
           <PausedOccurrencesControl
             windowDates={windowDates}
             currentlyPaused={currentlyPaused}
-            amountForDate={() => pot.recurringDepositAmount ?? 0}
+            amountForDate={(date) => resolvePotDepositOccurrenceAmount(pot, date)}
             itemLabel="deposits"
             nextPaymentPreview={(tentative) => {
               const previewPot: Pot = { ...pot, ...setPausedPotDeposits(pot, windowDates, tentative) }
               return potDepositOccurrencePreviews(previewPot, new Date(), 1)[0]?.date ?? null
             }}
             onSave={(pausedDates) => onSave(setPausedPotDeposits(pot, windowDates, pausedDates))}
+            onSaveAmount={(originalDate, newAmount) => onSave(applyPotSingleDepositAmountChange(pot, newAmount, originalDate))}
           />
         </div>
       )}
