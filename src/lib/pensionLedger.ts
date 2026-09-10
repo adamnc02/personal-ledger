@@ -60,6 +60,24 @@ export function resolvePensionAmount(pension: Pension, dateIso: string): number 
   return applicable[0]?.amount ?? pension.amount
 }
 
+/**
+ * What a SPECIFIC pension occurrence resolves to, checking
+ * `occurrenceOverrides` first — schedule.ts's resolveOccurrenceAmount
+ * equivalent for Pension (2026-09-10, "Manage upcoming payments"
+ * redesign). Call site #6 in the redesign's own call-site inventory: the
+ * schedule walker (walkPensionOccurrences below) already respects an
+ * override's `.amount`, but until this function existed nothing
+ * display-side did — the exact bug class resolveOccurrenceAmount fixed
+ * for Bills on 2026-09-09, just never applied to Pension. `originalDate`
+ * is the occurrence's un-overridden scheduled date (occurrenceOverrides'
+ * own key), not a possibly-moved display date.
+ */
+export function resolvePensionOccurrenceAmount(pension: Pension, originalDate: string): number {
+  const override = pension.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
+  if (override?.amount !== undefined) return override.amount
+  return resolvePensionAmount(pension, originalDate)
+}
+
 export interface RawPensionOccurrence {
   originalDate: string
   date: string
@@ -168,6 +186,23 @@ export function applyPensionAmountChange(pension: Pension, newAmount: number, ef
     amountEffectiveFrom: effectiveFrom,
     amountHistory: [...(pension.amountHistory ?? []), priorEntry],
   }
+}
+
+/**
+ * Builds the patch for a SINGLE-occurrence ("just a single payment")
+ * amount change against a Pension — mirrors schedule.ts's
+ * applyTemplateSingleOccurrenceAmountChange exactly, reusing the existing
+ * occurrenceOverrides mechanism (already used for pausing/moving one
+ * occurrence) rather than inventing a new field. Merges onto any existing
+ * override for the same slot (e.g. one that was previously moved to a
+ * different date) rather than clobbering it. New for 2026-09-10 — no
+ * single-occurrence write existed for Pension before this build.
+ */
+export function applyPensionSingleOccurrenceAmountChange(pension: Pension, newAmount: number, originalDate: string): Pick<Pension, 'occurrenceOverrides'> {
+  const existing = pension.occurrenceOverrides ?? []
+  const priorEntry = existing.find((o) => o.originalDate === originalDate)
+  const withoutThis = existing.filter((o) => o.originalDate !== originalDate)
+  return { occurrenceOverrides: [...withoutThis, { ...priorEntry, originalDate, amount: newAmount }] }
 }
 
 /** Convenience constructor for a new pension with sensible defaults, same role as schedule.ts's newRecurringTemplate. */

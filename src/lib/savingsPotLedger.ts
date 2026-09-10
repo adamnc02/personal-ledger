@@ -125,6 +125,37 @@ function walkDepositOccurrences(pot: SavingsPot, rangeStart: Date, rangeEnd: Dat
  * than a pure pause marker, are never touched by this — this function
  * only reconciles the pause checklist's own window.
  */
+/**
+ * What a SPECIFIC recurring-deposit occurrence resolves to, checking
+ * `recurringDepositOverrides` first — mirrors schedule.ts's
+ * resolveOccurrenceAmount / potLedger.ts's resolvePotDepositOccurrenceAmount
+ * (2026-09-10, "Manage upcoming payments" redesign, call site #4).
+ * `walkDepositOccurrences` above already reads an override's `.amount`
+ * when generating transactions, so the real ledger has always been
+ * correct — this is purely the missing single-date display resolver.
+ * `originalDate` is the un-overridden scheduled date (the override's own
+ * key).
+ */
+export function resolveSavingsPotDepositOccurrenceAmount(pot: SavingsPot, originalDate: string): number {
+  const override = pot.recurringDepositOverrides?.find((o) => o.originalDate === originalDate)
+  if (override?.amount !== undefined) return override.amount
+  return pot.recurringDepositAmount ?? 0
+}
+
+/**
+ * Builds the patch for a SINGLE-occurrence ("just a single payment")
+ * amount change against a SavingsPot's recurring deposit — new for
+ * 2026-09-10, identical shape to potLedger.ts's
+ * applyPotSingleDepositAmountChange. Merges onto any existing override
+ * for the same slot (e.g. a pause) rather than clobbering it.
+ */
+export function applySavingsPotSingleDepositAmountChange(pot: SavingsPot, newAmount: number, originalDate: string): Pick<SavingsPot, 'recurringDepositOverrides'> {
+  const existing = pot.recurringDepositOverrides ?? []
+  const priorEntry = existing.find((o) => o.originalDate === originalDate)
+  const withoutThis = existing.filter((o) => o.originalDate !== originalDate)
+  return { recurringDepositOverrides: [...withoutThis, { ...priorEntry, originalDate, amount: newAmount }] }
+}
+
 export function setPausedDeposits(pot: SavingsPot, windowDates: string[], pausedDates: string[]): Pick<SavingsPot, 'recurringDepositOverrides'> {
   const windowSet = new Set(windowDates)
   const pausedSet = new Set(pausedDates)
