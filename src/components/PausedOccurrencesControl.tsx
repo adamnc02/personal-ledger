@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import { formatCurrency } from '../lib/format'
 import { PauseToggleButton } from './FormButtons'
 import { NumberInput } from './NumberInput'
@@ -114,13 +115,15 @@ export function PausedOccurrencesControl({
   return (
     <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
       {!expanded ? (
-        <button onClick={toggleExpanded} className="text-xs font-semibold" style={{ color: 'var(--color-negative)' }}>
+        <button onClick={toggleExpanded} className="flex items-center gap-1 text-xs font-semibold text-white">
           Manage upcoming payments{currentlyPaused.size > 0 ? ` (${currentlyPaused.size} paused)` : ''}
+          <ChevronDown size={14} />
         </button>
       ) : (
         <div className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
-          <button onClick={toggleExpanded} className="text-xs font-semibold text-[var(--color-ink)] mb-2 text-left">
+          <button onClick={toggleExpanded} className="flex items-center gap-1 text-xs font-semibold text-white mb-2 text-left">
             Manage upcoming payments
+            <ChevronUp size={14} />
           </button>
           <div className="flex flex-col gap-2 max-h-72 overflow-y-auto mb-2">
             {sortedDates.map((date) => {
