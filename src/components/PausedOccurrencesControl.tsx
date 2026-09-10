@@ -1,41 +1,49 @@
 import { useState } from 'react'
 import { formatCurrency } from '../lib/format'
-import { CancelButton, SaveButton, PauseToggleButton } from './FormButtons'
-import { EditField } from './EditField'
+import { PauseToggleButton } from './FormButtons'
+import { NumberInput } from './NumberInput'
 import { ConfirmModal } from './ConfirmModal'
 
-import { ChevronDown, ChevronUp } from 'lucide-react'
-
 /**
- * "Manage upcoming payments" (2026-09-10 redesign, Adam-specified —
- * PROMPT-manage-paused-payments-redesign-2026-09-10.md) — evolved in
- * place from the original checkbox-list PausedOccurrencesControl
- * (2026-09 Phase 4) rather than forked, so all 7 call sites
- * (Bills/recurring Transfers/recurring overpayments/Pot+SavingsPot
- * recurring deposits/Pension/the Salary-page recurring transfer) stay in
- * sync on one shared component. Two independent things now live here,
- * with two independent save mechanics on the same row:
+ * "Manage upcoming payments" (2026-09-10 interaction redesign, Adam-
+ * specified — PROMPT-manage-upcoming-payments-interaction-redesign-
+ * 2026-09-10.md) — evolved in place again from the same-day earlier
+ * redesign (PROMPT-manage-paused-payments-redesign-2026-09-10.md) rather
+ * than forked, so all 7 call sites (Bills/recurring Transfers/recurring
+ * overpayments/Pot+SavingsPot recurring deposits/Pension/the Salary-page
+ * recurring transfer) stay in sync on one shared component.
  *
- *  1. Pause/unpause — a per-row badge (PauseToggleButton), not a
- *     checkbox, but the SAME section-level stage-then-save contract as
- *     before: tapping only flips local `checked` state, the real
- *     `onSave(pausedDates)` write only happens when the section's own
- *     Save is pressed, and Cancel discards every tentative toggle.
- *  2. Per-occurrence amount edit (the genuinely new capability, only
- *     wired up when the caller passes `onSaveAmount`) — tapping a row's
- *     date/amount opens an inline amount field for THAT occurrence only,
- *     with its OWN Save button. That row Save stages {date, oldAmount,
- *     newAmount} and opens a ConfirmModal (same "Clear this balance?"
- *     pattern as Loans.tsx's CreditCardDueSection) — Confirm commits
- *     immediately via `onSaveAmount`, independent of any pending pause
- *     toggles or other rows' edits; Cancel dismisses back to the
- *     still-editable row without saving anything.
+ * Every action on a row is now atomic, self-contained and immediately
+ * persisted — there is no more section-level staging at all:
  *
- * Renamed throughout (collapsed trigger AND expanded header): every
- * per-entity "Manage paused {payments|deposits|overpayments|transfers}"
- * wording is now the one consistent "Manage upcoming payments" label,
- * per Adam's resolved 2026-09-10 call — itemLabel is kept only for the
- * empty-state copy, not the trigger/header text.
+ *  1. Pause ON — tapping an unpaused row's "Pause" badge opens a
+ *     `ConfirmModal` naming the date being paused. Confirm calls
+ *     `onSave` immediately with that one date added to the real
+ *     `currentlyPaused` set. Cancel just closes the modal.
+ *  2. Pause OFF — tapping an already-paused row's "Paused" badge
+ *     un-pauses it straight away, no modal, `onSave` fires immediately.
+ *  3. Amount edit — tapping the row swaps its own amount display into an
+ *     editable input directly in place (no separate field below any
+ *     more), and the row's Pause/Paused badge morphs into a "Save"
+ *     button for as long as that row is being edited. Tapping Save opens
+ *     the same `ConfirmModal` pattern, naming the date and old→new
+ *     amount; Confirm calls `onSaveAmount` and the row reverts to
+ *     display mode, with its badge reverting to whatever pause state it
+ *     already had (pause state and amount-edit state are orthogonal —
+ *     they just now share one button slot instead of two separate
+ *     controls). Tapping the same row again while already editing exits
+ *     edit mode without saving, same toggle-off `editingDate` already
+ *     had before this redesign.
+ *
+ * There's no more local `checked` staging set and no section-level
+ * Cancel/Save pair — `currentlyPaused` (the real prop) is the only
+ * source of truth every pause badge reads from, so `nextPaymentPreview`
+ * is always called with `[...currentlyPaused]` too (showing the current,
+ * already-persisted "N paused · Next payment" line, not a pending one).
+ *
+ * The collapsed "Manage upcoming payments" trigger now toggles the
+ * section open AND closed (there's no other way to close it any more,
+ * since Cancel is gone).
  */
 export function PausedOccurrencesControl({
   windowDates,
@@ -49,49 +57,46 @@ export function PausedOccurrencesControl({
   windowDates: string[]
   currentlyPaused: Set<string>
   amountForDate: (date: string) => number
-  /** Given the tentative (not-yet-saved) full pause set, returns the next date that would actually go ahead — or null if nothing's scheduled. Lets the picker preview the real effect of what's currently ticked, same as before. */
-  nextPaymentPreview: (tentativePausedDates: string[]) => string | null
+  /** Given the full set of currently-paused dates, returns the next date that would actually go ahead — or null if nothing's scheduled. */
+  nextPaymentPreview: (pausedDates: string[]) => string | null
   onSave: (pausedDates: string[]) => void
   itemLabel?: string
   /**
    * When provided, each row also gets a tap-to-edit inline amount editor
-   * for that ONE occurrence, with its own per-row Save + ConfirmModal —
-   * see this component's own header comment for the full save-model
-   * split from the pause toggle above. `originalDate` is always the
+   * for that ONE occurrence — see this component's own header comment
+   * for the full interaction model. `originalDate` is always the
    * occurrence's un-overridden scheduled date (the same key
    * `windowDates`/`currentlyPaused` already use), matching every
    * existing occurrenceOverrides-keyed write in the app. Omit for an
-   * entity with no single-occurrence amount write at all (none remain
-   * after this build, but kept optional rather than required).
+   * entity with no single-occurrence amount write at all.
    */
   onSaveAmount?: (originalDate: string, newAmount: number) => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const [checked, setChecked] = useState<Set<string>>(new Set())
   const [editingDate, setEditingDate] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
-  const [confirming, setConfirming] = useState<{ date: string; oldAmount: number; newAmount: number } | null>(null)
+  const [confirming, setConfirming] = useState<
+    { kind: 'pause'; date: string } | { kind: 'amount'; date: string; oldAmount: number; newAmount: number } | null
+  >(null)
 
-  function expand() {
-    setChecked(new Set(currentlyPaused))
-    setExpanded(true)
-  }
-  function togglePause(date: string) {
-    setChecked((prev) => {
-      const next = new Set(prev)
-      if (next.has(date)) next.delete(date)
-      else next.add(date)
-      return next
+  function toggleExpanded() {
+    setExpanded((prev) => {
+      if (prev) {
+        // Collapsing — nothing left mid-flight should linger for next time it opens.
+        setEditingDate(null)
+        setConfirming(null)
+      }
+      return !prev
     })
   }
-  function commitPauseSave() {
-    onSave([...checked])
-    setExpanded(false)
-  }
-  function cancelSection() {
-    setExpanded(false)
-    setEditingDate(null)
-    setConfirming(null)
+  function handlePauseBadgeClick(date: string) {
+    if (currentlyPaused.has(date)) {
+      // Pause OFF — no confirmation, auto-save immediately.
+      onSave([...currentlyPaused].filter((d) => d !== date))
+    } else {
+      // Pause ON — confirm first.
+      setConfirming({ kind: 'pause', date })
+    }
   }
   function startEditing(date: string) {
     setEditingDate((prev) => (prev === date ? null : date))
@@ -100,68 +105,89 @@ export function PausedOccurrencesControl({
   function requestSaveAmount(date: string) {
     const newAmount = Number(editValue)
     if (!Number.isFinite(newAmount)) return
-    setConfirming({ date, oldAmount: amountForDate(date), newAmount })
+    setConfirming({ kind: 'amount', date, oldAmount: amountForDate(date), newAmount })
   }
 
-  const nextPayment = expanded ? nextPaymentPreview([...checked]) : null
+  const nextPayment = expanded ? nextPaymentPreview([...currentlyPaused]) : null
   const sortedDates = [...windowDates].sort()
 
   return (
     <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
       {!expanded ? (
-        <button onClick={expand} className="text-xs font-semibold" style={{ color: 'var(--color-negative)' }}>
+        <button onClick={toggleExpanded} className="text-xs font-semibold" style={{ color: 'var(--color-negative)' }}>
           Manage upcoming payments{currentlyPaused.size > 0 ? ` (${currentlyPaused.size} paused)` : ''}
         </button>
       ) : (
         <div className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
-          <p className="text-xs font-semibold text-[var(--color-ink)] mb-2">Manage upcoming payments</p>
+          <button onClick={toggleExpanded} className="text-xs font-semibold text-[var(--color-ink)] mb-2 text-left">
+            Manage upcoming payments
+          </button>
           <div className="flex flex-col gap-2 max-h-72 overflow-y-auto mb-2">
             {sortedDates.map((date) => {
-              const isPaused = checked.has(date)
+              const isPaused = currentlyPaused.has(date)
               const isEditing = editingDate === date
               return (
                 <div key={date} className="rounded-xl px-3 py-2" style={{ background: 'var(--color-surface)' }}>
                   <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className={`flex-1 min-w-0 flex items-center justify-between gap-2 text-left ${onSaveAmount ? '' : 'cursor-default'}`}
+                    <div
+                      role={onSaveAmount ? 'button' : undefined}
+                      tabIndex={onSaveAmount ? 0 : undefined}
+                      className={`flex-1 min-w-0 flex items-center justify-between gap-2 text-left ${onSaveAmount ? 'cursor-pointer' : ''}`}
                       onClick={() => onSaveAmount && startEditing(date)}
                     >
                       <span className="text-sm text-[var(--color-ink)]">{date}</span>
-                      <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(amountForDate(date))}</span>
-                      {onSaveAmount && (isEditing ? <ChevronUp size={14} className="text-[var(--color-ink-faint)] shrink-0" /> : <ChevronDown size={14} className="text-[var(--color-ink-faint)] shrink-0" />)}
-                    </button>
-                    <PauseToggleButton paused={isPaused} onClick={() => togglePause(date)} />
-                  </div>
-                  {isEditing && onSaveAmount && (
-                    <div className="mt-2 pt-2 border-t flex items-end gap-2" style={{ borderColor: 'var(--color-track)' }}>
-                      <div className="flex-1">
-                        <EditField label="Amount (£) — this payment only" type="number" value={editValue} onChange={setEditValue} />
-                      </div>
+                      {isEditing ? (
+                        <span className="flex items-center gap-1 font-mono text-sm text-[var(--color-ink)]">
+                          £
+                          <NumberInput
+                            value={editValue}
+                            onChange={setEditValue}
+                            className="w-20 bg-transparent border-b text-right outline-none font-mono text-sm text-[var(--color-ink)]"
+                            style={{ borderColor: 'var(--color-track)' }}
+                            autoFocus
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </span>
+                      ) : (
+                        <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(amountForDate(date))}</span>
+                      )}
+                    </div>
+                    {isEditing ? (
                       <button
                         onClick={() => requestSaveAmount(date)}
-                        className="py-2 px-3 rounded-full text-xs font-semibold text-white shrink-0"
+                        className="shrink-0 px-3 py-1 rounded-full text-xs font-semibold text-white"
                         style={{ background: 'var(--color-coral)' }}
                       >
                         Save
                       </button>
-                    </div>
-                  )}
+                    ) : (
+                      <PauseToggleButton paused={isPaused} onClick={() => handlePauseBadgeClick(date)} />
+                    )}
+                  </div>
                 </div>
               )
             })}
             {sortedDates.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] px-1">Nothing scheduled to pick from — no upcoming or recent {itemLabel}.</p>}
           </div>
-          <p className="text-xs text-[var(--color-ink-muted)] mb-1">
-            {checked.size} paused · Next payment: {nextPayment ?? 'none scheduled'}
+          <p className="text-xs text-[var(--color-ink-muted)]">
+            {currentlyPaused.size} paused · Next payment: {nextPayment ?? 'none scheduled'}
           </p>
-          <div className="flex gap-2 mt-2">
-            <CancelButton onClick={cancelSection} />
-            <SaveButton onClick={commitPauseSave} />
-          </div>
         </div>
       )}
-      {confirming && (
+      {confirming?.kind === 'pause' && (
+        <ConfirmModal
+          title="Pause this payment?"
+          description={`The payment on ${confirming.date} for £${formatCurrency(amountForDate(confirming.date))} won't go ahead until you resume it.`}
+          confirmLabel="Confirm"
+          cancelLabel="Cancel"
+          onConfirm={() => {
+            onSave([...currentlyPaused, confirming.date])
+            setConfirming(null)
+          }}
+          onCancel={() => setConfirming(null)}
+        />
+      )}
+      {confirming?.kind === 'amount' && (
         <ConfirmModal
           title="Update this payment?"
           description={`Changes the payment on ${confirming.date} from £${formatCurrency(confirming.oldAmount)} to £${formatCurrency(confirming.newAmount)}. Every other payment — before and after — is unaffected.`}
