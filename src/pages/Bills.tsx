@@ -574,7 +574,11 @@ function BillEditPanel({
   const pauseWindowStart = addMonths(new Date(), -2)
   const pauseWindowEnd = addMonths(new Date(), 12)
   const pauseWindowDates = scheduledTemplateDates(template, pauseWindowStart, pauseWindowEnd)
-  const currentlyPausedDates = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && pauseWindowDates.includes(o.originalDate)).map((o) => o.originalDate))
+  // UAT 2026-09-11 (manage-upcoming-payments-override-key-bug) —
+  // pauseWindowDates is now { originalDate, date } pairs, not a flat
+  // string[]; membership/override matching must key off .originalDate.
+  const pauseWindowOriginalDates = new Set(pauseWindowDates.map((p) => p.originalDate))
+  const currentlyPausedDates = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && pauseWindowOriginalDates.has(o.originalDate)).map((o) => o.originalDate))
 
   function update(patch: Partial<BillDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
@@ -745,10 +749,10 @@ function BillEditPanel({
           amountForDate={(date) => resolveOccurrenceAmount(template, date)}
           itemLabel="payments"
           nextPaymentPreview={(tentative) => {
-            const previewTemplate: RecurringTemplate = { ...template, ...setPausedTemplateOccurrences(template, pauseWindowDates, tentative) }
+            const previewTemplate: RecurringTemplate = { ...template, ...setPausedTemplateOccurrences(template, [...pauseWindowOriginalDates], tentative) }
             return templateOccurrencePreviews(previewTemplate, new Date(), 1)[0]?.date ?? null
           }}
-          onSave={(pausedDates) => onSave(setPausedTemplateOccurrences(template, pauseWindowDates, pausedDates))}
+          onSave={(pausedDates) => onSave(setPausedTemplateOccurrences(template, [...pauseWindowOriginalDates], pausedDates))}
           onSaveAmount={(originalDate, newAmount) => onSave(applyTemplateSingleOccurrenceAmountChange(template, newAmount, originalDate))}
         />
       </div>

@@ -55,7 +55,19 @@ export function PausedOccurrencesControl({
   itemLabel = 'payments',
   onSaveAmount,
 }: {
-  windowDates: string[]
+  /**
+   * UAT 2026-09-11 (manage-upcoming-payments-override-key-bug) —
+   * `scheduledTemplateDates` now returns the natural `originalDate`
+   * (occurrenceOverrides' own key) alongside the resolved/displayed
+   * `date`, instead of just the resolved date. Every identity/override
+   * operation below (pause toggle, amount edit, onSave/onSaveAmount,
+   * React key) MUST use `.originalDate` — only rendering/sorting uses
+   * `.date`. Passing the resolved date as the override key silently
+   * broke pause/amount-edit for follows-payday/follows-cycle-start
+   * transfers, since occurrenceOverrides and walkOccurrences both key
+   * off the natural date.
+   */
+  windowDates: { originalDate: string; date: string }[]
   currentlyPaused: Set<string>
   amountForDate: (date: string) => number
   /** Given the full set of currently-paused dates, returns the next date that would actually go ahead — or null if nothing's scheduled. */
@@ -77,7 +89,9 @@ export function PausedOccurrencesControl({
   const [editingDate, setEditingDate] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [confirming, setConfirming] = useState<
-    { kind: 'pause'; date: string } | { kind: 'amount'; date: string; oldAmount: number; newAmount: number } | null
+    | { kind: 'pause'; originalDate: string; displayDate: string }
+    | { kind: 'amount'; originalDate: string; displayDate: string; oldAmount: number; newAmount: number }
+    | null
   >(null)
 
   function toggleExpanded() {
@@ -90,27 +104,27 @@ export function PausedOccurrencesControl({
       return !prev
     })
   }
-  function handlePauseBadgeClick(date: string) {
-    if (currentlyPaused.has(date)) {
+  function handlePauseBadgeClick(originalDate: string, displayDate: string) {
+    if (currentlyPaused.has(originalDate)) {
       // Pause OFF — no confirmation, auto-save immediately.
-      onSave([...currentlyPaused].filter((d) => d !== date))
+      onSave([...currentlyPaused].filter((d) => d !== originalDate))
     } else {
       // Pause ON — confirm first.
-      setConfirming({ kind: 'pause', date })
+      setConfirming({ kind: 'pause', originalDate, displayDate })
     }
   }
-  function startEditing(date: string) {
-    setEditingDate((prev) => (prev === date ? null : date))
-    setEditValue(String(amountForDate(date)))
+  function startEditing(originalDate: string) {
+    setEditingDate((prev) => (prev === originalDate ? null : originalDate))
+    setEditValue(String(amountForDate(originalDate)))
   }
-  function requestSaveAmount(date: string) {
+  function requestSaveAmount(originalDate: string, displayDate: string) {
     const newAmount = Number(editValue)
     if (!Number.isFinite(newAmount)) return
-    setConfirming({ kind: 'amount', date, oldAmount: amountForDate(date), newAmount })
+    setConfirming({ kind: 'amount', originalDate, displayDate, oldAmount: amountForDate(originalDate), newAmount })
   }
 
   const nextPayment = expanded ? nextPaymentPreview([...currentlyPaused]) : null
-  const sortedDates = [...windowDates].sort()
+  const sortedDates = [...windowDates].sort((a, b) => a.date.localeCompare(b.date))
 
   return (
     <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
@@ -126,17 +140,17 @@ export function PausedOccurrencesControl({
             <ChevronUp size={14} />
           </button>
           <div className="flex flex-col gap-2 max-h-72 overflow-y-auto mb-2">
-            {sortedDates.map((date) => {
-              const isPaused = currentlyPaused.has(date)
-              const isEditing = editingDate === date
+            {sortedDates.map(({ originalDate, date }) => {
+              const isPaused = currentlyPaused.has(originalDate)
+              const isEditing = editingDate === originalDate
               return (
-                <div key={date} className="rounded-xl px-3 py-2" style={{ background: 'var(--color-surface)' }}>
+                <div key={originalDate} className="rounded-xl px-3 py-2" style={{ background: 'var(--color-surface)' }}>
                   <div className="flex items-center gap-2">
                     <div
                       role={onSaveAmount ? 'button' : undefined}
                       tabIndex={onSaveAmount ? 0 : undefined}
                       className={`flex-1 min-w-0 flex items-center justify-between gap-2 text-left ${onSaveAmount ? 'cursor-pointer' : ''}`}
-                      onClick={() => onSaveAmount && startEditing(date)}
+                      onClick={() => onSaveAmount && startEditing(originalDate)}
                     >
                       <span className="text-sm text-[var(--color-ink)]">{date}</span>
                       {isEditing ? (
@@ -152,19 +166,19 @@ export function PausedOccurrencesControl({
                           />
                         </span>
                       ) : (
-                        <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(amountForDate(date))}</span>
+                        <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(amountForDate(originalDate))}</span>
                       )}
                     </div>
                     {isEditing ? (
                       <button
-                        onClick={() => requestSaveAmount(date)}
+                        onClick={() => requestSaveAmount(originalDate, date)}
                         className="shrink-0 px-3 py-1 rounded-full text-xs font-semibold text-white"
                         style={{ background: 'var(--color-coral)' }}
                       >
                         Save
                       </button>
                     ) : (
-                      <PauseToggleButton paused={isPaused} onClick={() => handlePauseBadgeClick(date)} />
+                      <PauseToggleButton paused={isPaused} onClick={() => handlePauseBadgeClick(originalDate, date)} />
                     )}
                   </div>
                 </div>
@@ -180,11 +194,11 @@ export function PausedOccurrencesControl({
       {confirming?.kind === 'pause' && (
         <ConfirmModal
           title="Pause this payment?"
-          description={`The payment on ${confirming.date} for £${formatCurrency(amountForDate(confirming.date))} won't go ahead until you resume it.`}
+          description={`The payment on ${confirming.displayDate} for £${formatCurrency(amountForDate(confirming.originalDate))} won't go ahead until you resume it.`}
           confirmLabel="Confirm"
           cancelLabel="Cancel"
           onConfirm={() => {
-            onSave([...currentlyPaused, confirming.date])
+            onSave([...currentlyPaused, confirming.originalDate])
             setConfirming(null)
           }}
           onCancel={() => setConfirming(null)}
@@ -193,11 +207,11 @@ export function PausedOccurrencesControl({
       {confirming?.kind === 'amount' && (
         <ConfirmModal
           title="Update this payment?"
-          description={`Changes the payment on ${confirming.date} from £${formatCurrency(confirming.oldAmount)} to £${formatCurrency(confirming.newAmount)}. Every other payment — before and after — is unaffected.`}
+          description={`Changes the payment on ${confirming.displayDate} from £${formatCurrency(confirming.oldAmount)} to £${formatCurrency(confirming.newAmount)}. Every other payment — before and after — is unaffected.`}
           confirmLabel="Confirm"
           cancelLabel="Cancel"
           onConfirm={() => {
-            onSaveAmount?.(confirming.date, confirming.newAmount)
+            onSaveAmount?.(confirming.originalDate, confirming.newAmount)
             setConfirming(null)
             setEditingDate(null)
           }}

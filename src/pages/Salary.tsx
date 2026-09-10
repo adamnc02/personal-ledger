@@ -425,7 +425,12 @@ function PensionRow({
               <span className="text-xs text-[var(--color-ink-muted)]">Active — paused pensions stop generating new payments</span>
             </label>
             <PausedOccurrencesControl
-              windowDates={pauseWindowDates}
+              // scheduledPensionDates has no payday/cycle-start resolution
+              // concept, so its natural date IS its display date — wrap
+              // as trivial {originalDate, date} pairs to match
+              // PausedOccurrencesControl's shared prop shape (UAT
+              // 2026-09-11, manage-upcoming-payments-override-key-bug).
+              windowDates={pauseWindowDates.map((d) => ({ originalDate: d, date: d }))}
               currentlyPaused={currentlyPausedPensionDates}
               amountForDate={(date) => resolvePensionOccurrenceAmount(pension, date)}
               itemLabel="payments"

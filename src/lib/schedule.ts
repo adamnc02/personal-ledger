@@ -311,8 +311,26 @@ export function templateOccurrencePreviews(template: RecurringTemplate, asOfDate
  * above), so it needs the same resolution applied explicitly here too,
  * or the pause picker's candidate dates would disagree with what
  * "Manage upcoming payments" actually shows/generates.
+ *
+ * UAT 2026-09-11 (manage-upcoming-payments-override-key-bug) — this used
+ * to return only the resolved `string[]`, discarding the natural
+ * anchor-walked date entirely. Every caller then wrongly used that
+ * RESOLVED date as if it were the `originalDate` key that
+ * occurrenceOverrides actually store and walkOccurrences actually looks
+ * up by, so pausing/amount-editing a follows-payday transfer's next
+ * occurrence via "Manage upcoming payments" silently failed to apply
+ * (Adam's exact repro). Now returns the same `{ originalDate, date }`
+ * pair shape as RawOccurrence — `originalDate` is the natural,
+ * unresolved key for override matching, `date` is what should be
+ * displayed/sorted by. Callers must key all identity/override
+ * operations off `.originalDate` and only use `.date` for display.
  */
-export function scheduledTemplateDates(template: RecurringTemplate, rangeStart: Date, rangeEnd: Date, payCycle?: PayCycleConfig): string[] {
+export function scheduledTemplateDates(
+  template: RecurringTemplate,
+  rangeStart: Date,
+  rangeEnd: Date,
+  payCycle?: PayCycleConfig,
+): { originalDate: string; date: string }[] {
   if (rangeEnd < rangeStart) return []
   const anchor = new Date(template.anchorDate)
   const anchorDay = anchor.getDate()
@@ -322,9 +340,10 @@ export function scheduledTemplateDates(template: RecurringTemplate, rangeStart: 
     cursor = nextOccurrence(cursor, template, anchorDay)
     iterations++
   }
-  const results: string[] = []
+  const results: { originalDate: string; date: string }[] = []
   while (cursor <= rangeEnd && iterations < MAX_OCCURRENCES) {
-    results.push(resolveTemplateOccurrenceDate(toIso(cursor), template, payCycle))
+    const originalDate = toIso(cursor)
+    results.push({ originalDate, date: resolveTemplateOccurrenceDate(originalDate, template, payCycle) })
     cursor = nextOccurrence(cursor, template, anchorDay)
     iterations++
   }

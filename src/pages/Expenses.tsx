@@ -2251,7 +2251,13 @@ function LoanRecurringOverpaymentEditForm({
           own placement spec — previously sat above the editable fields,
           the one call site out of 7 that didn't match. */}
       <PausedOccurrencesControl
-        windowDates={windowDates}
+        // windowEntries' own .date is already both the display AND
+        // identity key this component's onSave/onSaveAmount/currentlyPaused
+        // use (periodDateFor/realDateFor handle the underlying-schedule
+        // translation internally, below) — trivial pairs, no resolution
+        // concept here (UAT 2026-09-11, manage-upcoming-payments-override-
+        // key-bug — matches PausedOccurrencesControl's shared prop shape).
+        windowDates={windowDates.map((d) => ({ originalDate: d, date: d }))}
         currentlyPaused={new Set((value.pausedDates ?? []).map(realDateFor))}
         amountForDate={(date) => {
           const resolved = resolveRecurringOverpaymentAmount(value, periodDateFor(date))
@@ -2435,8 +2441,22 @@ function TransferRecurringRow({
   // overpayment/Pot/SavingsPot (all of which already use this same
   // -2/+12 window) and making it impossible to review or single-
   // occurrence-edit a transfer payment dated on or before today at all.
+  // UAT 2026-09-11 (manage-upcoming-payments-override-key-bug) —
+  // scheduledTemplateDates now returns { originalDate, date } pairs:
+  // `date` is the payday/cycle-start-RESOLVED date for display, but
+  // `originalDate` (the natural, unresolved anchor-walked date) is what
+  // occurrenceOverrides/walkOccurrences actually key on. Previously this
+  // returned only the resolved date as a flat string[], which was then
+  // wrongly used as the override key below AND passed straight into
+  // setPausedTemplateOccurrences/amountForDate/onSaveAmount as if it were
+  // the natural date — for a follows-payday/follows-cycle-start transfer
+  // (the only real-world case where resolved date != natural date),
+  // pausing or single-occurrence-amount-editing the next occurrence via
+  // "Manage upcoming payments" silently never matched a real occurrence,
+  // so it appeared to save but had no effect on the real schedule.
   const windowDates = scheduledTemplateDates(template, addMonths(new Date(), -2), addMonths(new Date(), 12), payCycle)
-  const currentlyPaused = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && windowDates.includes(o.originalDate)).map((o) => o.originalDate))
+  const windowOriginalDates = new Set(windowDates.map((w) => w.originalDate))
+  const currentlyPaused = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && windowOriginalDates.has(o.originalDate)).map((o) => o.originalDate))
   const nextOccurrence = templateOccurrencePreviews(template, new Date(), 1, payCycle)[0]
 
   function locationChangeFields(): RecurringChangeField[] {
@@ -2680,10 +2700,10 @@ function TransferRecurringRow({
               amountForDate={(date) => resolveOccurrenceAmount(template, date)}
               itemLabel="transfers"
               nextPaymentPreview={(tentative) => {
-                const previewTemplate: RecurringTemplate = { ...template, ...setPausedTemplateOccurrences(template, windowDates, tentative) }
+                const previewTemplate: RecurringTemplate = { ...template, ...setPausedTemplateOccurrences(template, [...windowOriginalDates], tentative) }
                 return templateOccurrencePreviews(previewTemplate, new Date(), 1, payCycle)[0]?.date ?? null
               }}
-              onSave={(pausedDates) => onUpdate(setPausedTemplateOccurrences(template, windowDates, pausedDates))}
+              onSave={(pausedDates) => onUpdate(setPausedTemplateOccurrences(template, [...windowOriginalDates], pausedDates))}
               onSaveAmount={(originalDate, newAmount) => onUpdate(applyTemplateSingleOccurrenceAmountChange(template, newAmount, originalDate))}
             />
           </div>
@@ -3213,7 +3233,11 @@ function SavingsRecurringDepositRow({ pot, onSave }: { pot: SavingsPot; onSave: 
             Remove recurring deposit
           </button>
           <PausedOccurrencesControl
-            windowDates={windowDates}
+            // scheduledDepositDates has no payday/cycle-start resolution
+            // concept — trivial pairs (UAT 2026-09-11, manage-upcoming-
+            // payments-override-key-bug — matches PausedOccurrencesControl's
+            // shared prop shape).
+            windowDates={windowDates.map((d) => ({ originalDate: d, date: d }))}
             currentlyPaused={currentlyPaused}
             amountForDate={(date) => resolveSavingsPotDepositOccurrenceAmount(pot, date)}
             itemLabel="deposits"
@@ -3277,7 +3301,11 @@ function PotRecurringDepositRow({ pot, onSave }: { pot: Pot; onSave: (updates: P
             Remove recurring deposit
           </button>
           <PausedOccurrencesControl
-            windowDates={windowDates}
+            // scheduledPotDepositDates has no payday/cycle-start resolution
+            // concept — trivial pairs (UAT 2026-09-11, manage-upcoming-
+            // payments-override-key-bug — matches PausedOccurrencesControl's
+            // shared prop shape).
+            windowDates={windowDates.map((d) => ({ originalDate: d, date: d }))}
             currentlyPaused={currentlyPaused}
             amountForDate={(date) => resolvePotDepositOccurrenceAmount(pot, date)}
             itemLabel="deposits"
