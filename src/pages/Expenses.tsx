@@ -25,13 +25,13 @@ import {
   type RawOccurrence,
 } from '../lib/schedule'
 import { transferLocationLabel, buildTransferLocationOptions, transferLocationKey, locationsEqual, type TransferLocationOption } from '../lib/transferLedger'
-import { LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
+import { LocationStep, FrequencyStep, DateStep, TransferFrequencySelect, type TransferFrequencyChoice, resolveTransferFrequencyChoice, transferFrequencyChoiceFor } from '../components/TransferSteps'
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfirmModal'
 import { EffectiveDatedChangeFlow, type RecurringChangeField, type ChangeScope } from '../components/EffectiveDatedChangeFlow'
 import { addYears, addDays, addMonths } from 'date-fns'
-import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard, LoanRecurringOverpayment, Category } from '../types/ledger'
+import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard, LoanRecurringOverpayment, Category, PayCycleConfig } from '../types/ledger'
 import type { LoggedPayment } from './Loans'
 import {
   previewOverpaymentRecast,
@@ -577,6 +577,7 @@ export function Expenses() {
                 savingsPots={data.savingsPots}
                 pots={data.pots}
                 locationOptions={transferLocationOptions}
+                payCycle={data.payCycles.find((pc) => pc.personId === data.primaryPersonId)}
                 onUpdate={(u) => updateRecurringTemplate(template.id, u)}
                 onRemove={() => removeRecurringTemplate(template.id)}
                 shouldFlashOnMount={justCreatedTransferId === template.id}
@@ -2304,6 +2305,7 @@ function TransferRecurringRow({
   savingsPots,
   pots,
   locationOptions,
+  payCycle,
   onUpdate,
   onRemove,
   shouldFlashOnMount,
@@ -2313,6 +2315,13 @@ function TransferRecurringRow({
   savingsPots: SavingsPot[]
   pots: Pot[]
   locationOptions: TransferLocationOption[]
+  /** UAT 2026-09-10 (recurring-payday-date-editing, Bug A) — needed so
+   * this row's own preview surfaces (next-occurrence label, "Manage
+   * upcoming payments" window/pause picker) resolve a follows-payday/
+   * follows-cycle-start transfer's dates the same way the real generated
+   * transaction already does, instead of showing the raw, unresolved,
+   * naturally-walked date. */
+  payCycle?: PayCycleConfig
   onUpdate: (updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemove: () => void
   /** Batch 9 (2026-09-07, Bug 11) — true for exactly one render right
@@ -2322,6 +2331,7 @@ function TransferRecurringRow({
   onFlashedOnMount?: () => void
 }) {
   const [open, setOpen] = useState(false)
+  const [name, setName] = useState(template.name)
   // Batch 9 (2026-09-07, Bug 11) — the "Save changes"/"Save amount" button
   // below always edits an EXISTING recurring transfer, so "updated" is
   // always the right wording for it; a brand-new one flashes "Transfer
@@ -2366,6 +2376,7 @@ function TransferRecurringRow({
     setAmount(String(template.amount))
     setTransferFrom(template.transferFrom)
     setTransferTo(template.transferTo)
+    setName(template.name)
     setChoosingEffectiveDate(false)
     setLocationOnlyConfirm(false)
     setOpen(false)
@@ -2377,6 +2388,12 @@ function TransferRecurringRow({
   const toLabel = transferLocationLabel(template.transferTo, savingsPots, pots)
   const locationsDirty = !locationsEqual(transferFrom, template.transferFrom) || !locationsEqual(transferTo, template.transferTo)
   const amountDirty = Number(amount) > 0 && Number(amount) !== template.amount
+  // Bug C (UAT 2026-09-10) — a recurring transfer's own Name, same
+  // pattern Bills'/recurring-Transactions' edit panels already use,
+  // wired straight to onUpdate({ name }); has no historization needs
+  // (unlike amount), so it rides along with whichever immediate-apply
+  // path below actually fires.
+  const nameDirty = name.trim().length > 0 && name.trim() !== template.name
 
   // UAT 2026-09-10 (mup-samedate-transfer) — this used to start the window
   // at `new Date()` (today, WITH the current time-of-day), matching
@@ -2389,23 +2406,24 @@ function TransferRecurringRow({
   // overpayment/Pot/SavingsPot (all of which already use this same
   // -2/+12 window) and making it impossible to review or single-
   // occurrence-edit a transfer payment dated on or before today at all.
-  const windowDates = scheduledTemplateDates(template, addMonths(new Date(), -2), addMonths(new Date(), 12))
+  const windowDates = scheduledTemplateDates(template, addMonths(new Date(), -2), addMonths(new Date(), 12), payCycle)
   const currentlyPaused = new Set((template.occurrenceOverrides ?? []).filter((o) => o.deleted && windowDates.includes(o.originalDate)).map((o) => o.originalDate))
-  const nextOccurrence = templateOccurrencePreviews(template, new Date(), 1)[0]
+  const nextOccurrence = templateOccurrencePreviews(template, new Date(), 1, payCycle)[0]
 
   function locationChangeFields(): RecurringChangeField[] {
     const fields: RecurringChangeField[] = []
     if (!locationsEqual(transferFrom, template.transferFrom)) fields.push({ label: 'From', from: fromLabel, to: transferFrom ? transferLocationLabel(transferFrom, savingsPots, pots) : '—' })
     if (!locationsEqual(transferTo, template.transferTo)) fields.push({ label: 'To', from: toLabel, to: transferTo ? transferLocationLabel(transferTo, savingsPots, pots) : '—' })
+    if (nameDirty) fields.push({ label: 'Name', from: template.name, to: name.trim() })
     return fields
   }
 
   function handleSaveClick() {
     const amountNumber = Number(amount)
-    if (!amountDirty && !locationsDirty) return
+    if (!amountDirty && !locationsDirty && !nameDirty) return
     // A genuine standing amount change is routed through "which payment
     // should this apply from," same gate as Bills.tsx/
-    // RecurringTransactionEditPanel — everything else (frequency,
+    // RecurringTransactionEditPanel — everything else (frequency, name,
     // followsPayday, etc.) still saves immediately via their own inline
     // handlers below, unaffected by this button.
     if (amountDirty && recentAndUpcomingOccurrences(template, new Date()).length > 0) {
@@ -2420,15 +2438,26 @@ function TransferRecurringRow({
         updates.transferFrom = transferFrom
         updates.transferTo = transferTo
       }
+      if (nameDirty) updates.name = name.trim()
       onUpdate(updates)
       triggerFlash()
       setOpen(false)
       return
     }
-    // Location-only change — no amountHistory-style mechanism exists for
-    // From/To (see the state comment above), so this just confirms then
-    // applies immediately (today), rather than asking for a date that
-    // has nothing to anchor to.
+    // A pure name-only change (no amount/location dirty) has nothing to
+    // confirm — same as Bills'/recurring-Transactions' Name field, it
+    // just saves straight through.
+    if (nameDirty && !locationsDirty) {
+      onUpdate({ name: name.trim() })
+      triggerFlash()
+      setOpen(false)
+      return
+    }
+    // Location-only change (name may also be dirty alongside it) — no
+    // amountHistory-style mechanism exists for From/To (see the state
+    // comment above), so this just confirms then applies immediately
+    // (today), rather than asking for a date that has nothing to anchor
+    // to.
     if (transferFrom && transferTo) {
       setLocationOnlyConfirm(true)
     }
@@ -2472,6 +2501,7 @@ function TransferRecurringRow({
                 updates.transferFrom = transferFrom
                 updates.transferTo = transferTo
               }
+              if (nameDirty) updates.name = name.trim()
               onUpdate(updates)
               // A single-occurrence change leaves the STANDING amount
               // untouched — reset the local draft back to it so the field
@@ -2490,7 +2520,13 @@ function TransferRecurringRow({
             changes={locationChangeFields()}
             onCancel={cancelEverything}
             onConfirm={() => {
-              if (transferFrom && transferTo) onUpdate({ transferFrom, transferTo })
+              const updates: Partial<Omit<RecurringTemplate, 'id'>> = {}
+              if (transferFrom && transferTo) {
+                updates.transferFrom = transferFrom
+                updates.transferTo = transferTo
+              }
+              if (nameDirty) updates.name = name.trim()
+              onUpdate(updates)
               triggerFlash()
               setOpen(false)
               setLocationOnlyConfirm(false)
@@ -2564,6 +2600,7 @@ function TransferRecurringRow({
                 </button>
               </div>
             )}
+            <EditField label="Name" type="text" value={name} onChange={setName} />
             <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
             {/* UAT 2026-09-08 (followup-confirm-recurring-transfer note) —
                 was a bespoke inline text button whose label flip-flopped
@@ -2575,27 +2612,28 @@ function TransferRecurringRow({
                 setAmount(String(template.amount))
                 setTransferFrom(template.transferFrom)
                 setTransferTo(template.transferTo)
+                setName(template.name)
                 setOpen(false)
               }}
               onSave={handleSaveClick}
-              saveDisabled={!amountDirty && !locationsDirty}
+              saveDisabled={!amountDirty && !locationsDirty && !nameDirty}
             />
-            <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
-              <input
-                type="checkbox"
-                checked={!!template.followsPayday}
-                onChange={(e) => onUpdate({ followsPayday: e.target.checked, followsCycleStart: e.target.checked ? false : template.followsCycleStart })}
-              />
-              Land on payday, even if it moves
-            </label>
-            <label className="flex items-center gap-2 text-xs text-[var(--color-ink-muted)]">
-              <input
-                type="checkbox"
-                checked={!!template.followsCycleStart}
-                onChange={(e) => onUpdate({ followsCycleStart: e.target.checked, followsPayday: e.target.checked ? false : template.followsPayday })}
-              />
-              Land on the start of my budgeting cycle instead
-            </label>
+            {/* Bug B (UAT 2026-09-10) — replaces the two raw followsPayday/
+                followsCycleStart checkboxes with the exact dropdown
+                built for the creation wizard (Adam's own spec: "remove
+                the two checkboxes, and instead use the same options we
+                get in the picker first frequency modal in a single
+                dropdown"). Saves immediately on change, same as the
+                checkboxes it replaces — not gated behind the Save button
+                above, which only covers amount/location/name. */}
+            <TransferFrequencySelect
+              choice={transferFrequencyChoiceFor(template)}
+              intervalWeeks={template.intervalWeeks ?? 1}
+              anchorDate={template.anchorDate}
+              onChoiceChange={(c) => onUpdate({ frequency: resolveTransferFrequencyChoice(c).frequency, followsPayday: resolveTransferFrequencyChoice(c).followsPayday, followsCycleStart: resolveTransferFrequencyChoice(c).followsCycleStart })}
+              onIntervalWeeksChange={(n) => onUpdate({ intervalWeeks: n })}
+              onAnchorDateChange={(v) => onUpdate({ anchorDate: v })}
+            />
             <PausedOccurrencesControl
               windowDates={windowDates}
               currentlyPaused={currentlyPaused}
@@ -2603,7 +2641,7 @@ function TransferRecurringRow({
               itemLabel="transfers"
               nextPaymentPreview={(tentative) => {
                 const previewTemplate: RecurringTemplate = { ...template, ...setPausedTemplateOccurrences(template, windowDates, tentative) }
-                return templateOccurrencePreviews(previewTemplate, new Date(), 1)[0]?.date ?? null
+                return templateOccurrencePreviews(previewTemplate, new Date(), 1, payCycle)[0]?.date ?? null
               }}
               onSave={(pausedDates) => onUpdate(setPausedTemplateOccurrences(template, windowDates, pausedDates))}
               onSaveAmount={(originalDate, newAmount) => onUpdate(applyTemplateSingleOccurrenceAmountChange(template, newAmount, originalDate))}

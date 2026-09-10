@@ -28,7 +28,7 @@ export const TRANSFER_FREQUENCY_LABELS: Record<TransferFrequencyChoice, string> 
   follows_cycle_start: 'Follow my budgeting cycle',
 }
 
-const TRANSFER_FREQUENCY_ORDER: TransferFrequencyChoice[] = [
+export const TRANSFER_FREQUENCY_ORDER: TransferFrequencyChoice[] = [
   'weekly',
   'every_n_weeks',
   'monthly',
@@ -166,6 +166,60 @@ export function FrequencyStep({
         />
       )}
       <FormButtonRow onCancel={onCancel} onSave={onContinue} saveLabel="Continue" saveDisabled={!choice} />
+    </div>
+  )
+}
+
+/**
+ * Drop-in select variant of FrequencyStep, for an already-expanded EDIT
+ * form (Expenses.tsx's TransferRecurringRow) rather than the creation
+ * wizard's own full-screen step — no Cancel/Continue chrome, just the
+ * dropdown itself plus whatever conditional fields the choice implies,
+ * exactly Adam's own spec: "remove the two checkboxes, and instead use
+ * the same options we get in the picker first frequency modal in a
+ * single dropdown, and only show the date/calendar picker in the form if
+ * the selected dropdown value is not follow payday or follow budgeting
+ * cycle." (UAT 2026-09-10, recurring-payday-date-editing.) Reveals the
+ * interval-weeks field for `every_n_weeks` and the date field for every
+ * other real frequency, matching FrequencyStep+DateStep's combined
+ * behaviour in the creation wizard.
+ */
+export function TransferFrequencySelect({
+  choice,
+  intervalWeeks,
+  anchorDate,
+  onChoiceChange,
+  onIntervalWeeksChange,
+  onAnchorDateChange,
+}: {
+  choice: TransferFrequencyChoice
+  intervalWeeks: number
+  anchorDate: string
+  onChoiceChange: (c: TransferFrequencyChoice) => void
+  onIntervalWeeksChange: (n: number) => void
+  onAnchorDateChange: (v: string) => void
+}) {
+  const isFollowChoice = choice === 'follows_payday' || choice === 'follows_cycle_start'
+  return (
+    <div className="flex flex-col gap-2">
+      <label className="flex flex-col gap-1">
+        <span className="text-xs text-[var(--color-ink-muted)]">Frequency</span>
+        <select
+          value={choice}
+          onChange={(e) => onChoiceChange(e.target.value as TransferFrequencyChoice)}
+          className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+        >
+          {TRANSFER_FREQUENCY_ORDER.map((c) => (
+            <option key={c} value={c} style={{ color: '#000' }}>
+              {TRANSFER_FREQUENCY_LABELS[c]}
+            </option>
+          ))}
+        </select>
+      </label>
+      {choice === 'every_n_weeks' && (
+        <EditField label="Every N weeks" type="number" value={String(intervalWeeks)} onChange={(v) => onIntervalWeeksChange(Math.max(1, Number(v) || 1))} />
+      )}
+      {!isFollowChoice && <EditField label="Date" type="date" value={anchorDate} onChange={onAnchorDateChange} />}
     </div>
   )
 }
