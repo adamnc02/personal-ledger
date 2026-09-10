@@ -2602,6 +2602,25 @@ function TransferRecurringRow({
             )}
             <EditField label="Name" type="text" value={name} onChange={setName} />
             <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+            {/* Bug B (UAT 2026-09-10) — replaces the two raw followsPayday/
+                followsCycleStart checkboxes with the exact dropdown
+                built for the creation wizard (Adam's own spec: "remove
+                the two checkboxes, and instead use the same options we
+                get in the picker first frequency modal in a single
+                dropdown"). Saves immediately on change, same as the
+                checkboxes it replaces — not gated behind the Save button
+                below, which only covers amount/location/name. Placed
+                ABOVE the Cancel/Save row (UAT 2026-09-11 fix) so that row
+                stays the last visible thing before "Manage upcoming
+                payments", matching every other edit form in the app. */}
+            <TransferFrequencySelect
+              choice={transferFrequencyChoiceFor(template)}
+              intervalWeeks={template.intervalWeeks ?? 1}
+              anchorDate={template.anchorDate}
+              onChoiceChange={(c) => onUpdate({ frequency: resolveTransferFrequencyChoice(c).frequency, followsPayday: resolveTransferFrequencyChoice(c).followsPayday, followsCycleStart: resolveTransferFrequencyChoice(c).followsCycleStart })}
+              onIntervalWeeksChange={(n) => onUpdate({ intervalWeeks: n })}
+              onAnchorDateChange={(v) => onUpdate({ anchorDate: v })}
+            />
             {/* UAT 2026-09-08 (followup-confirm-recurring-transfer note) —
                 was a bespoke inline text button whose label flip-flopped
                 between "Save amount"/"Save changes"; now the same
@@ -2617,22 +2636,6 @@ function TransferRecurringRow({
               }}
               onSave={handleSaveClick}
               saveDisabled={!amountDirty && !locationsDirty && !nameDirty}
-            />
-            {/* Bug B (UAT 2026-09-10) — replaces the two raw followsPayday/
-                followsCycleStart checkboxes with the exact dropdown
-                built for the creation wizard (Adam's own spec: "remove
-                the two checkboxes, and instead use the same options we
-                get in the picker first frequency modal in a single
-                dropdown"). Saves immediately on change, same as the
-                checkboxes it replaces — not gated behind the Save button
-                above, which only covers amount/location/name. */}
-            <TransferFrequencySelect
-              choice={transferFrequencyChoiceFor(template)}
-              intervalWeeks={template.intervalWeeks ?? 1}
-              anchorDate={template.anchorDate}
-              onChoiceChange={(c) => onUpdate({ frequency: resolveTransferFrequencyChoice(c).frequency, followsPayday: resolveTransferFrequencyChoice(c).followsPayday, followsCycleStart: resolveTransferFrequencyChoice(c).followsCycleStart })}
-              onIntervalWeeksChange={(n) => onUpdate({ intervalWeeks: n })}
-              onAnchorDateChange={(v) => onUpdate({ anchorDate: v })}
             />
             <PausedOccurrencesControl
               windowDates={windowDates}
