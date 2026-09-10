@@ -179,12 +179,43 @@ export function setPausedPensionOccurrences(pension: Pension, windowDates: strin
 }
 
 /** Builds the patch for "change the standing amount, effective from a chosen upcoming payment" — mirrors schedule.ts's applyTemplateAmountChange exactly, against Pension's fields. */
-export function applyPensionAmountChange(pension: Pension, newAmount: number, effectiveFrom: string): Pick<Pension, 'amount' | 'amountEffectiveFrom' | 'amountHistory'> {
-  const priorEntry = { effectiveFrom: pension.amountEffectiveFrom ?? pension.anchorDate, amount: pension.amount }
+/**
+ * UAT 2026-09-10 (mup-samedate-pension, out-of-order variant) — this used
+ * to unconditionally APPEND the previous current amount onto history with
+ * no regard for chronological order, mirroring the exact pre-fix shape of
+ * schedule.ts's applyTemplateAmountChange before the 2026-09-09 session's
+ * "drop everything on/after the new effective date" fix
+ * (retest2-bills-single-before-allfuture-untouched /
+ * retest3-bills-out-of-order). Confirmed as the same latent bug, just
+ * never propagated to Pension: recording a LATER change first (e.g. "£X
+ * from 1 Nov"), then an EARLIER one (e.g. "£Y from 1 Sept"), left the
+ * stale £X-from-Nov entry sitting in `amountHistory` where it kept
+ * wrongly outranking the new £Y-from-Sept change for every date on/after
+ * Nov — `resolvePensionAmount` picks the candidate with the LATEST
+ * `effectiveFrom` that's still `<= dateIso`, so an unfiltered history
+ * array has no way to know that entry was meant to be fully superseded.
+ * Also never cleared a single-occurrence override dated on/after the new
+ * effective date the way schedule.ts's version does — meaning a pension
+ * occurrence edited via this session's new
+ * applyPensionSingleOccurrenceAmountChange would freeze forever, even
+ * against a LATER "standing amount" change that should have reached it.
+ * Both now fixed identically to applyTemplateAmountChange.
+ */
+export function applyPensionAmountChange(
+  pension: Pension,
+  newAmount: number,
+  effectiveFrom: string,
+): Pick<Pension, 'amount' | 'amountEffectiveFrom' | 'amountHistory' | 'occurrenceOverrides'> {
+  const priorCandidates = [...(pension.amountHistory ?? []), { effectiveFrom: pension.amountEffectiveFrom ?? pension.anchorDate, amount: pension.amount }]
+  const amountHistory = priorCandidates.filter((c) => c.effectiveFrom < effectiveFrom)
+  const occurrenceOverrides = (pension.occurrenceOverrides ?? [])
+    .map((o) => (o.originalDate >= effectiveFrom && o.amount !== undefined ? { ...o, amount: undefined } : o))
+    .filter((o) => o.date !== undefined || o.amount !== undefined || o.deleted !== undefined)
   return {
     amount: newAmount,
     amountEffectiveFrom: effectiveFrom,
-    amountHistory: [...(pension.amountHistory ?? []), priorEntry],
+    amountHistory,
+    occurrenceOverrides,
   }
 }
 
