@@ -25,7 +25,7 @@ import {
   type RawOccurrence,
 } from '../lib/schedule'
 import { transferLocationLabel, buildTransferLocationOptions, transferLocationKey, locationsEqual, type TransferLocationOption } from '../lib/transferLedger'
-import { LocationStep, FrequencyStep, DateStep, TransferFrequencySelect, type TransferFrequencyChoice, resolveTransferFrequencyChoice, transferFrequencyChoiceFor } from '../components/TransferSteps'
+import { LocationStep, FrequencyStep, DateStep, TransferFrequencySelect, TRANSFER_FREQUENCY_LABELS, type TransferFrequencyChoice, resolveTransferFrequencyChoice, transferFrequencyChoiceFor } from '../components/TransferSteps'
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfirmModal'
@@ -2347,6 +2347,15 @@ function TransferRecurringRow({
   const [amount, setAmount] = useState(String(template.amount))
   const [transferFrom, setTransferFrom] = useState(template.transferFrom)
   const [transferTo, setTransferTo] = useState(template.transferTo)
+  // UAT 2026-09-11 — the frequency dropdown/date field used to write
+  // straight through onUpdate on every change (same immediate-apply
+  // behavior as the two checkboxes it replaced), which meant it never
+  // participated in this row's dirty-tracking/Save-button-dimming at
+  // all. Staged the same way amount/name/location already are: local
+  // draft state here, only committed when Save is pressed below.
+  const [freqChoice, setFreqChoice] = useState<TransferFrequencyChoice>(transferFrequencyChoiceFor(template))
+  const [intervalWeeks, setIntervalWeeks] = useState(template.intervalWeeks ?? 1)
+  const [anchorDate, setAnchorDate] = useState(template.anchorDate)
   const [pickingSide, setPickingSide] = useState<'from' | 'to' | null>(null)
   const [choosingEffectiveDate, setChoosingEffectiveDate] = useState(false)
   // A location-only change has no amountHistory-style mechanism to anchor
@@ -2377,6 +2386,9 @@ function TransferRecurringRow({
     setTransferFrom(template.transferFrom)
     setTransferTo(template.transferTo)
     setName(template.name)
+    setFreqChoice(transferFrequencyChoiceFor(template))
+    setIntervalWeeks(template.intervalWeeks ?? 1)
+    setAnchorDate(template.anchorDate)
     setChoosingEffectiveDate(false)
     setLocationOnlyConfirm(false)
     setOpen(false)
@@ -2394,6 +2406,23 @@ function TransferRecurringRow({
   // (unlike amount), so it rides along with whichever immediate-apply
   // path below actually fires.
   const nameDirty = name.trim().length > 0 && name.trim() !== template.name
+  const resolvedFreq = resolveTransferFrequencyChoice(freqChoice)
+  const freqDirty =
+    resolvedFreq.frequency !== template.frequency ||
+    resolvedFreq.followsPayday !== !!template.followsPayday ||
+    resolvedFreq.followsCycleStart !== !!template.followsCycleStart ||
+    (resolvedFreq.frequency === 'every_n_weeks' && intervalWeeks !== (template.intervalWeeks ?? 1)) ||
+    (!resolvedFreq.followsPayday && !resolvedFreq.followsCycleStart && anchorDate !== template.anchorDate)
+  // Frequency/anchorDate has no amountHistory-style mechanism either
+  // (same reasoning as From/To above) — a standing arrangement setting,
+  // applied immediately once Saved, not historized per-occurrence.
+  function freqPatch(): Partial<Omit<RecurringTemplate, 'id'>> {
+    if (!freqDirty) return {}
+    const patch: Partial<Omit<RecurringTemplate, 'id'>> = { frequency: resolvedFreq.frequency, followsPayday: resolvedFreq.followsPayday, followsCycleStart: resolvedFreq.followsCycleStart }
+    if (resolvedFreq.frequency === 'every_n_weeks') patch.intervalWeeks = intervalWeeks
+    if (!resolvedFreq.followsPayday && !resolvedFreq.followsCycleStart) patch.anchorDate = anchorDate
+    return patch
+  }
 
   // UAT 2026-09-10 (mup-samedate-transfer) — this used to start the window
   // at `new Date()` (today, WITH the current time-of-day), matching
@@ -2415,12 +2444,13 @@ function TransferRecurringRow({
     if (!locationsEqual(transferFrom, template.transferFrom)) fields.push({ label: 'From', from: fromLabel, to: transferFrom ? transferLocationLabel(transferFrom, savingsPots, pots) : '—' })
     if (!locationsEqual(transferTo, template.transferTo)) fields.push({ label: 'To', from: toLabel, to: transferTo ? transferLocationLabel(transferTo, savingsPots, pots) : '—' })
     if (nameDirty) fields.push({ label: 'Name', from: template.name, to: name.trim() })
+    if (freqDirty) fields.push({ label: 'Frequency', from: TRANSFER_FREQUENCY_LABELS[transferFrequencyChoiceFor(template)], to: TRANSFER_FREQUENCY_LABELS[freqChoice] })
     return fields
   }
 
   function handleSaveClick() {
     const amountNumber = Number(amount)
-    if (!amountDirty && !locationsDirty && !nameDirty) return
+    if (!amountDirty && !locationsDirty && !nameDirty && !freqDirty) return
     // A genuine standing amount change is routed through "which payment
     // should this apply from," same gate as Bills.tsx/
     // RecurringTransactionEditPanel — everything else (frequency, name,
@@ -2433,7 +2463,7 @@ function TransferRecurringRow({
     if (amountDirty) {
       // No occurrences to anchor a date to yet (a brand-new template) —
       // applies immediately, same as Bills.tsx's equivalent fallback.
-      const updates: Partial<Omit<RecurringTemplate, 'id'>> = { amount: amountNumber }
+      const updates: Partial<Omit<RecurringTemplate, 'id'>> = { amount: amountNumber, ...freqPatch() }
       if (locationsDirty && transferFrom && transferTo) {
         updates.transferFrom = transferFrom
         updates.transferTo = transferTo
@@ -2444,11 +2474,13 @@ function TransferRecurringRow({
       setOpen(false)
       return
     }
-    // A pure name-only change (no amount/location dirty) has nothing to
-    // confirm — same as Bills'/recurring-Transactions' Name field, it
-    // just saves straight through.
-    if (nameDirty && !locationsDirty) {
-      onUpdate({ name: name.trim() })
+    // A pure name/frequency-only change (no amount/location dirty) has
+    // nothing to confirm — same as Bills'/recurring-Transactions' Name
+    // field, it just saves straight through.
+    if ((nameDirty || freqDirty) && !locationsDirty) {
+      const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...freqPatch() }
+      if (nameDirty) updates.name = name.trim()
+      onUpdate(updates)
       triggerFlash()
       setOpen(false)
       return
@@ -2480,10 +2512,10 @@ function TransferRecurringRow({
             }
             buildChanges={(_effectiveFrom, scope) => {
               const changes: RecurringChangeField[] = [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(Number(amount))}` }]
-              if (locationsDirty) {
-                // Location has no single-occurrence write of its own —
-                // make that explicit alongside the amount's scope choice
-                // (UAT 2026-09-09, ed-transfers-unchanged).
+              if (locationsDirty || freqDirty) {
+                // Location/frequency have no single-occurrence write of
+                // their own — make that explicit alongside the amount's
+                // scope choice (UAT 2026-09-09, ed-transfers-unchanged).
                 changes.push(...locationChangeFields().map((f) => ({ ...f, note: scope === 'single' ? 'This applies permanently from this date, not just to the single payment above.' : undefined })))
               }
               return changes
@@ -2491,12 +2523,13 @@ function TransferRecurringRow({
             affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
             onCancelAll={cancelEverything}
             onCommit={(effectiveFrom, scope) => {
-              // A location change (if any) always applies from this date
-              // forward regardless of the amount's single/all-future
-              // choice — it has no single-occurrence mechanism of its own.
+              // A location/frequency change (if any) always applies from
+              // this date forward regardless of the amount's single/all-
+              // future choice — neither has a single-occurrence mechanism
+              // of its own.
               const amountPatch =
                 scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(template, Number(amount), effectiveFrom) : applyTemplateAmountChange(template, Number(amount), effectiveFrom)
-              const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...amountPatch }
+              const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...amountPatch, ...freqPatch() }
               if (locationsDirty && transferFrom && transferTo) {
                 updates.transferFrom = transferFrom
                 updates.transferTo = transferTo
@@ -2520,7 +2553,7 @@ function TransferRecurringRow({
             changes={locationChangeFields()}
             onCancel={cancelEverything}
             onConfirm={() => {
-              const updates: Partial<Omit<RecurringTemplate, 'id'>> = {}
+              const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...freqPatch() }
               if (transferFrom && transferTo) {
                 updates.transferFrom = transferFrom
                 updates.transferTo = transferTo
@@ -2607,19 +2640,20 @@ function TransferRecurringRow({
                 built for the creation wizard (Adam's own spec: "remove
                 the two checkboxes, and instead use the same options we
                 get in the picker first frequency modal in a single
-                dropdown"). Saves immediately on change, same as the
-                checkboxes it replaces — not gated behind the Save button
-                below, which only covers amount/location/name. Placed
-                ABOVE the Cancel/Save row (UAT 2026-09-11 fix) so that row
-                stays the last visible thing before "Manage upcoming
-                payments", matching every other edit form in the app. */}
+                dropdown"). Placed ABOVE the Cancel/Save row (UAT
+                2026-09-11 fix) so that row stays the last visible thing
+                before "Manage upcoming payments", matching every other
+                edit form in the app. UAT 2026-09-11 followup — staged
+                via local draft state (freqDirty) same as amount/name,
+                rather than writing straight through onUpdate on every
+                change; only commits when Save below is pressed. */}
             <TransferFrequencySelect
-              choice={transferFrequencyChoiceFor(template)}
-              intervalWeeks={template.intervalWeeks ?? 1}
-              anchorDate={template.anchorDate}
-              onChoiceChange={(c) => onUpdate({ frequency: resolveTransferFrequencyChoice(c).frequency, followsPayday: resolveTransferFrequencyChoice(c).followsPayday, followsCycleStart: resolveTransferFrequencyChoice(c).followsCycleStart })}
-              onIntervalWeeksChange={(n) => onUpdate({ intervalWeeks: n })}
-              onAnchorDateChange={(v) => onUpdate({ anchorDate: v })}
+              choice={freqChoice}
+              intervalWeeks={intervalWeeks}
+              anchorDate={anchorDate}
+              onChoiceChange={setFreqChoice}
+              onIntervalWeeksChange={setIntervalWeeks}
+              onAnchorDateChange={setAnchorDate}
             />
             {/* UAT 2026-09-08 (followup-confirm-recurring-transfer note) —
                 was a bespoke inline text button whose label flip-flopped
@@ -2632,10 +2666,13 @@ function TransferRecurringRow({
                 setTransferFrom(template.transferFrom)
                 setTransferTo(template.transferTo)
                 setName(template.name)
+                setFreqChoice(transferFrequencyChoiceFor(template))
+                setIntervalWeeks(template.intervalWeeks ?? 1)
+                setAnchorDate(template.anchorDate)
                 setOpen(false)
               }}
               onSave={handleSaveClick}
-              saveDisabled={!amountDirty && !locationsDirty && !nameDirty}
+              saveDisabled={!amountDirty && !locationsDirty && !nameDirty && !freqDirty}
             />
             <PausedOccurrencesControl
               windowDates={windowDates}
