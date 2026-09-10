@@ -2092,10 +2092,10 @@ function LoanRecurringOverpaymentEditForm({
 
   return (
     // No border-t here, deliberately (2026-09-09 followup, Adam-reported
-    // duplicate divider) — PausedOccurrencesControl below already owns
-    // its own top border/spacing for every one of its call sites app-
-    // wide, and it's the first thing rendered here, so adding a second
-    // one on this wrapper doubled up the line right above it.
+    // duplicate divider) — PausedOccurrencesControl (now at the bottom,
+    // see 2026-09-10 placement fix below) already owns its own top
+    // border/spacing for every one of its call sites app-wide, so adding
+    // a second one on this wrapper doubled up the line right above it.
     <div className="px-3 pb-3 flex flex-col gap-3">
       {changingAmount && (
         <EffectiveDatedChangeFlow
@@ -2172,45 +2172,6 @@ function LoanRecurringOverpaymentEditForm({
         />
       )}
 
-      {/* Adam's own spec — the only button above the editable fields. */}
-      <PausedOccurrencesControl
-        windowDates={windowDates}
-        currentlyPaused={new Set((value.pausedDates ?? []).map(realDateFor))}
-        amountForDate={(date) => {
-          const resolved = resolveRecurringOverpaymentAmount(value, periodDateFor(date))
-          return resolved.type === 'fixed' ? resolved.amount : Math.round(((loan.principal * resolved.percent) / 100) * 100) / 100
-        }}
-        itemLabel="overpayments"
-        nextPaymentPreview={(tentative) => {
-          const periodWindow = windowEntries.map((e) => e.periodDate)
-          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, periodWindow, tentative.map(periodDateFor))
-          const nextPeriod = periodWindow.find((pd) => !merged?.pausedDates?.includes(pd))
-          return nextPeriod ? realDateFor(nextPeriod) : null
-        }}
-        onSave={(pausedDates) => {
-          const merged = setPausedLoanRecurringOverpaymentDates(
-            { ...loan, recurringOverpayment: value },
-            windowEntries.map((e) => e.periodDate),
-            pausedDates.map(periodDateFor),
-          )
-          if (merged) onSave(merged)
-        }}
-        // The picker/pill list shows the overpayment's own REAL date
-        // (windowEntries), but amountOverrides must be keyed by the
-        // underlying loan schedule entry's periodDate instead — the same
-        // real-vs-period-date translation the full edit flow above uses
-        // (see this file's own "do not lose this" history — two separate
-        // regressions came from skipping this translation). A single
-        // occurrence edit here always writes a FIXED £ override for that
-        // one date, even when the standing recurring amount is
-        // percent-of-balance — "just this one payment" is inherently a
-        // concrete number, not a re-statement of the percentage rule.
-        onSaveAmount={(realDate, newAmount) => {
-          const periodDate = periodDateFor(realDate)
-          onSave({ ...value, ...applyRecurringOverpaymentSingleAmountOverride(value, { type: 'fixed', amount: newAmount }, periodDate) })
-        }}
-      />
-
       <div className="flex gap-2">
         <button
           onClick={() => setAmountType('fixed')}
@@ -2283,6 +2244,48 @@ function LoanRecurringOverpaymentEditForm({
       </div>
 
       <FormButtonRow onCancel={onCancel} onSave={handleSave} saveDisabled={!dirty || !amountValid} />
+
+      {/* Moved to the bottom (2026-09-10 UAT follow-up) to match every
+          other "Manage upcoming payments" call site and the redesign's
+          own placement spec — previously sat above the editable fields,
+          the one call site out of 7 that didn't match. */}
+      <PausedOccurrencesControl
+        windowDates={windowDates}
+        currentlyPaused={new Set((value.pausedDates ?? []).map(realDateFor))}
+        amountForDate={(date) => {
+          const resolved = resolveRecurringOverpaymentAmount(value, periodDateFor(date))
+          return resolved.type === 'fixed' ? resolved.amount : Math.round(((loan.principal * resolved.percent) / 100) * 100) / 100
+        }}
+        itemLabel="overpayments"
+        nextPaymentPreview={(tentative) => {
+          const periodWindow = windowEntries.map((e) => e.periodDate)
+          const merged = setPausedLoanRecurringOverpaymentDates({ ...loan, recurringOverpayment: value }, periodWindow, tentative.map(periodDateFor))
+          const nextPeriod = periodWindow.find((pd) => !merged?.pausedDates?.includes(pd))
+          return nextPeriod ? realDateFor(nextPeriod) : null
+        }}
+        onSave={(pausedDates) => {
+          const merged = setPausedLoanRecurringOverpaymentDates(
+            { ...loan, recurringOverpayment: value },
+            windowEntries.map((e) => e.periodDate),
+            pausedDates.map(periodDateFor),
+          )
+          if (merged) onSave(merged)
+        }}
+        // The picker/pill list shows the overpayment's own REAL date
+        // (windowEntries), but amountOverrides must be keyed by the
+        // underlying loan schedule entry's periodDate instead — the same
+        // real-vs-period-date translation the full edit flow above uses
+        // (see this file's own "do not lose this" history — two separate
+        // regressions came from skipping this translation). A single
+        // occurrence edit here always writes a FIXED £ override for that
+        // one date, even when the standing recurring amount is
+        // percent-of-balance — "just this one payment" is inherently a
+        // concrete number, not a re-statement of the percentage rule.
+        onSaveAmount={(realDate, newAmount) => {
+          const periodDate = periodDateFor(realDate)
+          onSave({ ...value, ...applyRecurringOverpaymentSingleAmountOverride(value, { type: 'fixed', amount: newAmount }, periodDate) })
+        }}
+      />
     </div>
   )
 }
