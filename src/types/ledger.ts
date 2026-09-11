@@ -884,7 +884,7 @@ export interface CreditCard {
   id: string
   name: string
   categoryId: string // for icon; colour below overrides the category's colour
-  color: string // hex — drawn from CREDIT_CARD_COLORS, not the personal/joint/household palette
+  color: string // hex — drawn from SHARED_CARD_COLORS, not the personal/joint/household palette
   interestRatePercent: number // APR — genuinely used now: compounds monthly against the balance each billing cycle. See lib/creditCards.ts's monthlyInterestRate for the conversion, and its file header for what's deliberately NOT modelled (daily accrual, purchase grace periods).
   // The STATED balance as at balanceAsOfDate — an anchor, not a live
   // figure. It is never adjusted by the app: spend and payments are not
@@ -955,16 +955,27 @@ export interface CreditCardLumpPayment {
 
 // A palette distinct from the coral/ice/dark-blue used for the Personal/
 // Joint/Household summary cards (index.css: --color-coral, --color-joint,
-// implicit dark-blue household surface) — cards need their own space so
-// they're never confused with the three account-summary cards. Assigned
-// round-robin on creation, same pattern as Category auto-colour.
-export const CREDIT_CARD_COLORS = [
+// implicit dark-blue household surface) — those three are reserved and
+// never drawn from here. Shared (2026-09-11) by every OTHER "card" kind
+// on the Home page's wallet stack — credit cards, savings pots, and pots
+// — assigned round-robin on creation from ONE combined count across all
+// three (see pickNextSharedCardColor in lib/creditCards.ts), same pattern
+// as Category auto-colour, so no two of them ever repeat a colour as far
+// as this palette's own size allows. Was CREDIT_CARD_COLORS (6 entries,
+// credit-card-only) before that — renamed and expanded to 10 when pots/
+// savings pots joined the pool, per Adam's own request ("the bills pot
+// card is the same colour as my personal card").
+export const SHARED_CARD_COLORS = [
   '#8b5cf6', // violet
   '#14b8a6', // teal
   '#f59e0b', // amber
   '#ec4899', // pink
   '#84cc16', // lime
   '#06b6d4', // cyan
+  '#6366f1', // indigo
+  '#10b981', // emerald
+  '#d946ef', // fuchsia
+  '#eab308', // yellow
 ] as const
 
 // ── Salary snapshots + overrides ────────────────────────────────────────
@@ -1078,6 +1089,12 @@ export interface SavingsPot {
   openingBalance: number
   openingDate: string // ISO date — see file header; nothing before this date is ever considered
   active: boolean
+  // Drawn from SHARED_CARD_COLORS, assigned round-robin on creation
+  // (pickNextSharedCardColor, lib/creditCards.ts) across the combined
+  // count of credit cards/pots/savings pots — same "required, backfilled
+  // by migrateLedgerData for anything persisted before this field
+  // existed" pattern as Loan.active/Loan.principal (see ledgerStorage.ts).
+  color: string
 
   // ── Interest ───────────────────────────────────────────────────────
   // Current method — always what's shown/edited. amountEffectiveFrom/
@@ -1180,6 +1197,9 @@ export interface Pot {
   openingBalance: number
   openingDate: string // ISO date — nothing before this date is ever considered, same rule as SavingsPot.openingDate
   active: boolean
+  // Same SHARED_CARD_COLORS/pickNextSharedCardColor/backfill convention as
+  // SavingsPot.color above.
+  color: string
 
   // ── Recurring deposits — SUPERSEDED, same reasoning as SavingsPot's
   // fields of the same name (see that type's own comment) — a Pot never

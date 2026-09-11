@@ -19,7 +19,7 @@ import {
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
-import { nextMinimumChargeAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
+import { nextMinimumChargeAmount, pickNextSharedCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
 import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
@@ -390,7 +390,7 @@ export function Loans() {
             people={data.people}
             categories={visibleCategoriesFor(data, CREDIT_CARD_CATEGORY_ID)}
             defaultOwnerId={cardDefaultOwnerId}
-            nextColor={pickCreditCardColor(data.creditCards.length)}
+            nextColor={pickNextSharedCardColor(data)}
             onAddCategory={addCategory}
             onCancel={() => setAddingCard(false)}
             onSave={(card) => {
@@ -2110,7 +2110,8 @@ function LoanForm({
 // the Home page's "group by category" view (see groupingCategoryId in
 // Home.tsx, and the long comment on CREDIT_CARD_CATEGORY_ID in
 // types/ledger.ts). Colour is auto-assigned round-robin, same idea as
-// Category auto-colour, from the separate CREDIT_CARD_COLORS palette.
+// Category auto-colour, from the separate SHARED_CARD_COLORS palette
+// (shared with pots/savings pots too — see that constant's own comment).
 
 function CreditCardForm({
   people,

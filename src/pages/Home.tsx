@@ -98,10 +98,6 @@ function deckEntryKey(e: DeckEntry): string {
 const round2 = (n: number) => Math.round(n * 100) / 100
 
 const HORIZON_LABELS: Record<ProjectionHorizon, string> = { current_cycle: 'This cycle', three_cycles: 'Next 3 cycles' }
-// Pots have no persisted colour of their own (unlike CreditCard.color) — a fixed value matching --color-positive (src/index.css), so a pot's hero card reads as "savings" at a glance without introducing a whole new colour-picker just for this.
-const SAVINGS_POT_HERO_COLOR = '#4cd08a'
-// Pots backlog item (2026-09 session) — same reasoning as SAVINGS_POT_HERO_COLOR immediately above, deliberately a DIFFERENT fixed colour (matches --color-coral, src/index.css) so a bills-paying Pot reads as visually distinct from a SavingsPot at a glance in the deck, despite both being "money set aside" in a loose sense.
-const POT_HERO_COLOR = '#ff5b4c'
 type Grouping = 'list' | 'category' | 'person'
 type Order = 'date' | 'amount'
 
@@ -495,6 +491,7 @@ function SalaryBreakdownCard({ data, horizon }: { data: AppDataV2; horizon: Proj
             <div className="flex flex-col gap-1">
               <BreakdownRow label="Income" value={summary.income.total} emphasized />
               <BreakdownRow label="Salary & bonuses" value={summary.income.salary} />
+              <BreakdownRow label="Withdrawals" value={summary.income.withdrawals} />
               <BreakdownRow label="Other income" value={summary.income.other} />
             </div>
 
@@ -502,6 +499,7 @@ function SalaryBreakdownCard({ data, horizon }: { data: AppDataV2; horizon: Proj
               <BreakdownRow label="Outgoings" value={summary.outgoings.total} emphasized />
               <BreakdownRow label="Standing orders" value={summary.outgoings.standingOrder} />
               <BreakdownRow label="Direct debits (incl. loans)" value={summary.outgoings.directDebit} />
+              <BreakdownRow label="Deposits" value={summary.outgoings.deposits} />
               <BreakdownRow label="Other" value={summary.outgoings.other} />
             </div>
 
@@ -552,10 +550,17 @@ function JointBreakdownCard({ data, horizon }: { data: AppDataV2; horizon: Proje
     const jointProjection = computeJointAccountProjection(data, horizon)
     const startIso = toLocalIsoDate(bounds.start)
     const endIso = toLocalIsoDate(bounds.end)
-    const deposits = (jointProjection?.transactions ?? [])
-      .filter((t) => t.type === 'transfer' && t.direction === 'in' && t.date >= startIso && t.date <= endIso)
-      .reduce((sum, t) => sum + t.amount, 0)
-    return { deposits: round2(deposits), outgoings }
+    const transfers = (jointProjection?.transactions ?? []).filter((t) => t.type === 'transfer' && t.date >= startIso && t.date <= endIso)
+    // A transfer's own `direction` is the PERSONAL ledger's sign (see
+    // buildTransferTransaction in lib/transferLedger.ts: 'out' when
+    // personal is the source, 'in' when personal is the destination) —
+    // so a genuine DEPOSIT into the joint account (personal -> joint) is
+    // direction 'out', and a genuine WITHDRAWAL (joint -> personal) is
+    // direction 'in'. BUGFIX: this previously filtered direction === 'in'
+    // for the row labelled "Deposits", which actually summed withdrawals.
+    const deposits = transfers.filter((t) => t.direction === 'out').reduce((sum, t) => sum + t.amount, 0)
+    const withdrawals = transfers.filter((t) => t.direction === 'in').reduce((sum, t) => sum + t.amount, 0)
+    return { deposits: round2(deposits), withdrawals: round2(withdrawals), outgoings }
   }, [data, horizon])
 
   if (!summary) return null
@@ -576,6 +581,7 @@ function JointBreakdownCard({ data, horizon }: { data: AppDataV2; horizon: Proje
 
             <div className="flex flex-col gap-1">
               <BreakdownRow label="Deposits" value={summary.deposits} emphasized />
+              <BreakdownRow label="Withdrawals" value={summary.withdrawals} emphasized />
             </div>
 
             <div className="flex flex-col gap-1 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
@@ -766,7 +772,7 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       const horizonEnd = horizonRangeEnd(data, data.primaryPersonId, horizon, new Date())
       const projectedBalance = projectedBalanceAt(pot, balance, data.transactions, new Date(), horizonEnd, data.recurringTemplates, data.payCycles.find((c) => c.personId === data.primaryPersonId))
       return (
-        <BankCard variant="custom" customColor={SAVINGS_POT_HERO_COLOR} bankLabel={pot.name} accountLabel="Savings" icon={<PiggyBank size={18} strokeWidth={1.5} color="#fff" />}>
+        <BankCard variant="custom" customColor={pot.color} bankLabel={pot.name} accountLabel="Savings" icon={<PiggyBank size={18} strokeWidth={1.5} color="#fff" />}>
           <div className="mt-6 space-y-1.5">
             <CardRow label="Balance" value={balance} />
             <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={projectedBalance} emphasized />
@@ -785,7 +791,7 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       if (!pot) return null
       const projection = computePotProjection(data, pot, horizon, new Date())
       return (
-        <BankCard variant="custom" customColor={POT_HERO_COLOR} bankLabel={pot.name} accountLabel="Pot" icon={<Wallet size={18} strokeWidth={1.5} color="#fff" />}>
+        <BankCard variant="custom" customColor={pot.color} bankLabel={pot.name} accountLabel="Pot" icon={<Wallet size={18} strokeWidth={1.5} color="#fff" />}>
           <div className="mt-6 space-y-1.5">
             <CardRow label="Balance" value={projection.clearedBalance} />
             <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={projection.projectedBalance} emphasized />

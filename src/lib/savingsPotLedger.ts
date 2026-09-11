@@ -36,6 +36,7 @@ export function newSavingsPot(input: {
   interestMethod: SavingsInterestMethod
   targetAmount?: number
   targetDate?: string
+  color: string
 }): Omit<SavingsPot, 'id'> {
   return {
     personId: input.personId,
@@ -46,6 +47,7 @@ export function newSavingsPot(input: {
     interestMethod: input.interestMethod,
     targetAmount: input.targetAmount,
     targetDate: input.targetDate,
+    color: input.color,
   }
 }
 

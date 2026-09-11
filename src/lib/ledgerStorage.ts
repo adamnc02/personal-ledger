@@ -5,7 +5,7 @@
 // new application, not an in-place schema migration (Section 4).
 
 import { nanoid } from 'nanoid'
-import type { AppDataV2, CreditCard, PayCycleConfig, Person, Transaction } from '../types/ledger'
+import { SHARED_CARD_COLORS, type AppDataV2, type CreditCard, type PayCycleConfig, type Person, type Transaction } from '../types/ledger'
 import { defaultCategories } from './categories'
 import { reconcilePersonReferences } from './household'
 import { monthlyInterestRate } from './creditCards'
@@ -89,8 +89,18 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
     // already-migrated data is a no-op.
     creditCards: (data.creditCards ?? []).map((card) => (card.balanceAsOfDate ? card : anchorLegacyCardBalance(card, data.transactions ?? []))),
     pensions: data.pensions ?? [],
-    savingsPots: data.savingsPots ?? [],
-    pots: data.pots ?? [],
+    // `color` is a NEW REQUIRED field (2026-09-11, shared-palette work —
+    // see SHARED_CARD_COLORS's own comment in types/ledger.ts). Every
+    // savings pot/pot persisted before it existed shared ONE fixed colour
+    // per kind (Home.tsx's old SAVINGS_POT_HERO_COLOR/POT_HERO_COLOR
+    // constants) — indistinguishable from each other, and POT_HERO_COLOR
+    // happened to collide with Personal's own coral. Backfilled here in
+    // array order, continuing the round-robin from wherever the already-
+    // coloured credit cards leave off, so an existing pot/savings pot
+    // gets a real, stable, non-repeating identity the first time this
+    // runs rather than staying on the old collapsed-to-one-colour default.
+    savingsPots: backfillSharedCardColors(data.savingsPots ?? [], data.creditCards?.length ?? 0),
+    pots: backfillSharedCardColors(data.pots ?? [], (data.creditCards?.length ?? 0) + (data.savingsPots?.length ?? 0)),
     transactions: data.transactions ?? [],
     payCycles: data.payCycles ?? [],
     // Absent on any backup persisted before the Salary Sorter session
@@ -216,4 +226,22 @@ function anchorLegacyCardBalance(card: CreditCard, transactions: Transaction[]):
   }
 
   return { ...card, currentBalance: Math.max(0, balance), balanceAsOfDate: today }
+}
+
+/**
+ * Backfills a missing `color` on a pre-shared-palette Pot/SavingsPot,
+ * continuing SHARED_CARD_COLORS' round-robin from `startIndex` (the count
+ * of "card" entities already coloured ahead of this collection — see the
+ * call site in migrateLedgerData). Already-coloured entries are left
+ * alone; only ones actually missing the field advance the counter, so two
+ * runs of migration never reshuffle an already-backfilled colour.
+ */
+function backfillSharedCardColors<T extends { color?: string }>(items: T[], startIndex: number): (T & { color: string })[] {
+  let next = startIndex
+  return items.map((item) => {
+    if (item.color) return item as T & { color: string }
+    const color = SHARED_CARD_COLORS[next % SHARED_CARD_COLORS.length]
+    next += 1
+    return { ...item, color }
+  })
 }

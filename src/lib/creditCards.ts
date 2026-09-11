@@ -19,7 +19,7 @@
 
 import { nanoid } from 'nanoid'
 import { addDays } from 'date-fns'
-import { CREDIT_CARD_CATEGORY_ID, CREDIT_CARD_COLORS, type CreditCard, type CreditCardLumpPayment, type Transaction } from '../types/ledger'
+import { CREDIT_CARD_CATEGORY_ID, SHARED_CARD_COLORS, type AppDataV2, type CreditCard, type CreditCardLumpPayment, type Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 import { toLocalIsoDate as toIso } from './date'
@@ -900,9 +900,17 @@ export function simulateCardPayoffMonths(card: CreditCard, extraPerMonth = 0, ma
   return { months, totalInterestPaid }
 }
 
-/** Round-robins through CREDIT_CARD_COLORS by however many cards already exist — same auto-assignment idea as pickColorForIndex in categories.ts, but on the separate palette described in types/ledger.ts. */
-export function pickCreditCardColor(existingCount: number): string {
-  return CREDIT_CARD_COLORS[existingCount % CREDIT_CARD_COLORS.length]
+/**
+ * Round-robins through SHARED_CARD_COLORS by however many credit
+ * cards/pots/savings pots already exist COMBINED — same auto-assignment
+ * idea as pickColorForIndex in categories.ts, but on the separate palette
+ * described in types/ledger.ts, now shared across all three "card" kinds
+ * (2026-09-11) rather than credit cards alone, so none of them repeat a
+ * colour as far as the palette's own size allows.
+ */
+export function pickNextSharedCardColor(data: Pick<AppDataV2, 'creditCards' | 'pots' | 'savingsPots'>): string {
+  const existingCount = data.creditCards.length + data.pots.length + data.savingsPots.length
+  return SHARED_CARD_COLORS[existingCount % SHARED_CARD_COLORS.length]
 }
 
 /** Total paid to date against this card — the "paid" half of the card page's pie chart (doc addendum). Sums credit_card_payment transactions for this card from the full transaction list, since payments aren't tracked as a running total on the CreditCard itself. */

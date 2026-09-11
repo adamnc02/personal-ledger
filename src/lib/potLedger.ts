@@ -38,14 +38,15 @@ function clampToAnchorDay(date: Date, anchorDay: number): Date {
   return new Date(date.getFullYear(), date.getMonth(), day)
 }
 
-/** Convenience constructor — mirrors savingsPotLedger.ts's newSavingsPot. Covers both "new" (zero balance, openingDate defaults to today) and "existing" (real opening balance + date) creation paths. */
-export function newPot(input: { personId: string; name: string; openingBalance: number; openingDate: string }): Omit<Pot, 'id'> {
+/** Convenience constructor — mirrors savingsPotLedger.ts's newSavingsPot. Covers both "new" (zero balance, openingDate defaults to today) and "existing" (real opening balance + date) creation paths. `color` is the caller's job to pick (pickNextSharedCardColor, lib/creditCards.ts) since it needs the full AppDataV2 to count against. */
+export function newPot(input: { personId: string; name: string; openingBalance: number; openingDate: string; color: string }): Omit<Pot, 'id'> {
   return {
     personId: input.personId,
     name: input.name,
     openingBalance: input.openingBalance,
     openingDate: input.openingDate,
     active: true,
+    color: input.color,
   }
 }
 

@@ -37,6 +37,7 @@ import {
 } from '../lib/savingsPotLedger'
 import { buildExampleLedger } from '../lib/savingsInterest'
 import { newPot, potBalanceAsOf, potDepositOccurrencePreviews } from '../lib/potLedger'
+import { pickNextSharedCardColor } from '../lib/creditCards'
 import { recentAndUpcomingOccurrences } from '../lib/schedule'
 import { recentAndUpcomingLoanPaymentDates } from '../lib/ledgerLoans'
 import { locationsEqual, transferLocationLabel, transferLocationKey, buildTransferLocationOptions, type TransferLocationOption } from '../lib/transferLedger'
@@ -2721,6 +2722,7 @@ export function Salary() {
                   interestMethod: fields.interestMethod,
                   targetAmount: fields.targetAmount,
                   targetDate: fields.targetDate,
+                  color: pickNextSharedCardColor(data),
                 }),
               )
               if (fields.recurringDepositAmount) {
@@ -2832,7 +2834,7 @@ export function Salary() {
             }}
             onSave={({ name, openingBalance, openingDate, billIdsToMoveIn, effectiveFrom }) => {
               const personId = addingBillsPotFor
-              const id = addPot(personId, newPot({ personId, name, openingBalance, openingDate }))
+              const id = addPot(personId, newPot({ personId, name, openingBalance, openingDate, color: pickNextSharedCardColor(data) }))
               for (const billId of billIdsToMoveIn) assignRecurringTemplateLocation(billId, 'pot', effectiveFrom, { potId: id })
               setAddingBillsPotFor(null)
               // UAT 2026-09-08 (9-wallet-pot-savings-joint): used to force
