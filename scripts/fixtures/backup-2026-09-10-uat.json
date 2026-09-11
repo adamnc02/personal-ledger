@@ -3,7 +3,7 @@
   "people": [
     {
       "id": "vh5IbJbo",
-      "name": "Beverley’s",
+      "name": "Beverley\u2019s",
       "color": "#ff5b4c",
       "salaryHistory": [
         {
@@ -108,6 +108,14 @@
           "personId": "tue8sV-d"
         }
       ],
+      "savingsEntries": []
+    },
+    {
+      "id": "uat-person-charlie",
+      "name": "Charlie",
+      "color": "#4cd08a",
+      "salaryHistory": [],
+      "salaryOverrides": [],
       "savingsEntries": []
     }
   ],
@@ -793,6 +801,20 @@
       "active": true,
       "kind": "transaction",
       "recurringTransactionType": "expense"
+    },
+    {
+      "name": "Council Tax",
+      "amount": 220,
+      "categoryId": "category-seed-electricity",
+      "paymentMethod": "direct_debit",
+      "frequency": "monthly",
+      "anchorDate": "2026-09-20",
+      "location": "joint",
+      "payee": "tue8sV-d",
+      "payeeSharePercent": 60,
+      "ownerId": "tue8sV-d",
+      "id": "uat-joint-council-tax",
+      "active": true
     }
   ],
   "loans": [
@@ -896,7 +918,7 @@
         "amount": 200
       },
       "paymentDayOfMonth": 14,
-      "ownerId": "vh5IbJbo",
+      "ownerId": "tue8sV-d",
       "id": "M2Ak3QNc",
       "lumpPayments": [],
       "active": true,
@@ -914,7 +936,7 @@
         "percent": 100
       },
       "paymentDayOfMonth": 14,
-      "ownerId": "vh5IbJbo",
+      "ownerId": "tue8sV-d",
       "id": "lhF0fbR8",
       "lumpPayments": [],
       "active": true,

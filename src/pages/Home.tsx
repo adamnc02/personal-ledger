@@ -16,7 +16,7 @@ import { savingsPotBalanceAsOf, projectedBalanceAt, amountNeededPerPayPeriod, bu
 import { computePotProjection, potSignedAmount } from '../lib/potLedger'
 import { isLedgerTransaction, signedAmount } from '../lib/runningBalance'
 import { computeCycleSummary, compareByDateSalaryFirst } from '../lib/cycleSummary'
-import { SwipeCards } from '../components/SwipeCards'
+import { WalletStack } from '../components/WalletStack'
 import { BankCard } from '../components/BankCard'
 import { ProgressRing } from '../components/ProgressRing'
 import { CategoryIcon } from '../components/CategoryIcon'
@@ -75,6 +75,24 @@ function buildDeck(data: AppDataV2): DeckEntry[] {
   if (data.people.length >= 2) deck.push({ kind: 'household' })
 
   return deck
+}
+
+/**
+ * Stable string key for a `DeckEntry` — needed for the wallet-stack's MRU
+ * reorder state, which tracks *which entries* have been tapped-to-front
+ * across renders, not their (unstable, buildDeck-order-dependent) index.
+ */
+function deckEntryKey(e: DeckEntry): string {
+  switch (e.kind) {
+    case 'credit_card':
+      return `credit_card:${e.cardId}`
+    case 'savings_pot':
+      return `savings_pot:${e.potId}`
+    case 'pot':
+      return `pot:${e.potId}`
+    default:
+      return e.kind
+  }
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -151,7 +169,10 @@ function pendingNetTotal(transactions: Transaction[]): number {
 
 export function Home() {
   const { data } = useLedgerData()
-  const [activeIndex, setActiveIndex] = useState(0)
+  // Keys the user has explicitly tapped-to-select, oldest first, most
+  // recent (= frontmost) last. Starts empty — nobody's tapped anything
+  // yet, so Personal stays front, matching the old activeIndex default.
+  const [mruSelections, setMruSelections] = useState<string[]>([])
   // Defaults to "Next 3 cycles" with cycle-end (month-end) totals on —
   // canShowCycleTotals also requires grouping 'list' + order 'date',
   // which are themselves already the defaults below, so this combination
@@ -170,12 +191,31 @@ export function Home() {
   const [showCleared, setShowCleared] = useState(false)
 
   const deck = useMemo(() => buildDeck(data), [data])
-  const safeIndex = Math.min(activeIndex, deck.length - 1)
-  const activeEntry = deck[safeIndex]
+
+  // Full display order, back-to-front, re-derived every render from the
+  // canonical buildDeck order plus the MRU pointer — never-selected
+  // entries keep buildDeck's own relative order (further back); among
+  // ever-selected entries, order follows recency, most recent last
+  // (frontmost). "Bring to front, others keep relative order" falls out
+  // of this for free, including for the previous front card. An entry
+  // removed from buildDeck (e.g. a deleted pot/card) simply can't appear
+  // in canonicalKeysReversed and gets filtered out of mruSelections the
+  // same render.
+  const backToFront = useMemo(() => {
+    const canonicalKeysReversed = deck.map(deckEntryKey).reverse()
+    const liveMru = mruSelections.filter((k) => canonicalKeysReversed.includes(k))
+    return [...canonicalKeysReversed.filter((k) => !liveMru.includes(k)), ...liveMru]
+  }, [deck, mruSelections])
+
+  const activeEntry = deck.find((e) => deckEntryKey(e) === backToFront[backToFront.length - 1]) ?? deck[0]
   // Gated by the same predicate that decides whether the toggle is even
   // offered, so a value left switched on from an earlier selection can't
   // silently reshape a view whose control is hidden.
   const cycleTotalsActive = !!activeEntry && cycleTotals && canShowCycleTotals(activeEntry, horizon, grouping, order)
+
+  function onSelect(key: string) {
+    setMruSelections((prev) => [...prev.filter((k) => k !== key), key])
+  }
 
   return (
     <div className="max-w-md mx-auto px-4 pt-6">
@@ -183,9 +223,12 @@ export function Home() {
         <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Home</h1>
       </header>
 
-      <SwipeCards
-        activeIndex={safeIndex}
-        onChange={setActiveIndex}
+      <WalletStack
+        items={backToFront.map((key) => {
+          const entry = deck.find((e) => deckEntryKey(e) === key)!
+          return { key, node: <DeckHero entry={entry} data={data} horizon={horizon} />, label: heroLabel(entry, data) }
+        })}
+        onSelect={onSelect}
         // Salary card only — the joint/household/credit-card faces have no
         // salary-vs-outgoings picture of their own to break down.
         belowCards={
@@ -195,11 +238,7 @@ export function Home() {
             <JointBreakdownCard data={data} horizon={horizon} />
           ) : undefined
         }
-      >
-        {deck.map((entry, i) => (
-          <DeckHero key={i} entry={entry} data={data} horizon={horizon} />
-        ))}
-      </SwipeCards>
+      />
 
       <div className="mt-6">
         <DeckControls
@@ -564,6 +603,41 @@ function JointBreakdownCard({ data, horizon }: { data: AppDataV2; horizon: Proje
       </div>
     </div>
   )
+}
+
+/**
+ * The `bankLabel`/`accountLabel` text a `DeckHero` shows for this entry,
+ * combined into one string for the wallet stack's sliver aria-labels —
+ * copied from DeckHero's own per-kind switch below (not derived from it)
+ * so the two can't silently drift apart; a reader auditing this file sees
+ * both switches side by side.
+ */
+function heroLabel(entry: DeckEntry, data: AppDataV2): string {
+  const primaryPerson = data.people.find((p) => p.id === data.primaryPersonId)
+  switch (entry.kind) {
+    case 'personal':
+      return `${primaryPerson?.name ?? 'Me'} Personal`
+    case 'joint':
+      return `${primaryPerson?.name ?? 'Me'} Joint`
+    case 'household':
+      return 'Household Combined'
+    case 'credit_card': {
+      const card = data.creditCards.find((c) => c.id === entry.cardId)
+      return `${card?.name ?? 'Credit Card'} Credit Card`
+    }
+    case 'credit_cards_combined': {
+      const myCards = data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active)
+      return `All Cards ${myCards.length} cards`
+    }
+    case 'savings_pot': {
+      const pot = data.savingsPots.find((p) => p.id === entry.potId)
+      return `${pot?.name ?? 'Savings'} Savings`
+    }
+    case 'pot': {
+      const pot = (data.pots ?? []).find((p) => p.id === entry.potId)
+      return `${pot?.name ?? 'Pot'} Pot`
+    }
+  }
 }
 
 // ── Hero faces — compact BankCard fronts, swiped between ──────────────
