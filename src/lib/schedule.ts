@@ -9,7 +9,7 @@
 
 import { addMonths, addQuarters, addWeeks, addYears } from 'date-fns'
 import { nanoid } from 'nanoid'
-import type { PayCycleConfig, RecurringTemplate, Transaction } from '../types/ledger'
+import type { PayCycleConfig, RecurringOccurrenceOverride, RecurringTemplate, Transaction } from '../types/ledger'
 import { upcomingPaydays } from './salaryLedger'
 import { nextCycleStartAfter } from './payCycle'
 import { categoryForTransfer } from './transferLedger'
@@ -353,20 +353,43 @@ export function scheduledTemplateDates(
 /**
  * Given the FULL set of dates the person now wants paused (from a
  * multi-select checklist drawn from scheduledTemplateDates), reconciles
- * occurrenceOverrides to match — a newly-checked date gets a
- * {originalDate, deleted: true} entry, an unchecked one has its entry
- * removed, anything already correct is left alone. Overrides outside the
- * shown window, or carrying a date/amount override rather than a pure
- * pause marker, are untouched. Identical logic to
- * savingsPotLedger.ts's setPausedDeposits — see that function's comment
- * for the full reasoning (Adam's explicit no-separate-resume-flow call).
+ * occurrenceOverrides to match — a newly-checked date gets `deleted: true`
+ * merged onto its existing override entry (if any), an unchecked one has
+ * `deleted` cleared from its entry, anything already correct is left
+ * alone. Overrides outside the shown window are untouched.
+ *
+ * UAT 2026-09-11 (bill-pause-after-amount-override) — this used to keep
+ * any date/amount-carrying entry as a separate "untouched" record and
+ * then unconditionally APPEND a brand-new `{originalDate, deleted: true}`
+ * entry alongside it for any date being paused — so an occurrence that
+ * already had a single-occurrence amount override ended up with TWO
+ * entries sharing the same originalDate. `walkOccurrences`'s `.find()`
+ * always matches the FIRST one (the untouched amount-only entry, since it
+ * was spread before the new pause entry), so the `deleted: true` entry
+ * was silently unreachable and pausing an already-amount-overridden
+ * occurrence did nothing. Now MERGES `deleted` onto the SAME entry a
+ * prior amount/date override lives on, instead of ever creating a second
+ * entry for one date — same merge-in-place pattern
+ * applyTemplateSingleOccurrenceAmountChange already uses for the amount
+ * side.
  */
 export function setPausedTemplateOccurrences(template: RecurringTemplate, windowDates: string[], pausedDates: string[]): Pick<RecurringTemplate, 'occurrenceOverrides'> {
   const windowSet = new Set(windowDates)
   const pausedSet = new Set(pausedDates)
-  const untouched = (template.occurrenceOverrides ?? []).filter((o) => !windowSet.has(o.originalDate) || o.date !== undefined || o.amount !== undefined)
-  const newPauses = [...pausedSet].map((originalDate) => ({ originalDate, deleted: true }))
-  return { occurrenceOverrides: [...untouched, ...newPauses] }
+  const outside = (template.occurrenceOverrides ?? []).filter((o) => !windowSet.has(o.originalDate))
+  const priorByDate = new Map((template.occurrenceOverrides ?? []).filter((o) => windowSet.has(o.originalDate)).map((o) => [o.originalDate, o]))
+  const merged: RecurringOccurrenceOverride[] = []
+  for (const originalDate of windowSet) {
+    const prior = priorByDate.get(originalDate)
+    const isPaused = pausedSet.has(originalDate)
+    if (!isPaused && prior?.date === undefined && prior?.amount === undefined) continue
+    const entry: RecurringOccurrenceOverride = { originalDate }
+    if (prior?.date !== undefined) entry.date = prior.date
+    if (prior?.amount !== undefined) entry.amount = prior.amount
+    if (isPaused) entry.deleted = true
+    merged.push(entry)
+  }
+  return { occurrenceOverrides: [...outside, ...merged] }
 }
 
 /**

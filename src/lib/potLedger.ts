@@ -207,13 +207,28 @@ export function applyPotSingleDepositAmountChange(pot: Pot, newAmount: number, o
   return { recurringDepositOverrides: [...withoutThis, { ...priorEntry, originalDate, amount: newAmount }] }
 }
 
-/** Same multi-select "replace the pause set for this window" semantics as SavingsPot's setPausedDeposits — see that function's own comment. */
+// UAT 2026-09-11 fix — merges `deleted` onto the SAME override entry a
+// prior single-occurrence amount override lives on, instead of creating
+// a second entry sharing the same originalDate (see schedule.ts's
+// setPausedTemplateOccurrences for the full "pausing an already-amount-
+// overridden occurrence silently did nothing" bug this replaces).
 export function setPausedPotDeposits(pot: Pot, windowDates: string[], pausedDates: string[]): Pick<Pot, 'recurringDepositOverrides'> {
   const windowSet = new Set(windowDates)
   const pausedSet = new Set(pausedDates)
-  const untouched = (pot.recurringDepositOverrides ?? []).filter((o) => !windowSet.has(o.originalDate) || o.date !== undefined || o.amount !== undefined)
-  const newPauses: RecurringOccurrenceOverride[] = [...pausedSet].map((originalDate) => ({ originalDate, deleted: true }))
-  return { recurringDepositOverrides: [...untouched, ...newPauses] }
+  const outside = (pot.recurringDepositOverrides ?? []).filter((o) => !windowSet.has(o.originalDate))
+  const priorByDate = new Map((pot.recurringDepositOverrides ?? []).filter((o) => windowSet.has(o.originalDate)).map((o) => [o.originalDate, o]))
+  const merged: RecurringOccurrenceOverride[] = []
+  for (const originalDate of windowSet) {
+    const prior = priorByDate.get(originalDate)
+    const isPaused = pausedSet.has(originalDate)
+    if (!isPaused && prior?.date === undefined && prior?.amount === undefined) continue
+    const entry: RecurringOccurrenceOverride = { originalDate }
+    if (prior?.date !== undefined) entry.date = prior.date
+    if (prior?.amount !== undefined) entry.amount = prior.amount
+    if (isPaused) entry.deleted = true
+    merged.push(entry)
+  }
+  return { recurringDepositOverrides: [...outside, ...merged] }
 }
 
 // ── Outgoing (bill/loan) activity — the genuinely new half ────────────

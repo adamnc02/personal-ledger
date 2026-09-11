@@ -14,7 +14,7 @@ import { aerCreditedInterest, dailyAccrualInterest, walkCreditingDates, walkMont
 import { generateTransactionsForTemplate } from './schedule'
 import { savingsPotSignedAmount, transferTouchesSavingsPot } from './transferLedger'
 import { SAVINGS_CATEGORY_ID } from '../types/ledger'
-import type { PayCycleConfig, RecurringTemplate, SavingsInterestMethod, SavingsPot, Transaction } from '../types/ledger'
+import type { PayCycleConfig, RecurringOccurrenceOverride, RecurringTemplate, SavingsInterestMethod, SavingsPot, Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 const MAX_OCCURRENCES = 2000
@@ -156,12 +156,28 @@ export function applySavingsPotSingleDepositAmountChange(pot: SavingsPot, newAmo
   return { recurringDepositOverrides: [...withoutThis, { ...priorEntry, originalDate, amount: newAmount }] }
 }
 
+// UAT 2026-09-11 fix — merges `deleted` onto the SAME override entry a
+// prior single-occurrence amount override lives on, instead of creating
+// a second entry sharing the same originalDate (see schedule.ts's
+// setPausedTemplateOccurrences for the full "pausing an already-amount-
+// overridden occurrence silently did nothing" bug this replaces).
 export function setPausedDeposits(pot: SavingsPot, windowDates: string[], pausedDates: string[]): Pick<SavingsPot, 'recurringDepositOverrides'> {
   const windowSet = new Set(windowDates)
   const pausedSet = new Set(pausedDates)
-  const untouched = (pot.recurringDepositOverrides ?? []).filter((o) => !windowSet.has(o.originalDate) || o.date !== undefined || o.amount !== undefined)
-  const newPauses = [...pausedSet].map((originalDate) => ({ originalDate, deleted: true }))
-  return { recurringDepositOverrides: [...untouched, ...newPauses] }
+  const outside = (pot.recurringDepositOverrides ?? []).filter((o) => !windowSet.has(o.originalDate))
+  const priorByDate = new Map((pot.recurringDepositOverrides ?? []).filter((o) => windowSet.has(o.originalDate)).map((o) => [o.originalDate, o]))
+  const merged: RecurringOccurrenceOverride[] = []
+  for (const originalDate of windowSet) {
+    const prior = priorByDate.get(originalDate)
+    const isPaused = pausedSet.has(originalDate)
+    if (!isPaused && prior?.date === undefined && prior?.amount === undefined) continue
+    const entry: RecurringOccurrenceOverride = { originalDate }
+    if (prior?.date !== undefined) entry.date = prior.date
+    if (prior?.amount !== undefined) entry.amount = prior.amount
+    if (isPaused) entry.deleted = true
+    merged.push(entry)
+  }
+  return { recurringDepositOverrides: [...outside, ...merged] }
 }
 
 /**

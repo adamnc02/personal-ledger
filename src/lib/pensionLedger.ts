@@ -15,7 +15,7 @@ import { addMonths, addQuarters, addWeeks, addYears, addDays, startOfDay } from 
 import { toLocalIsoDate as toIso } from './date'
 import { adjustToWorkingDay, cycleBoundsForDate } from './payCycle'
 import { INCOME_CATEGORY_ID } from '../types/ledger'
-import type { AppDataV2, PayCycleConfig, Pension, RecurrenceFrequency, Transaction } from '../types/ledger'
+import type { AppDataV2, PayCycleConfig, Pension, RecurrenceFrequency, RecurringOccurrenceOverride, Transaction } from '../types/ledger'
 
 const MAX_OCCURRENCES = 2000
 
@@ -169,13 +169,30 @@ export function scheduledPensionDates(pension: Pension, rangeStart: Date, rangeE
   return results
 }
 
-/** Reconciles occurrenceOverrides against a full desired-pause-set from the picker — identical logic to schedule.ts's setPausedTemplateOccurrences/savingsPotLedger.ts's setPausedDeposits (Phase 4). */
+/**
+ * Reconciles occurrenceOverrides against a full desired-pause-set from
+ * the picker — same merge-onto-the-same-entry logic as schedule.ts's
+ * setPausedTemplateOccurrences (UAT 2026-09-11 fix — see that function's
+ * own comment for the full "two entries sharing one originalDate, the
+ * pause silently unreachable" bug this replaces).
+ */
 export function setPausedPensionOccurrences(pension: Pension, windowDates: string[], pausedDates: string[]): Pick<Pension, 'occurrenceOverrides'> {
   const windowSet = new Set(windowDates)
   const pausedSet = new Set(pausedDates)
-  const untouched = (pension.occurrenceOverrides ?? []).filter((o) => !windowSet.has(o.originalDate) || o.date !== undefined || o.amount !== undefined)
-  const newPauses = [...pausedSet].map((originalDate) => ({ originalDate, deleted: true }))
-  return { occurrenceOverrides: [...untouched, ...newPauses] }
+  const outside = (pension.occurrenceOverrides ?? []).filter((o) => !windowSet.has(o.originalDate))
+  const priorByDate = new Map((pension.occurrenceOverrides ?? []).filter((o) => windowSet.has(o.originalDate)).map((o) => [o.originalDate, o]))
+  const merged: RecurringOccurrenceOverride[] = []
+  for (const originalDate of windowSet) {
+    const prior = priorByDate.get(originalDate)
+    const isPaused = pausedSet.has(originalDate)
+    if (!isPaused && prior?.date === undefined && prior?.amount === undefined) continue
+    const entry: RecurringOccurrenceOverride = { originalDate }
+    if (prior?.date !== undefined) entry.date = prior.date
+    if (prior?.amount !== undefined) entry.amount = prior.amount
+    if (isPaused) entry.deleted = true
+    merged.push(entry)
+  }
+  return { occurrenceOverrides: [...outside, ...merged] }
 }
 
 /** Builds the patch for "change the standing amount, effective from a chosen upcoming payment" — mirrors schedule.ts's applyTemplateAmountChange exactly, against Pension's fields. */

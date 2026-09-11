@@ -4,6 +4,7 @@ import { formatCurrency } from '../lib/format'
 import { PauseToggleButton } from './FormButtons'
 import { NumberInput } from './NumberInput'
 import { ConfirmModal } from './ConfirmModal'
+import { useSavedFlash, SavedFlashOverlay } from './SavedFlash'
 
 /**
  * "Manage upcoming payments" (2026-09-10 interaction redesign, Adam-
@@ -93,6 +94,14 @@ export function PausedOccurrencesControl({
     | { kind: 'amount'; originalDate: string; displayDate: string; oldAmount: number; newAmount: number }
     | null
   >(null)
+  // UAT 2026-09-11 — every save on a row (pause on/off, amount edit) now
+  // flashes that ONE row green, same "collapse + flash" feedback every
+  // other Save button in the app already gives (SavedFlash.tsx). Tracks
+  // WHICH row via `flashDate` since `useSavedFlash`'s own `active` is a
+  // single shared boolean — only the row matching `flashDate` renders the
+  // overlay while it's active.
+  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  const [flashDate, setFlashDate] = useState<string | null>(null)
 
   function toggleExpanded() {
     setExpanded((prev) => {
@@ -108,6 +117,8 @@ export function PausedOccurrencesControl({
     if (currentlyPaused.has(originalDate)) {
       // Pause OFF — no confirmation, auto-save immediately.
       onSave([...currentlyPaused].filter((d) => d !== originalDate))
+      setFlashDate(originalDate)
+      triggerFlash()
     } else {
       // Pause ON — confirm first.
       setConfirming({ kind: 'pause', originalDate, displayDate })
@@ -144,7 +155,8 @@ export function PausedOccurrencesControl({
               const isPaused = currentlyPaused.has(originalDate)
               const isEditing = editingDate === originalDate
               return (
-                <div key={originalDate} className="rounded-xl px-3 py-2" style={{ background: 'var(--color-surface)' }}>
+                <div key={originalDate} className="relative overflow-hidden rounded-xl px-3 py-2" style={{ background: 'var(--color-surface)' }}>
+                  <SavedFlashOverlay active={flashActive && flashDate === originalDate} />
                   <div className="flex items-center gap-2">
                     <div
                       role={onSaveAmount ? 'button' : undefined}
@@ -199,6 +211,8 @@ export function PausedOccurrencesControl({
           cancelLabel="Cancel"
           onConfirm={() => {
             onSave([...currentlyPaused, confirming.originalDate])
+            setFlashDate(confirming.originalDate)
+            triggerFlash()
             setConfirming(null)
           }}
           onCancel={() => setConfirming(null)}
@@ -212,6 +226,8 @@ export function PausedOccurrencesControl({
           cancelLabel="Cancel"
           onConfirm={() => {
             onSaveAmount?.(confirming.originalDate, confirming.newAmount)
+            setFlashDate(confirming.originalDate)
+            triggerFlash()
             setConfirming(null)
             setEditingDate(null)
           }}
