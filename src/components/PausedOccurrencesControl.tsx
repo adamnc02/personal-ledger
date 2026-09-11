@@ -155,7 +155,7 @@ export function PausedOccurrencesControl({
               const isPaused = currentlyPaused.has(originalDate)
               const isEditing = editingDate === originalDate
               return (
-                <div key={originalDate} className="relative overflow-hidden rounded-xl px-3 py-2" style={{ background: 'var(--color-surface)' }}>
+                <div key={originalDate} className="relative shrink-0 overflow-hidden rounded-xl px-3 py-2" style={{ background: 'var(--color-surface)' }}>
                   <SavedFlashOverlay active={flashActive && flashDate === originalDate} />
                   <div className="flex items-center gap-2">
                     <div
