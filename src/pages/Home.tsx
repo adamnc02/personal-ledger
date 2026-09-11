@@ -8,11 +8,11 @@ import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary } from '../lib/jointLedger'
 import { computeJointAccountProjection, jointAccountSignedAmount } from '../lib/jointAccountLedger'
 import { computeHouseholdProjections, type HouseholdPersonProjection } from '../lib/householdLedger'
-import { nextMinimumChargeAmount, totalPaidForCard, withLiveBalance, withLiveBalances, creditCardCyclePeriods, buildCreditCardCycleSections, type CreditCardCycleSection } from '../lib/creditCards'
+import { nextMinimumChargeAmount, totalPaidForCard, withLiveBalance, creditCardCyclePeriods, buildCreditCardCycleSections, type CreditCardCycleSection } from '../lib/creditCards'
 import { resolveCycleBounds } from '../lib/pensionLedger'
 import { findApplicableSnapshot } from '../lib/salaryLedger'
 import { addDays } from 'date-fns'
-import { savingsPotBalanceAsOf, projectedBalanceAt, amountNeededPerPayPeriod, buildSavingsPotScheduleRows } from '../lib/savingsPotLedger'
+import { savingsPotBalanceAsOf, projectedBalanceAt, amountNeededPerPayPeriod, buildSavingsPotScheduleRows, type SavingsPotScheduleRow } from '../lib/savingsPotLedger'
 import { computePotProjection, potSignedAmount } from '../lib/potLedger'
 import { isLedgerTransaction, signedAmount } from '../lib/runningBalance'
 import { computeCycleSummary, compareByDateSalaryFirst } from '../lib/cycleSummary'
@@ -35,7 +35,6 @@ type DeckEntry =
   | { kind: 'joint' }
   | { kind: 'household' }
   | { kind: 'credit_card'; cardId: string }
-  | { kind: 'credit_cards_combined' }
   | { kind: 'savings_pot'; potId: string }
   | { kind: 'pot'; potId: string }
 
@@ -58,9 +57,12 @@ function buildDeck(data: AppDataV2): DeckEntry[] {
   const myBillsPots = (data.pots ?? []).filter((p) => p.personId === data.primaryPersonId && p.active)
   for (const p of myBillsPots) deck.push({ kind: 'pot', potId: p.id })
 
+  // A combined "All Cards" entry used to be appended here once the
+  // person had more than one active card — removed (Adam-specified,
+  // 2026-09-12): each credit card already gets its own deck entry, and
+  // the extra combined one wasn't wanted alongside them.
   const myCards = data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active)
   for (const c of myCards) deck.push({ kind: 'credit_card', cardId: c.id })
-  if (myCards.length > 1) deck.push({ kind: 'credit_cards_combined' })
 
   // REDESIGN (Adam-specified, 2026-09-02 — "it needs its own hero card,
   // like credit cards/joint account in the swipe deck, and not to be in
@@ -277,7 +279,19 @@ export function Home() {
 // lives HERE now too, not in ProgressRingsSection — matching Adam's
 // original wording ("shows... on the home page SAVINGS card") more
 // literally than the first pass did. ──
-function SavingsPotDetail({ pot, data, horizon }: { pot: SavingsPot; data: AppDataV2; horizon: ProjectionHorizon }) {
+function SavingsPotDetail({
+  pot,
+  data,
+  horizon,
+  cycleTotals,
+  showCleared,
+}: {
+  pot: SavingsPot
+  data: AppDataV2
+  horizon: ProjectionHorizon
+  cycleTotals: boolean
+  showCleared: boolean
+}) {
   const balance = savingsPotBalanceAsOf(pot, data.transactions, new Date())
 
   // BUGFIX (Adam-reported, 2026-09-03): this used to always show a fixed
@@ -334,6 +348,19 @@ function SavingsPotDetail({ pot, data, horizon }: { pot: SavingsPot; data: AppDa
     runningTotal += row.type === 'savings_withdrawal' ? -row.amount : row.amount
     return { row, running: runningTotal }
   })
+  // Respects "Show cleared" the same way every other flat list on this
+  // page does — computed AFTER the running fold above, so hiding a row
+  // never changes the balance figures, only which rows render.
+  const visibleActivity = activityWithRunning.filter(({ row }) => showCleared || row.status !== 'cleared')
+
+  // Cycle-end totals (Adam-specified, 2026-09-12): Savings Pots now get
+  // the same "Show cleared"/"Cycle-end totals" toggles every other
+  // household-pay-cycle-based card (Personal/Joint/Household/Pot) already
+  // has, using the SAME cycle boundaries (horizonCycles) — explicitly NOT
+  // a credit card's own billing-cycle dates, which stay untouched. Reuses
+  // `activity`/`openingRunningBalance` above (already the right window
+  // and anchor), just re-partitioned into per-cycle sections.
+  const cycles = horizonCycles(data, pot.personId, horizon, new Date())
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
@@ -346,12 +373,16 @@ function SavingsPotDetail({ pot, data, horizon }: { pot: SavingsPot; data: AppDa
         </p>
       )}
 
-      <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-        {activityWithRunning.map(({ row, running }) => (
-          <SavingsPotActivityRow key={`${row.type}-${row.date}`} row={row} runningBalance={running} />
-        ))}
-        {activity.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] text-center py-6">Nothing in {horizon === 'current_cycle' ? 'this cycle' : 'the next 3 cycles'}.</p>}
-      </div>
+      {cycleTotals ? (
+        <SavingsPotCycleGroupedList rows={activity} openingRunningBalance={openingRunningBalance} cycles={cycles} showCleared={showCleared} />
+      ) : (
+        <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+          {visibleActivity.map(({ row, running }) => (
+            <SavingsPotActivityRow key={`${row.type}-${row.date}`} row={row} runningBalance={running} />
+          ))}
+          {visibleActivity.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] text-center py-6">Nothing in {horizon === 'current_cycle' ? 'this cycle' : 'the next 3 cycles'}.</p>}
+        </div>
+      )}
 
       {/* REPOSITIONED (Adam-specified, 2026-09-03): "pie chart at the
           bottom to match all others" — moved from just under the heading
@@ -406,6 +437,100 @@ function SavingsPotActivityRow({
         </p>
         <p className="text-[10px] text-[var(--color-ink-faint)] tabular-nums">£{formatCurrency(runningBalance)}</p>
       </div>
+    </div>
+  )
+}
+
+/**
+ * Savings Pot's own "Cycle-end totals" view (Adam-specified, 2026-09-12)
+ * — same collapsed-by-default, per-cycle-section-with-subtotal shape as
+ * `CycleGroupedList` (used by Personal/Joint/Pot), same household
+ * pay-cycle boundaries (`horizonCycles`), just built against
+ * `SavingsPotScheduleRow`'s synthetic shape instead of a real
+ * `Transaction[]` — a savings pot's activity is assembled from generated
+ * schedule rows, not real transactions, so it can't share `TransactionRow`
+ * the way the Transaction-backed lists do. Rendered via the SAME
+ * `SavingsPotActivityRow` the flat (non-cycle) view already uses.
+ */
+function SavingsPotCycleGroupedList({
+  rows,
+  openingRunningBalance,
+  cycles,
+  showCleared,
+}: {
+  rows: SavingsPotScheduleRow[]
+  openingRunningBalance: number
+  cycles: { start: Date; end: Date }[]
+  showCleared: boolean
+}) {
+  const [toggled, setToggled] = useState<Set<string>>(() => new Set())
+  const toggle = (key: string) =>
+    setToggled((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
+  const ordered = rows.slice().sort((a, b) => a.date.localeCompare(b.date))
+  let running = openingRunningBalance
+  const withRunning = ordered.map((row) => {
+    running += row.type === 'savings_withdrawal' ? -row.amount : row.amount
+    return { row, running }
+  })
+
+  let carried = openingRunningBalance
+  const sections = cycles.map((cycle, i) => {
+    const startIso = toLocalIsoDate(cycle.start)
+    const endIso = toLocalIsoDate(cycle.end)
+    // Same "first section absorbs everything up to its own end, no lower
+    // bound" reasoning as CycleGroupedList — see that component's comment.
+    const sectionRows = withRunning.filter(({ row }) => (i === 0 || row.date >= startIso) && row.date <= endIso)
+    const closing = sectionRows.length > 0 ? sectionRows[sectionRows.length - 1].running : carried
+    carried = closing
+    const visibleRows = sectionRows.filter(({ row }) => showCleared || row.status !== 'cleared')
+    return { key: startIso, isCurrent: i === 0, startIso, endIso, visibleRows, closing }
+  })
+
+  return (
+    <div className="flex flex-col gap-2">
+      {sections.map((section) => {
+        const expanded = toggled.has(section.key)
+        return (
+          <div key={section.key} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
+            <button onClick={() => toggle(section.key)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
+              <span className="flex items-center gap-1.5 min-w-0">
+                {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                <span className="text-xs font-semibold text-[var(--color-ink)] truncate">
+                  {section.isCurrent ? 'Current cycle' : `${formatCycleDate(section.startIso)} – ${formatCycleDate(section.endIso)}`}
+                </span>
+              </span>
+              {!expanded && (
+                <span className="text-xs font-mono font-semibold tabular-nums shrink-0" style={{ color: 'var(--color-ink-muted)' }}>
+                  £{formatCurrency(section.closing)}
+                </span>
+              )}
+            </button>
+
+            {expanded && (
+              <div className="px-3 pb-1">
+                <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+                  {section.visibleRows.map(({ row, running }) => (
+                    <SavingsPotActivityRow key={`${row.type}-${row.date}`} row={row} runningBalance={running} />
+                  ))}
+                  {section.visibleRows.length === 0 && (
+                    <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-3">Nothing in this cycle.</p>
+                  )}
+                </div>
+                <div className="flex items-center justify-between pt-2 pb-2 mt-1 border-t" style={{ borderColor: 'var(--color-track)' }}>
+                  <span className="text-[11px] font-medium text-[var(--color-ink-muted)]">Balance at {formatCycleDate(section.endIso)}</span>
+                  <span className="text-sm font-mono font-semibold tabular-nums text-[var(--color-ink)]">£{formatCurrency(section.closing)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -631,10 +756,6 @@ function heroLabel(entry: DeckEntry, data: AppDataV2): string {
       const card = data.creditCards.find((c) => c.id === entry.cardId)
       return `${card?.name ?? 'Credit Card'} Credit Card`
     }
-    case 'credit_cards_combined': {
-      const myCards = data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active)
-      return `All Cards ${myCards.length} cards`
-    }
     case 'savings_pot': {
       const pot = data.savingsPots.find((p) => p.id === entry.potId)
       return `${pot?.name ?? 'Savings'} Savings`
@@ -744,19 +865,6 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
         </BankCard>
       )
     }
-    case 'credit_cards_combined': {
-      // Same horizon-awareness fix as the single-card case just above.
-      const combinedAsOf = horizon === 'three_cycles' ? horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()) : new Date()
-      const myCards = withLiveBalances(data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active), data.transactions, combinedAsOf)
-      const totalOutstanding = round2(myCards.reduce((s, c) => s + c.currentBalance, 0))
-      return (
-        <BankCard variant="dark" bankLabel="All Cards" accountLabel={`${myCards.length} cards`} icon={<Layers size={18} strokeWidth={1.5} style={{ color: 'var(--color-coral)' }} />}>
-          <div className="mt-6 space-y-1.5">
-            <CardRow label="Total owed" value={totalOutstanding} emphasized />
-          </div>
-        </BankCard>
-      )
-    }
     case 'savings_pot': {
       const pot = data.savingsPots.find((p) => p.id === entry.potId)
       if (!pot) return null
@@ -828,11 +936,9 @@ function DeckDetail(props: {
       const card = data.creditCards.find((c) => c.id === entry.cardId)
       return card ? <CreditCardDetail card={card} data={data} horizon={props.horizon} cycleTotals={props.cycleTotals} showCleared={props.showCleared} /> : null
     }
-    case 'credit_cards_combined':
-      return <CreditCardsCombinedDetail data={data} horizon={props.horizon} />
     case 'savings_pot': {
       const pot = data.savingsPots.find((p) => p.id === entry.potId)
-      return pot ? <SavingsPotDetail pot={pot} data={data} horizon={props.horizon} /> : null
+      return pot ? <SavingsPotDetail pot={pot} data={data} horizon={props.horizon} cycleTotals={props.cycleTotals} showCleared={props.showCleared} /> : null
     }
     case 'pot': {
       const pot = (data.pots ?? []).find((p) => p.id === entry.potId)
@@ -862,11 +968,17 @@ function DeckDetail(props: {
  * horizons apply (a card's own "this cycle"/"next 3 cycles" periods are
  * always meaningful, unlike the personal/household/joint case where
  * "this cycle" is a single span with nothing to subtotal).
+ *
+ * Widened again (Adam-specified, 2026-09-12) for 'savings_pot' — grouped
+ * with personal/household/joint/pot, NOT with credit_card: a Savings Pot
+ * uses the household's own pay-cycle boundaries (horizonCycles), same as
+ * that group, unlike a credit card's own billing-cycle dates, which stay
+ * untouched by this change.
  */
 function canShowCycleTotals(entry: DeckEntry, horizon: ProjectionHorizon, grouping: Grouping, order: Order): boolean {
   if (entry.kind === 'credit_card') return order === 'date' && grouping !== 'category'
   return (
-    (entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot') &&
+    (entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot' || entry.kind === 'savings_pot') &&
     horizon === 'three_cycles' &&
     order === 'date' &&
     grouping !== 'category'
@@ -904,15 +1016,13 @@ function DeckControls({
   setShowCleared: (v: boolean) => void
 }) {
   // Widened (Adam-specified, 2026-09-03): Group by/Order by/Cycle-totals/
-  // Show cleared now apply to Household and Joint too, not just Personal
-  // — credit cards and savings pots still don't offer these (no
-  // meaningful "category" to group a single account's own activity by
-  // beyond what's already shown). Pots backlog item (2026-09 session) —
-  // a Pot DOES get the full toolkit, unlike SavingsPot: Adam's own spec
-  // for it, verbatim, is "the same style as the Personal swipe card...
-  // group by / sort by features, with the same default settings and
-  // layout as Personal" — genuinely different from a SavingsPot's much
-  // simpler deposit/interest history.
+  // Show cleared now apply to Household and Joint too, not just Personal.
+  // Pots backlog item (2026-09 session) — a Pot DOES get the full
+  // toolkit, unlike SavingsPot: Adam's own spec for it, verbatim, is "the
+  // same style as the Personal swipe card... group by / sort by
+  // features, with the same default settings and layout as Personal" —
+  // genuinely different from a SavingsPot's much simpler deposit/interest
+  // history, which has no meaningful "category" to group by.
   const showHorizon = true
   const showGroupOrder = entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot'
   // UAT 2026-09-08 (Summary page cycle-end totals, Adam-specified) — a
@@ -924,8 +1034,16 @@ function DeckControls({
   // other list on this page hides cleared rows by default, and the
   // credit card's own lists (flat and cycle-grouped) had no way to
   // toggle that at all.
-  const showCreditCardControls = entry.kind === 'credit_card'
-  const showCreditCardCycleTotals = entry.kind === 'credit_card' && canShowCycleTotals(entry, horizon, grouping, order)
+  //
+  // Widened again (Adam-specified, 2026-09-12) to include 'savings_pot'
+  // — every card in the deck now offers Show cleared/Cycle-end totals in
+  // SOME form; a Savings Pot gets the same narrow cluster a credit card
+  // does (no Group-by/Order-by, still no meaningful category to group a
+  // single pot's own deposit/interest/withdrawal history by), just using
+  // the household pay-cycle dates instead of a credit card's own billing
+  // dates — see canShowCycleTotals' own comment.
+  const showSimpleToggles = entry.kind === 'credit_card' || entry.kind === 'savings_pot'
+  const showSimpleCycleTotals = showSimpleToggles && canShowCycleTotals(entry, horizon, grouping, order)
   // Household is the only card with a genuine "group by person" —
   // Personal is already one person, and Joint deliberately shows no
   // individuals at all (Adam-specified, 2026-09-03).
@@ -945,10 +1063,10 @@ function DeckControls({
   return (
     <div className="flex items-start justify-between mb-5 px-1">
       <div>{showHorizon && <CycleToggle value={horizon} onChange={setHorizon} />}</div>
-      {showCreditCardControls && (
+      {showSimpleToggles && (
         <div className="flex flex-col items-end gap-1.5">
           <ToggleSwitch label="Show cleared" checked={showCleared} onChange={setShowCleared} />
-          {showCreditCardCycleTotals && <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />}
+          {showSimpleCycleTotals && <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />}
         </div>
       )}
       {showGroupOrder && (
@@ -2160,52 +2278,3 @@ function CreditCardDetail({ card: storedCard, data, horizon, cycleTotals, showCl
   )
 }
 
-function CreditCardsCombinedDetail({ data, horizon }: { data: AppDataV2; horizon: ProjectionHorizon }) {
-  // Same horizon-awareness fix as CreditCardDetail just above.
-  const asOf = horizon === 'three_cycles' ? horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()) : new Date()
-  const myCards = withLiveBalances(data.creditCards.filter((c) => c.ownerId === data.primaryPersonId && c.active), data.transactions, asOf)
-  const totalOutstanding = round2(myCards.reduce((s, c) => s + c.currentBalance, 0))
-  const totalPaid = myCards.reduce((s, c) => s + totalPaidForCard(c.id, data.transactions), 0)
-  const percentPaid = totalPaid + totalOutstanding > 0 ? (totalPaid / (totalPaid + totalOutstanding)) * 100 : 0
-  // UAT 2026-09-08 (8-bug9.1-home-balance note) — same fix as
-  // CreditCardDetail's own activity list just above.
-  const cycleStart = toLocalIsoDate(resolveCycleBounds(data, data.primaryPersonId, new Date()).start)
-  const horizonEndIso = toLocalIsoDate(horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()))
-  const activity = data.transactions
-    .filter(
-      (t) =>
-        t.creditCardId &&
-        myCards.some((c) => c.id === t.creditCardId) &&
-        (t.type === 'credit_card_spend' || t.type === 'credit_card_payment') &&
-        t.date >= cycleStart &&
-        t.date <= horizonEndIso,
-    )
-    .sort((a, b) => b.date.localeCompare(a.date))
-
-  return (
-    <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">All Credit Cards</h2>
-
-      <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-        {activity.map((t) => (
-          <CardActivityRow key={t.id} t={t} />
-        ))}
-        {activity.length === 0 && <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">No activity yet.</p>}
-      </div>
-
-      <div className="flex justify-center my-4">
-        <ProgressRing
-          percent={percentPaid}
-          value={`£${formatCurrency(totalOutstanding)}`}
-          label="Total outstanding"
-          size={160}
-          strokeWidth={14}
-          icon={<Layers size={28} strokeWidth={1.75} />}
-        />
-      </div>
-      <p className="text-xs text-[var(--color-ink-muted)] text-center">
-        £{formatCurrency(totalPaid)} paid to date, across {myCards.length} cards
-      </p>
-    </div>
-  )
-}
