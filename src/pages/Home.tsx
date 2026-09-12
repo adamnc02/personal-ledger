@@ -307,6 +307,14 @@ function SavingsPotDetail({
   const horizonEnd = horizonRangeEnd(data, data.primaryPersonId, horizon, new Date())
   const primaryPayCycle = data.payCycles.find((c) => c.personId === data.primaryPersonId)
   const projectedBalance = showProjection ? projectedBalanceAt(pot, balance, data.transactions, new Date(), horizonEnd, data.recurringTemplates, primaryPayCycle) : balance
+  // Header caption (Adam-specified, 2026-09-12 — "match the bills card"):
+  // unlike `projectedBalance` above (short-circuited to `balance` outside
+  // "Next 3 cycles" purely for the ring's own showProjection gating), this
+  // is a genuine per-horizon projection always, same as Pot's own caption
+  // (computePotProjection's projectedBalance is never short-circuited
+  // either) — horizonEnd is already the right cycle-end for whichever
+  // horizon is selected.
+  const captionProjectedBalance = projectedBalanceAt(pot, balance, data.transactions, new Date(), horizonEnd, data.recurringTemplates, primaryPayCycle)
 
   const person = data.people.find((p) => p.id === data.primaryPersonId)
   const currentSnapshot = person ? findApplicableSnapshot(person, todayIso()) : null
@@ -365,7 +373,9 @@ function SavingsPotDetail({
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
       <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">{pot.name}</h2>
-      <p className="text-2xl font-display font-bold text-[var(--color-ink)] mb-3">£{formatCurrency(balance)}</p>
+      <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+        £{formatCurrency(balance)} now · £{formatCurrency(captionProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
+      </p>
 
       {goalLabel && (
         <p className="text-xs text-center mb-4" style={{ color: 'var(--color-coral)' }}>
@@ -1612,7 +1622,10 @@ function PersonalDetail({
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-4">Personal</h2>
+      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">Personal</h2>
+      <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+        £{formatCurrency(projection.clearedBalance)} now · £{formatCurrency(projection.projectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
+      </p>
 
       {grouping === 'category' ? (
         <CategoryGroupedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
@@ -1821,15 +1834,14 @@ function JointDetail({
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-4">Joint</h2>
+      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">Joint</h2>
 
       {!jointProjection ? (
         <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">No joint account set up yet.</p>
       ) : (
         <>
-          <p className="text-xs text-[var(--color-ink-faint)] mb-3">
-            £{formatCurrency(jointProjection.clearedBalance)} now · £{formatCurrency(jointProjection.projectedBalance)} projected ·{' '}
-            {HORIZON_LABELS[horizon].toLowerCase()}
+          <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+            £{formatCurrency(jointProjection.clearedBalance)} now · £{formatCurrency(jointProjection.projectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
           </p>
           {grouping === 'category' ? (
             <CategoryGroupedList transactions={jointProjection.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
@@ -2029,6 +2041,8 @@ function HouseholdDetail({
 
   const combinedTransactions = personProjections.flatMap((pp) => pp.transactions)
   const combinedOpeningBalance = personProjections.reduce((sum, pp) => sum + pp.openingBalance, 0)
+  const combinedClearedBalance = personProjections.reduce((sum, pp) => sum + pp.clearedBalance, 0)
+  const combinedProjectedBalance = personProjections.reduce((sum, pp) => sum + pp.projectedBalance, 0)
   // Combined single fold in date order, same as the personal card's own
   // running balance — Adam's own spec for the ungrouped view. No single
   // "correct" cycle boundary exists once two people can have different
@@ -2046,7 +2060,10 @@ function HouseholdDetail({
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-4">Household</h2>
+      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">Household</h2>
+      <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+        £{formatCurrency(combinedClearedBalance)} now · £{formatCurrency(combinedProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
+      </p>
       <div className="flex flex-col gap-1.5 mb-1">
         {personProjections.map((pp) => (
           <div key={pp.personId} className="flex items-center justify-between text-sm py-1">
@@ -2199,6 +2216,13 @@ function CreditCardDetail({ card: storedCard, data, horizon, cycleTotals, showCl
   // up in this pie chart either.
   const asOf = horizon === 'three_cycles' ? horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()) : new Date()
   const card = withLiveBalance(storedCard, data.transactions, asOf)
+  // Header caption (Adam-specified, 2026-09-12 — "match the bills card"):
+  // a credit card has no "projected balance" the way a cash account
+  // does — it's money owed, not saved — so "now"/"projected" here means
+  // owed-today vs owed-as-of-`asOf` (the SAME horizon-aware balance
+  // `card.currentBalance` above already is), not a genuine forward
+  // projection the way Personal/Joint/Household/Pot/Savings Pot mean it.
+  const nowOwed = withLiveBalance(storedCard, data.transactions, new Date()).currentBalance
   const paid = totalPaidForCard(card.id, data.transactions)
   const percentPaid = paid + card.currentBalance > 0 ? (paid / (paid + card.currentBalance)) * 100 : 0
   // UAT 2026-09-08 (8-bug9.1-home-balance note) — the pie/balance above
@@ -2244,9 +2268,11 @@ function CreditCardDetail({ card: storedCard, data, horizon, cycleTotals, showCl
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">
-        {card.name} <span className="text-xs font-normal text-[var(--color-ink-muted)]">due on the {card.paymentDayOfMonth}{ordinalSuffix(card.paymentDayOfMonth)}</span>
-      </h2>
+      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">{card.name}</h2>
+      <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+        £{formatCurrency(nowOwed)} owed · £{formatCurrency(card.currentBalance)} projected · due on the {card.paymentDayOfMonth}
+        {ordinalSuffix(card.paymentDayOfMonth)}
+      </p>
 
       {cycleTotals ? (
         <CreditCardCycleGroupedList sections={cardCycleSections} showCleared={showCleared} />
