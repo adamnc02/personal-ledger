@@ -160,9 +160,15 @@ function groupingCategoryId(t: Transaction): string {
  * property than the old label precision was worth. There is no
  * double-counting either way: Projected is computed independently in
  * projection.ts and never reads this function.
+ *
+ * `amountSign` defaults to the personal ledger's own signedAmount, but
+ * takes an override (2026-09-12, hero-card consistency sweep) for a
+ * non-personal ledger with its own type-derived sign convention —
+ * potSignedAmount for Pot's hero, same "amountSign override" pattern
+ * CycleGroupedList/CategoryGroupedList etc. already use.
  */
-function pendingNetTotal(transactions: Transaction[]): number {
-  return round2(transactions.filter((t) => t.status === 'pending' && isLedgerTransaction(t)).reduce((sum, t) => sum + signedAmount(t), 0))
+function pendingNetTotal(transactions: Transaction[], amountSign: (t: Transaction) => number = signedAmount): number {
+  return round2(transactions.filter((t) => t.status === 'pending' && isLedgerTransaction(t)).reduce((sum, t) => sum + amountSign(t), 0))
 }
 
 export function Home() {
@@ -818,10 +824,22 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       return (
         <BankCard variant="light" bankLabel={primaryPerson?.name ?? 'Me'} accountLabel="Joint">
           <div className="mt-6 space-y-1.5">
-            <CardRow label={HORIZON_LABELS[horizon]} value={summary.totalOutgoings} light />
+            {/* Hero-card consistency sweep (Adam-specified, 2026-09-12):
+                every other hero ends on an emphasized "Projected ·
+                {horizon}" row — Joint's own row used to be first, labelled
+                with just the bare horizon ("NEXT 3 CYCLES"). Same number
+                as before (total owed across the household this horizon,
+                summary.totalOutgoings — Adam's own call: this stays what
+                it means today, only the label/position changes), moved to
+                match every other card's own bottom-row convention. The
+                exception to the Personal-card standard this sweep
+                otherwise follows: individual names/shares take the place
+                of a single "Current balance" row, since a joint account
+                has no per-person balance of its own to show instead. */}
             {summary.perPerson.map((p) => (
               <CardRow key={p.personId} label={p.name} value={p.amount} light />
             ))}
+            <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={summary.totalOutgoings} emphasized light />
           </div>
         </BankCard>
       )
@@ -888,11 +906,26 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       // 3-cycles-ahead end for 'three_cycles' — so this now genuinely
       // varies with the toggle the way every other hero card already does.
       const horizonEnd = horizonRangeEnd(data, data.primaryPersonId, horizon, new Date())
-      const projectedBalance = projectedBalanceAt(pot, balance, data.transactions, new Date(), horizonEnd, data.recurringTemplates, data.payCycles.find((c) => c.personId === data.primaryPersonId))
+      const primaryPayCycleForPot = data.payCycles.find((c) => c.personId === data.primaryPersonId)
+      const projectedBalance = projectedBalanceAt(pot, balance, data.transactions, new Date(), horizonEnd, data.recurringTemplates, primaryPayCycleForPot)
+      // Hero-card consistency sweep (Adam-specified, 2026-09-12): every
+      // other hero shows Current balance/Pending/Projected — this one had
+      // no Pending row at all. savingsPotBalanceAsOf (what both `balance`
+      // and `projectedBalance` are ultimately built from) has no cleared/
+      // pending split of its own — it just sums every transaction dated on
+      // or before its asOf date, whatever its status. So `balance` (as of
+      // today) and `projectedBalance` (as of horizonEnd) are already the
+      // two true anchors; Pending is simply their difference — anything
+      // else (e.g. re-deriving it from a separately-filtered pending-only
+      // row list) risks double-counting rows already baked into `balance`
+      // and not reconciling (Current balance + Pending = Projected, same
+      // property Personal's own pendingNetTotal is built to guarantee).
+      const savingsPending = round2(projectedBalance - balance)
       return (
         <BankCard variant="custom" customColor={pot.color} bankLabel={pot.name} accountLabel="Savings" icon={<PiggyBank size={18} strokeWidth={1.5} color="#fff" />}>
           <div className="mt-6 space-y-1.5">
-            <CardRow label="Balance" value={balance} />
+            <CardRow label="Current balance" value={balance} />
+            <CardRow label="Pending" value={savingsPending} />
             <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={projectedBalance} emphasized />
           </div>
         </BankCard>
@@ -911,7 +944,13 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       return (
         <BankCard variant="custom" customColor={pot.color} bankLabel={pot.name} accountLabel="Pot" icon={<Wallet size={18} strokeWidth={1.5} color="#fff" />}>
           <div className="mt-6 space-y-1.5">
-            <CardRow label="Balance" value={projection.clearedBalance} />
+            <CardRow label="Current balance" value={projection.clearedBalance} />
+            {/* Hero-card consistency sweep (Adam-specified, 2026-09-12) —
+                same Current balance/Pending/Projected shape as Personal.
+                potSignedAmount, not the personal ledger's default sign —
+                same override PotDetail's own ledger list already passes
+                to CategoryGroupedList/AmountOrderedList above. */}
+            <CardRow label="Pending" value={pendingNetTotal(projection.transactions, (t) => potSignedAmount(t, pot.id))} />
             <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={projection.projectedBalance} emphasized />
           </div>
         </BankCard>
