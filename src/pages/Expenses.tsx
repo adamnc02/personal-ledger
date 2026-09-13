@@ -10,7 +10,7 @@ import { SwipeToDelete } from '../components/SwipeToDelete'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
 import { schedulePreviewWindow, scheduledDepositDates, depositOccurrencePreviews, setPausedDeposits, resolveSavingsPotDepositOccurrenceAmount, applySavingsPotSingleDepositAmountChange } from '../lib/savingsPotLedger'
 import { schedulePotPreviewWindow, scheduledPotDepositDates, potDepositOccurrencePreviews, setPausedPotDeposits, resolvePotDepositOccurrenceAmount, applyPotSingleDepositAmountChange } from '../lib/potLedger'
-import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
+import { FormButtonRow } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { visibleCategoriesFor, seededCategoryIdForIcon } from '../lib/categories'
 import {
@@ -26,7 +26,7 @@ import {
   type RawOccurrence,
 } from '../lib/schedule'
 import { transferLocationLabel, buildTransferLocationOptions, transferLocationKey, locationsEqual, type TransferLocationOption } from '../lib/transferLedger'
-import { LocationStep, FrequencyStep, DateStep, TransferFrequencySelect, TRANSFER_FREQUENCY_LABELS, type TransferFrequencyChoice, resolveTransferFrequencyChoice, transferFrequencyChoiceFor } from '../components/TransferSteps'
+import { AmountStep, LocationStep, FrequencyStep, DateStep, TransferFrequencySelect, TRANSFER_FREQUENCY_LABELS, type TransferFrequencyChoice, resolveTransferFrequencyChoice, transferFrequencyChoiceFor } from '../components/TransferSteps'
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfirmModal'
@@ -497,6 +497,7 @@ export function Expenses() {
         <>
           {adding && (
             <RecurringTransactionForm
+              data={data}
               categories={visibleCategoriesFor(data)}
               defaultPersonId={data.primaryPersonId}
               onAddCategory={addCategory}
@@ -814,7 +815,6 @@ function EditEntryForm({
     pickableLocationOptions.find((o) => transferLocationKey(o.location) === transferLocationKey(transaction.location === 'pot' ? { type: 'pot', potId: transaction.potId } : { type: transaction.location as 'personal' | 'joint' })) ??
     PERSONAL_LOCATION_OPTION
   const [locationOption, setLocationOption] = useState<TransferLocationOption>(initialLocationOption)
-  const [pickingLocation, setPickingLocation] = useState(false)
 
   const amountNumber = Number(amount)
   const canSave = name.trim() && amountNumber > 0 && date && categoryId
@@ -861,24 +861,30 @@ function EditEntryForm({
           </div>
         </label>
       )}
-      {canEditLocation &&
-        nonPersonalLocationOptions.length > 0 &&
-        (pickingLocation ? (
-          <LocationStep
-            title="Location"
-            options={[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions]}
-            onPick={(o) => {
-              setLocationOption(o)
-              setPickingLocation(false)
+      {/* 2026-09-14 (Adam-specified follow-up) — editing an existing entry
+          "just loads the form, no flow": Location is a normal inline
+          dropdown here, same as every other field on this form, not the
+          picker-first LocationStep overlay ExpenseForm's creation wizard
+          uses. */}
+      {canEditLocation && nonPersonalLocationOptions.length > 0 && (
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
+          <select
+            value={locationOption.key}
+            onChange={(e) => {
+              const next = [PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions].find((o) => o.key === e.target.value)
+              if (next) setLocationOption(next)
             }}
-            onCancel={() => setPickingLocation(false)}
-          />
-        ) : (
-          <button onClick={() => setPickingLocation(true)} className="flex flex-col gap-1 text-left">
-            <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
-            <span className="text-sm text-[var(--color-ink)]">{locationOption.label}</span>
-          </button>
-        ))}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          >
+            {[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions].map((o) => (
+              <option key={o.key} value={o.key} style={{ color: '#000' }}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <FormButtonRow
         onCancel={onCancel}
         onSave={() =>
@@ -916,6 +922,24 @@ interface ExpenseFormEntry {
   potId?: string
 }
 
+type ExpenseFormStep = 'direction' | 'amount' | 'location' | 'date' | 'name' | 'category' | 'payment_method' | 'card'
+
+/**
+ * 2026-09-14 (Adam-specified follow-up) — rebuilt from one flat card
+ * (every field visible at once) into the full picker-wizard shape: every
+ * editable field is its own step — Direction → Amount → Location
+ * (skipped entirely when there's no non-Personal option — see the
+ * `nonPersonalLocationOptions` comment below) → Date → Name → Category →
+ * Payment method → Which card (only when "Credit Card" was picked).
+ * Saving happens the instant the last applicable step is answered — there
+ * is no separate trailing "review and Save" screen, unlike the Transfer/
+ * Overpayment wizards' own final step. Adam's own spec, verbatim:
+ * "Every editable part of the new transaction becomes part of the flow,
+ * each it's own step." Editing an existing entry (EditEntryForm) is
+ * deliberately NOT touched by this — Adam's own words: "For editing a
+ * transaction, it just loads the form, no flow" — Location there stays a
+ * normal inline dropdown alongside every other field.
+ */
 function ExpenseForm({
   onCancel,
   onSave,
@@ -927,6 +951,7 @@ function ExpenseForm({
   onAddCategory: (name: string) => { id: string }
   data: ReturnType<typeof useLedgerData>['data']
 }) {
+  const [step, setStep] = useState<ExpenseFormStep>('direction')
   const [type, setType] = useState<EntryType>('expense')
   const [name, setName] = useState('')
   const [amount, setAmount] = useState('')
@@ -935,9 +960,6 @@ function ExpenseForm({
   const [categoryId, setCategoryId] = useState(
     visibleCategoriesFor(data).some((c) => c.id === defaultCategoryId) ? defaultCategoryId : (visibleCategoriesFor(data)[0]?.id ?? ''),
   )
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('card')
-  const [chargeToCreditCard, setChargeToCreditCard] = useState(false)
-  const [creditCardId, setCreditCardId] = useState<string>('')
 
   // 2026-09-13 (dev.md item 5, Adam-specified) — "location" here reuses
   // the exact same flat option list recurring transfers pick from
@@ -945,152 +967,186 @@ function ExpenseForm({
   // design — this is about which ACCOUNT a transaction sits against, not
   // a savings destination) and minus Personal itself from the picker's
   // own list (Personal is the implicit default, not something to "pick
-  // into"). The field only renders at all once there's a genuine
-  // non-Personal choice to make — a Joint account exists, or this person
-  // has at least one Pot.
+  // into"). The step is skipped entirely (amount → date direct) once
+  // there's no genuine non-Personal choice to make — no Joint account and
+  // no Pots.
   const PERSONAL_LOCATION_OPTION: TransferLocationOption = { key: 'personal', label: 'Current Account', location: { type: 'personal' } }
   const pickableLocationOptions = buildTransferLocationOptions(data.savingsPots, data.pots, !!data.jointAccount, data.primaryPersonId).filter(
     (o) => o.location.type !== 'savings',
   )
   const nonPersonalLocationOptions = pickableLocationOptions.filter((o) => o.location.type !== 'personal')
   const [locationOption, setLocationOption] = useState<TransferLocationOption>(PERSONAL_LOCATION_OPTION)
-  const [pickingLocation, setPickingLocation] = useState(false)
 
-  const isChargeableToCard = type === 'expense' && paymentMethod === 'card' && chargeToCreditCard && data.creditCards.length > 0
   const amountNumber = Number(amount)
-  const canSave = name.trim() && amountNumber > 0 && date && categoryId && (!isChargeableToCard || creditCardId)
 
-  return (
-    <div className="mb-6 p-4 rounded-2xl flex flex-col gap-4" style={{ background: 'var(--color-surface)' }}>
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-[var(--color-ink)]">New entry</h2>
-        <button onClick={onCancel} className="text-[var(--color-ink-muted)]">
-          <X size={18} />
-        </button>
-      </div>
+  // The payment-method step's own tap targets each commit and save
+  // directly (there's no further step after them, except "Credit Card" →
+  // "Which card") — passing the chosen values straight through as
+  // arguments rather than reading paymentMethod/creditCardId state avoids
+  // acting on a stale value from before the same click's setState apply.
+  function commitSave(finalType: EntryType, finalPaymentMethod: PaymentMethod, finalCreditCardId?: string) {
+    onSave({
+      type: finalType,
+      amount: amountNumber,
+      date,
+      categoryId,
+      paymentMethod: finalPaymentMethod,
+      creditCardId: finalCreditCardId,
+      personId: data.primaryPersonId,
+      note: name.trim(),
+      location: locationOption.location.type === 'joint' || locationOption.location.type === 'pot' ? locationOption.location.type : undefined,
+      potId: locationOption.location.type === 'pot' ? locationOption.location.potId : undefined,
+    })
+  }
 
-      <div className="flex gap-2">
-        {ENTRY_TYPES.map((et) => (
-          <button
-            key={et.value}
-            onClick={() => setType(et.value)}
-            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-            style={{
-              background: type === et.value ? 'var(--color-coral)' : 'var(--color-bg-elevated)',
-              color: type === et.value ? '#fff' : 'var(--color-ink-muted)',
-            }}
-          >
-            {et.label}
+  if (step === 'direction') {
+    return (
+      <div className="mb-6 p-4 rounded-2xl flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-[var(--color-ink)]">New entry</h2>
+          <button onClick={onCancel} className="text-[var(--color-ink-muted)]">
+            <X size={18} />
           </button>
-        ))}
-      </div>
-      <EditField label="Name" type="text" value={name} onChange={setName} />
-      <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
-      <EditField label="Date" type="date" value={date} onChange={setDate} />
-
-      <CategoryPicker categories={visibleCategoriesFor(data)} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
-
-      <label className="flex flex-col gap-1">
-        <span className="text-xs text-[var(--color-ink-muted)]">Payment method</span>
-        <div className="flex flex-wrap gap-1.5">
-          {EXPENSE_PAYMENT_METHODS.map((pm) => (
+        </div>
+        <div className="flex flex-col gap-1.5">
+          {ENTRY_TYPES.map((et) => (
             <button
-              key={pm}
+              key={et.value}
               onClick={() => {
-                setPaymentMethod(pm)
-                setChargeToCreditCard(false)
+                setType(et.value)
+                setStep('amount')
               }}
-              className="px-2.5 py-1 rounded-full text-xs font-medium transition-colors"
-              style={{
-                background: paymentMethod === pm && !chargeToCreditCard ? 'var(--color-coral)' : 'var(--color-bg-elevated)',
-                color: paymentMethod === pm && !chargeToCreditCard ? '#fff' : 'var(--color-ink-muted)',
-              }}
+              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+              style={{ background: 'var(--color-bg-elevated)' }}
             >
-              {PAYMENT_METHOD_LABELS[pm]}
+              {et.label}
             </button>
           ))}
-          {type === 'expense' && data.creditCards.length > 0 && (
-            <button
-              onClick={() => {
-                setPaymentMethod('card')
-                setChargeToCreditCard(true)
-              }}
-              className="px-2.5 py-1 rounded-full text-xs font-medium transition-colors"
-              style={{
-                background: chargeToCreditCard ? 'var(--color-coral)' : 'var(--color-bg-elevated)',
-                color: chargeToCreditCard ? '#fff' : 'var(--color-ink-muted)',
-              }}
-            >
-              Credit Card
-            </button>
-          )}
         </div>
-      </label>
+      </div>
+    )
+  }
 
-      {isChargeableToCard && (
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-[var(--color-ink-muted)]">Which card</span>
-          <select
-            value={creditCardId}
-            onChange={(e) => setCreditCardId(e.target.value)}
-            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+  if (step === 'amount') {
+    return (
+      <AmountStep
+        value={amount}
+        onChange={setAmount}
+        onCancel={onCancel}
+        onContinue={() => setStep(nonPersonalLocationOptions.length > 0 ? 'location' : 'date')}
+      />
+    )
+  }
+
+  if (step === 'location') {
+    return (
+      <LocationStep
+        title="Location"
+        options={[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions]}
+        onPick={(o) => {
+          setLocationOption(o)
+          setStep('date')
+        }}
+        onCancel={onCancel}
+      />
+    )
+  }
+
+  if (step === 'date') {
+    return <DateStep value={date} onChange={setDate} onCancel={onCancel} onContinue={() => setStep('name')} />
+  }
+
+  if (step === 'name') {
+    return (
+      <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Name</span>
+          <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <EditField label="Name" type="text" value={name} onChange={setName} />
+        <FormButtonRow onCancel={onCancel} onSave={() => setStep('category')} saveLabel="Continue" saveDisabled={!name.trim()} />
+      </div>
+    )
+  }
+
+  if (step === 'category') {
+    return (
+      <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Category</span>
+          <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <CategoryPicker categories={visibleCategoriesFor(data)} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
+        <FormButtonRow onCancel={onCancel} onSave={() => setStep('payment_method')} saveLabel="Continue" saveDisabled={!categoryId} />
+      </div>
+    )
+  }
+
+  if (step === 'card') {
+    return (
+      <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Which card</span>
+          <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          {data.creditCards.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => commitSave(type, 'card', c.id)}
+              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+              style={{ background: 'var(--color-surface)' }}
+            >
+              {c.name}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-[var(--color-ink-faint)] mt-3">
+          This adds to the card's balance — it won't reduce your cash balance until you pay the card down.
+        </p>
+      </div>
+    )
+  }
+
+  // payment_method — the last step for cash/bank_transfer/plain-card
+  // (each commits and saves immediately); "Credit Card" instead advances
+  // to the "Which card" step above, only offered for an expense when at
+  // least one card exists.
+  return (
+    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Payment method</span>
+        <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {EXPENSE_PAYMENT_METHODS.map((pm) => (
+          <button
+            key={pm}
+            onClick={() => commitSave(type, pm, undefined)}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
           >
-            <option value="" style={{ color: '#000' }}>
-              Select a card…
-            </option>
-            {data.creditCards.map((c) => (
-              <option key={c.id} value={c.id} style={{ color: '#000' }}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-          <span className="text-xs text-[var(--color-ink-faint)]">
-            This adds to the card's balance — it won't reduce your cash balance until you pay the card down.
-          </span>
-        </label>
-      )}
-
-      {/* Picker-First Flows (2026-09 session) — "Whose income" removed
-          entirely (Adam-specified: "I cannot log transactions on behalf
-          of another person"). Income logged here is always yours —
-          data.primaryPersonId, hardcoded below. */}
-
-      {nonPersonalLocationOptions.length > 0 &&
-        (pickingLocation ? (
-          <LocationStep
-            title="Location"
-            options={[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions]}
-            onPick={(o) => {
-              setLocationOption(o)
-              setPickingLocation(false)
-            }}
-            onCancel={() => setPickingLocation(false)}
-          />
-        ) : (
-          <button onClick={() => setPickingLocation(true)} className="flex flex-col gap-1 text-left">
-            <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
-            <span className="text-sm text-[var(--color-ink)]">{locationOption.label}</span>
+            {PAYMENT_METHOD_LABELS[pm]}
           </button>
         ))}
-
-      <FormButtonRow
-        onCancel={onCancel}
-        onSave={() =>
-          onSave({
-            type,
-            amount: amountNumber,
-            date,
-            categoryId,
-            paymentMethod,
-            creditCardId: creditCardId || undefined,
-            personId: data.primaryPersonId,
-            note: name.trim(),
-            location: locationOption.location.type === 'joint' || locationOption.location.type === 'pot' ? locationOption.location.type : undefined,
-            potId: locationOption.location.type === 'pot' ? locationOption.location.potId : undefined,
-          })
-        }
-        saveDisabled={!canSave}
-      />
+        {type === 'expense' && data.creditCards.length > 0 && (
+          <button
+            onClick={() => setStep('card')}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            Credit Card
+          </button>
+        )}
+      </div>
     </div>
   )
 }
@@ -2868,19 +2924,34 @@ function RecurringFrequencyEditor({
   )
 }
 
+type RecurringTransactionFormStep = 'direction' | 'amount' | 'location' | 'frequency' | 'date' | 'name' | 'category' | 'payment_method'
+
+/**
+ * 2026-09-14 (Adam-specified follow-up, "recurring transactions get the
+ * same treatment") — same full picker-wizard shape as ExpenseForm above,
+ * every editable field its own step: Direction → Amount → Location
+ * (skipped when there's no non-Personal option) → Frequency → Date →
+ * Name → Category → Payment method (the last step; recurring
+ * transactions have no "charge to credit card" sub-flow, so this is
+ * always final). `data` is now needed (for Location's option-building),
+ * where previously this form only needed `categories`.
+ */
 function RecurringTransactionForm({
+  data,
   categories,
   defaultPersonId,
   onAddCategory,
   onSave,
   onCancel,
 }: {
+  data: AppDataV2
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   defaultPersonId: string
   onAddCategory: (name: string) => { id: string }
   onSave: (template: Omit<RecurringTemplate, 'id' | 'active'>) => void
   onCancel: () => void
 }) {
+  const [step, setStep] = useState<RecurringTransactionFormStep>('direction')
   const [type, setType] = useState<EntryType>('expense')
   const [name, setName] = useState('')
   const [amount, setAmount] = useState('')
@@ -2889,37 +2960,100 @@ function RecurringTransactionForm({
   const [anchorDate, setAnchorDate] = useState(todayIso())
   const defaultCategoryId = seededCategoryIdForIcon('food')
   const [categoryId, setCategoryId] = useState(categories.some((c) => c.id === defaultCategoryId) ? defaultCategoryId : (categories[0]?.id ?? ''))
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('card')
 
-  const canSave = name.trim() && Number(amount) > 0 && anchorDate && categoryId
+  // Same Location concept ExpenseForm's own wizard offers — see its
+  // comment for the full reasoning (personal/joint/pot, never savings,
+  // skipped when there's no non-Personal choice to make).
+  const PERSONAL_LOCATION_OPTION: TransferLocationOption = { key: 'personal', label: 'Current Account', location: { type: 'personal' } }
+  const pickableLocationOptions = buildTransferLocationOptions(data.savingsPots, data.pots, !!data.jointAccount, data.primaryPersonId).filter(
+    (o) => o.location.type !== 'savings',
+  )
+  const nonPersonalLocationOptions = pickableLocationOptions.filter((o) => o.location.type !== 'personal')
+  const [locationOption, setLocationOption] = useState<TransferLocationOption>(PERSONAL_LOCATION_OPTION)
 
-  return (
-    <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-[var(--color-ink)]">New recurring transaction</h2>
-        <button onClick={onCancel} className="text-[var(--color-ink-muted)]">
-          <X size={18} />
-        </button>
-      </div>
+  function commitSave(finalPaymentMethod: PaymentMethod) {
+    onSave({
+      name: name.trim(),
+      amount: Number(amount),
+      categoryId,
+      paymentMethod: finalPaymentMethod,
+      frequency,
+      intervalWeeks: frequency === 'every_n_weeks' ? intervalWeeks : undefined,
+      anchorDate,
+      location: locationOption.location.type === 'joint' || locationOption.location.type === 'pot' ? locationOption.location.type : 'personal',
+      potId: locationOption.location.type === 'pot' ? locationOption.location.potId : undefined,
+      payee: '',
+      payeeSharePercent: 100,
+      ownerId: defaultPersonId,
+      kind: 'transaction',
+      recurringTransactionType: type,
+      personId: type === 'income' ? defaultPersonId : undefined,
+    })
+  }
 
-      <div className="flex gap-2">
-        {ENTRY_TYPES.map((et) => (
-          <button
-            key={et.value}
-            onClick={() => setType(et.value)}
-            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-            style={{ background: type === et.value ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: type === et.value ? '#fff' : 'var(--color-ink-muted)' }}
-          >
-            {et.label}
+  if (step === 'direction') {
+    return (
+      <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-[var(--color-ink)]">New recurring transaction</h2>
+          <button onClick={onCancel} className="text-[var(--color-ink-muted)]">
+            <X size={18} />
           </button>
-        ))}
+        </div>
+        <div className="flex flex-col gap-1.5">
+          {ENTRY_TYPES.map((et) => (
+            <button
+              key={et.value}
+              onClick={() => {
+                setType(et.value)
+                setStep('amount')
+              }}
+              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+              style={{ background: 'var(--color-bg-elevated)' }}
+            >
+              {et.label}
+            </button>
+          ))}
+        </div>
       </div>
+    )
+  }
 
-      <EditField label="Name" type="text" value={name} onChange={setName} />
-      <div className="grid grid-cols-2 gap-3">
-        <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+  if (step === 'amount') {
+    return (
+      <AmountStep
+        value={amount}
+        onChange={setAmount}
+        onCancel={onCancel}
+        onContinue={() => setStep(nonPersonalLocationOptions.length > 0 ? 'location' : 'frequency')}
+      />
+    )
+  }
+
+  if (step === 'location') {
+    return (
+      <LocationStep
+        title="Location"
+        options={[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions]}
+        onPick={(o) => {
+          setLocationOption(o)
+          setStep('frequency')
+        }}
+        onCancel={onCancel}
+      />
+    )
+  }
+
+  if (step === 'frequency') {
+    return (
+      <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Frequency</span>
+          <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
         <label className="flex flex-col gap-1">
-          <span className="text-xs text-[var(--color-ink-muted)]">Frequency</span>
           <select
             value={frequency}
             onChange={(e) => setFrequency(e.target.value as RecurringFrequency)}
@@ -2932,42 +3066,77 @@ function RecurringTransactionForm({
             ))}
           </select>
         </label>
-        {frequency === 'every_n_weeks' && <EditField label="Every N weeks" type="number" value={intervalWeeks} onChange={(v) => setIntervalWeeks(Math.max(1, Number(v)))} />}
-        <EditField label={frequency === 'weekly' || frequency === 'every_n_weeks' ? 'First date' : 'Due date'} type="date" value={anchorDate} onChange={setAnchorDate} />
+        {frequency === 'every_n_weeks' && (
+          <EditField label="Every N weeks" type="number" value={intervalWeeks} onChange={(v) => setIntervalWeeks(Math.max(1, Number(v)))} />
+        )}
+        <FormButtonRow onCancel={onCancel} onSave={() => setStep('date')} saveLabel="Continue" />
       </div>
+    )
+  }
 
-      <CategoryPicker categories={categories} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
+  if (step === 'date') {
+    return (
+      <DateStep
+        value={anchorDate}
+        onChange={setAnchorDate}
+        onCancel={onCancel}
+        onContinue={() => setStep('name')}
+        label={frequency === 'weekly' || frequency === 'every_n_weeks' ? 'First date' : 'Due date'}
+      />
+    )
+  }
 
-      <RecurringPaymentMethodEditor value={paymentMethod} onChange={setPaymentMethod} />
+  if (step === 'name') {
+    return (
+      <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Name</span>
+          <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <EditField label="Name" type="text" value={name} onChange={setName} />
+        <FormButtonRow onCancel={onCancel} onSave={() => setStep('category')} saveLabel="Continue" saveDisabled={!name.trim()} />
+      </div>
+    )
+  }
 
-      {/* Picker-First Flows (2026-09 session) — "Whose income"
-          removed entirely; ownerId/personId below are always
-          defaultPersonId (your primary person), never chosen here. */}
+  if (step === 'category') {
+    return (
+      <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Category</span>
+          <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <CategoryPicker categories={categories} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
+        <FormButtonRow onCancel={onCancel} onSave={() => setStep('payment_method')} saveLabel="Continue" saveDisabled={!categoryId} />
+      </div>
+    )
+  }
 
-      <div className="flex gap-2 mt-1">
-        <CancelButton onClick={onCancel} />
-        <SaveButton
-          disabled={!canSave}
-          onClick={() =>
-            onSave({
-              name: name.trim(),
-              amount: Number(amount),
-              categoryId,
-              paymentMethod,
-              frequency,
-              intervalWeeks: frequency === 'every_n_weeks' ? intervalWeeks : undefined,
-              anchorDate,
-              location: 'personal',
-              payee: '',
-              payeeSharePercent: 100,
-              ownerId: defaultPersonId,
-              kind: 'transaction',
-              recurringTransactionType: type,
-              personId: type === 'income' ? defaultPersonId : undefined,
-            })
-          }
-          label="Add recurring"
-        />
+  // payment_method — always the last step for a recurring transaction
+  // (no "charge to credit card" sub-flow the way a one-off expense has).
+  return (
+    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Payment method</span>
+        <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {EXPENSE_PAYMENT_METHODS.map((pm) => (
+          <button
+            key={pm}
+            onClick={() => commitSave(pm)}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            {PAYMENT_METHOD_LABELS[pm]}
+          </button>
+        ))}
       </div>
     </div>
   )

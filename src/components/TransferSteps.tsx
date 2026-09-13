@@ -231,22 +231,25 @@ export function DateStep({
   onCancel,
   onContinue,
   continueLabel = 'Continue',
+  label = 'Date',
 }: {
   value: string
   onChange: (v: string) => void
   onCancel: () => void
   onContinue: () => void
   continueLabel?: string
+  /** Header/field label — defaults to "Date"; a caller with a more specific meaning (e.g. "First date"/"Due date" for a recurring schedule) can override both at once. */
+  label?: string
 }) {
   return (
     <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
       <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Date</span>
+        <span className="text-xs font-semibold text-[var(--color-ink-muted)]">{label}</span>
         <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
           <X size={16} />
         </button>
       </div>
-      <EditField label="Date" type="date" value={value} onChange={onChange} />
+      <EditField label={label} type="date" value={value} onChange={onChange} />
       <FormButtonRow onCancel={onCancel} onSave={onContinue} saveLabel={continueLabel} />
     </div>
   )
