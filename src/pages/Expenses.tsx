@@ -26,7 +26,7 @@ import {
   type RawOccurrence,
 } from '../lib/schedule'
 import { transferLocationLabel, buildTransferLocationOptions, transferLocationKey, locationsEqual, type TransferLocationOption } from '../lib/transferLedger'
-import { AmountStep, LocationStep, FrequencyStep, DateStep, TransferFrequencySelect, TRANSFER_FREQUENCY_LABELS, type TransferFrequencyChoice, resolveTransferFrequencyChoice, transferFrequencyChoiceFor } from '../components/TransferSteps'
+import { LocationStep, FrequencyStep, DateStep, TransferFrequencySelect, TRANSFER_FREQUENCY_LABELS, type TransferFrequencyChoice, resolveTransferFrequencyChoice, transferFrequencyChoiceFor } from '../components/TransferSteps'
 import { findSalarySortConflicts } from '../lib/salarySortLedger'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfirmModal'
@@ -999,7 +999,11 @@ function ExpenseForm({
     })
   }
 
-  if (step === 'direction') {
+  // 2026-09-14 (Adam-specified follow-up, "mirror transfers") — Direction
+  // and Amount now share ONE first screen, same shape as TransferForm's
+  // own first step (mode toggle + amount together, one Continue). Every
+  // step after this one is unchanged.
+  if (step === 'direction' || step === 'amount') {
     return (
       <div className="mb-6 p-4 rounded-2xl flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
         <div className="flex items-center justify-between">
@@ -1008,33 +1012,29 @@ function ExpenseForm({
             <X size={18} />
           </button>
         </div>
-        <div className="flex flex-col gap-1.5">
+        <div className="flex gap-2">
           {ENTRY_TYPES.map((et) => (
             <button
               key={et.value}
-              onClick={() => {
-                setType(et.value)
-                setStep('amount')
+              onClick={() => setType(et.value)}
+              className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+              style={{
+                background: type === et.value ? 'var(--color-coral)' : 'var(--color-bg-elevated)',
+                color: type === et.value ? '#fff' : 'var(--color-ink-muted)',
               }}
-              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
-              style={{ background: 'var(--color-bg-elevated)' }}
             >
               {et.label}
             </button>
           ))}
         </div>
+        <EditField key="expense-amount" label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+        <FormButtonRow
+          onCancel={onCancel}
+          onSave={() => setStep(nonPersonalLocationOptions.length > 0 ? 'location' : 'date')}
+          saveLabel="Continue"
+          saveDisabled={!(amountNumber > 0)}
+        />
       </div>
-    )
-  }
-
-  if (step === 'amount') {
-    return (
-      <AmountStep
-        value={amount}
-        onChange={setAmount}
-        onCancel={onCancel}
-        onContinue={() => setStep(nonPersonalLocationOptions.length > 0 ? 'location' : 'date')}
-      />
     )
   }
 
@@ -2997,7 +2997,10 @@ function RecurringTransactionForm({
     })
   }
 
-  if (step === 'direction') {
+  // 2026-09-14 (Adam-specified follow-up, "mirror transfers") — Direction
+  // and Amount now share ONE first screen, same shape as TransferForm's
+  // own first step (mode toggle + amount together, one Continue).
+  if (step === 'direction' || step === 'amount') {
     return (
       <div className="rounded-2xl p-4 mb-4 flex flex-col gap-3" style={{ background: 'var(--color-surface)' }}>
         <div className="flex items-center justify-between">
@@ -3006,33 +3009,26 @@ function RecurringTransactionForm({
             <X size={18} />
           </button>
         </div>
-        <div className="flex flex-col gap-1.5">
+        <div className="flex gap-2">
           {ENTRY_TYPES.map((et) => (
             <button
               key={et.value}
-              onClick={() => {
-                setType(et.value)
-                setStep('amount')
-              }}
-              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
-              style={{ background: 'var(--color-bg-elevated)' }}
+              onClick={() => setType(et.value)}
+              className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+              style={{ background: type === et.value ? 'var(--color-coral)' : 'var(--color-bg-elevated)', color: type === et.value ? '#fff' : 'var(--color-ink-muted)' }}
             >
               {et.label}
             </button>
           ))}
         </div>
+        <EditField key="recurring-amount" label="Amount (£)" type="number" value={amount} onChange={setAmount} />
+        <FormButtonRow
+          onCancel={onCancel}
+          onSave={() => setStep(nonPersonalLocationOptions.length > 0 ? 'location' : 'frequency')}
+          saveLabel="Continue"
+          saveDisabled={!(Number(amount) > 0)}
+        />
       </div>
-    )
-  }
-
-  if (step === 'amount') {
-    return (
-      <AmountStep
-        value={amount}
-        onChange={setAmount}
-        onCancel={onCancel}
-        onContinue={() => setStep(nonPersonalLocationOptions.length > 0 ? 'location' : 'frequency')}
-      />
     )
   }
 
