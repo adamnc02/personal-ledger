@@ -12,7 +12,7 @@ import { schedulePreviewWindow, scheduledDepositDates, depositOccurrencePreviews
 import { schedulePotPreviewWindow, scheduledPotDepositDates, potDepositOccurrencePreviews, setPausedPotDeposits, resolvePotDepositOccurrenceAmount, applyPotSingleDepositAmountChange } from '../lib/potLedger'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
-import { visibleCategoriesFor } from '../lib/categories'
+import { visibleCategoriesFor, seededCategoryIdForIcon } from '../lib/categories'
 import {
   recentAndUpcomingOccurrences,
   applyTemplateAmountChange,
@@ -883,7 +883,10 @@ function ExpenseForm({
   const [name, setName] = useState('')
   const [amount, setAmount] = useState('')
   const [date, setDate] = useState(todayIso())
-  const [categoryId, setCategoryId] = useState(visibleCategoriesFor(data)[0]?.id ?? '')
+  const defaultCategoryId = seededCategoryIdForIcon('food')
+  const [categoryId, setCategoryId] = useState(
+    visibleCategoriesFor(data).some((c) => c.id === defaultCategoryId) ? defaultCategoryId : (visibleCategoriesFor(data)[0]?.id ?? ''),
+  )
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('card')
   const [chargeToCreditCard, setChargeToCreditCard] = useState(false)
   const [creditCardId, setCreditCardId] = useState<string>('')
@@ -2797,7 +2800,8 @@ function RecurringTransactionForm({
   const [frequency, setFrequency] = useState<RecurringFrequency>('monthly')
   const [intervalWeeks, setIntervalWeeks] = useState(2)
   const [anchorDate, setAnchorDate] = useState(todayIso())
-  const [categoryId, setCategoryId] = useState(categories[0]?.id ?? '')
+  const defaultCategoryId = seededCategoryIdForIcon('food')
+  const [categoryId, setCategoryId] = useState(categories.some((c) => c.id === defaultCategoryId) ? defaultCategoryId : (categories[0]?.id ?? ''))
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('card')
 
   const canSave = name.trim() && Number(amount) > 0 && anchorDate && categoryId
