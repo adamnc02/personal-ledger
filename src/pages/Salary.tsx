@@ -1455,7 +1455,7 @@ function SavingsPotLedgerModal({
  * the pot itself, not re-show its whole history a second time.
  */
 
-/** Every bill/loan eligible to be paid from this pot (already personal, or already this pot's own) — shared shape between PotEditForm's checklist and its Save handler. */
+/** Every bill/loan eligible to be paid from this pot (personal, or already in any of this person's pots — including a DIFFERENT pot, so a second pot's checklist can move an item across) — shared shape between PotEditForm's checklist and its Save handler. */
 /**
  * UAT Batch 4 follow-up (2026-09-04, Adam-reported): this used to filter
  * templates by `location`/`ownerId` alone, with no `kind` check — a
@@ -1471,6 +1471,15 @@ function SavingsPotLedgerModal({
  * location isn't something this checklist can reassign (it's fixed by
  * the transfer's own from/to, edited via RecurringTransferEditor
  * instead), so it's neither a deposit nor an untickable bill.
+ *
+ * 2026-09-13 (Adam-reported, "adding a second pot"): this used to also
+ * require `t.potId === pot.id` to include an already-pot-assigned item —
+ * meaning a bill sitting in Pot A was invisible from Pot B's checklist
+ * entirely, so there was no way to move it across. Now any personal bill
+ * OR any bill/loan currently in ANY of this person's pots is eligible
+ * everywhere; `inPot` (checked state) still only reflects THIS pot's own
+ * assignment, so ticking it here moves it in (and implicitly out of
+ * wherever it was, since an item can only ever have one location).
  */
 function potEligibleItems(pot: Pot, templates: RecurringTemplate[], loans: Loan[]) {
   // A real bill's `kind` is undefined in practice (never explicitly
@@ -1478,15 +1487,13 @@ function potEligibleItems(pot: Pot, templates: RecurringTemplate[], loans: Loan[
   // 'transfer' are the two later-added extensions), so the exclusion has
   // to be `!== 'transfer'`, not `=== 'transaction'` — the latter silently
   // excluded every real bill and made this whole checklist vanish.
-  const eligibleTemplates = templates.filter(
-    (t) => t.kind !== 'transfer' && t.ownerId === pot.personId && (t.location === 'personal' || (t.location === 'pot' && t.potId === pot.id)),
-  )
-  const eligibleLoans = loans.filter((l) => l.ownerId === pot.personId && (l.location === 'personal' || (l.location === 'pot' && l.potId === pot.id)))
+  const eligibleTemplates = templates.filter((t) => t.kind !== 'transfer' && t.ownerId === pot.personId && (t.location === 'personal' || t.location === 'pot'))
+  const eligibleLoans = loans.filter((l) => l.ownerId === pot.personId && (l.location === 'personal' || l.location === 'pot'))
   const potWithdrawals = templates.filter((t) => t.kind === 'transfer' && t.transferFrom?.type === 'pot' && t.transferFrom.potId === pot.id)
   type Item = { key: string; id: string; kind: 'template' | 'loan' | 'withdrawal'; name: string; amount: number; inPot: boolean; locked?: boolean }
   const items: Item[] = [
-    ...eligibleTemplates.map((t) => ({ key: `t:${t.id}`, id: t.id, kind: 'template' as const, name: t.name, amount: t.amount, inPot: t.location === 'pot' })),
-    ...eligibleLoans.map((l) => ({ key: `l:${l.id}`, id: l.id, kind: 'loan' as const, name: l.name, amount: l.monthlyPayment, inPot: l.location === 'pot' })),
+    ...eligibleTemplates.map((t) => ({ key: `t:${t.id}`, id: t.id, kind: 'template' as const, name: t.name, amount: t.amount, inPot: t.location === 'pot' && t.potId === pot.id })),
+    ...eligibleLoans.map((l) => ({ key: `l:${l.id}`, id: l.id, kind: 'loan' as const, name: l.name, amount: l.monthlyPayment, inPot: l.location === 'pot' && l.potId === pot.id })),
     ...potWithdrawals.map((t) => ({ key: `w:${t.id}`, id: t.id, kind: 'withdrawal' as const, name: t.name, amount: t.amount, inPot: true, locked: true })),
   ]
   return items
@@ -1502,29 +1509,16 @@ function potEligibleItems(pot: Pot, templates: RecurringTemplate[], loans: Loan[
  * asks new-vs-existing FIRST, same as SavingsPotForm's own step, before
  * name/checklist. */
 function PotForm({
-  eligibleBills,
   onCancel,
   onSave,
 }: {
-  eligibleBills: RecurringTemplate[]
   onCancel: () => void
-  onSave: (fields: { name: string; openingBalance: number; openingDate: string; billIdsToMoveIn: string[]; effectiveFrom: string }) => void
+  onSave: (fields: { name: string; openingBalance: number; openingDate: string }) => void
 }) {
   const [kind, setKind] = useState<'new' | 'existing' | null>(null)
   const [name, setName] = useState('')
   const [openingBalance, setOpeningBalance] = useState(0)
   const [openingDate, setOpeningDate] = useState(todayIso())
-  const [checkedBillIds, setCheckedBillIds] = useState<Set<string>>(new Set())
-  const [effectiveFrom, setEffectiveFrom] = useState(todayIso())
-
-  function toggle(id: string) {
-    setCheckedBillIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
 
   if (kind === null) {
     return (
@@ -1585,26 +1579,6 @@ function PotForm({
         </div>
       )}
 
-      {eligibleBills.length > 0 && (
-        <div className="mt-4">
-          <p className="text-xs font-semibold text-[var(--color-ink-muted)] mb-2">Move any existing personal bills into this pot? (optional)</p>
-          <div className="flex flex-col divide-y max-h-64 overflow-y-auto" style={{ borderColor: 'var(--color-track)' }}>
-            {eligibleBills.map((bill) => (
-              <label key={bill.id} className="py-2 flex items-center gap-3 cursor-pointer">
-                <input type="checkbox" checked={checkedBillIds.has(bill.id)} onChange={() => toggle(bill.id)} className="accent-[var(--color-coral)]" />
-                <span className="flex-1 text-sm text-[var(--color-ink)] truncate">{bill.name}</span>
-                <span className="text-xs font-mono text-[var(--color-ink-muted)] shrink-0">£{formatCurrency(bill.amount)}</span>
-              </label>
-            ))}
-          </div>
-          {checkedBillIds.size > 0 && (
-            <div className="mt-3">
-              <EditField label="Changes take effect from" type="date" value={effectiveFrom} onChange={setEffectiveFrom} />
-            </div>
-          )}
-        </div>
-      )}
-
       <div className="flex gap-2 mt-4">
         <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}>
           Cancel
@@ -1616,8 +1590,6 @@ function PotForm({
               name: name.trim(),
               openingBalance: kind === 'existing' ? openingBalance : 0,
               openingDate: kind === 'existing' ? openingDate : todayIso(),
-              billIdsToMoveIn: [...checkedBillIds],
-              effectiveFrom,
             })
           }
           className="flex-1 py-2 rounded-full text-sm font-semibold text-white disabled:opacity-40"
@@ -2827,20 +2799,23 @@ export function Salary() {
         )}
         {addingBillsPotFor && (
           <PotForm
-            eligibleBills={data.recurringTemplates.filter((t) => t.ownerId === addingBillsPotFor && t.location === 'personal')}
             onCancel={() => {
               setAddingBillsPotFor(null)
               if (data.pots.length === 0) setPotsSectionOpen(false)
             }}
-            onSave={({ name, openingBalance, openingDate, billIdsToMoveIn, effectiveFrom }) => {
+            onSave={({ name, openingBalance, openingDate }) => {
               const personId = addingBillsPotFor
               const id = addPot(personId, newPot({ personId, name, openingBalance, openingDate, color: pickNextSharedCardColor(data) }))
-              for (const billId of billIdsToMoveIn) assignRecurringTemplateLocation(billId, 'pot', effectiveFrom, { potId: id })
               setAddingBillsPotFor(null)
-              // UAT 2026-09-08 (9-wallet-pot-savings-joint): used to force
-              // this row open (setExpandedBillsPotId) — same fix as the
-              // Pension/Savings-Pot cases above, matched to the
-              // collapsed-row-flashes-on-mount pattern instead.
+              // 2026-09-13: creation no longer has its own bill/loan
+              // checklist (it duplicated — and, for transfers, wrongly
+              // included items that — PotEditForm's already-correct
+              // potEligibleItems-driven checklist already handles). The
+              // new pot now opens straight into that same expanded edit
+              // form instead, so tagging bills/loans in uses the exact
+              // same effective-dated-change flow as editing an existing
+              // pot (and as Bills.tsx's own location changes).
+              setExpandedBillsPotId(id)
               setJustCreatedPotId(id)
             }}
           />
