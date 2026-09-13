@@ -841,6 +841,30 @@ function EditEntryForm({
         <EditField label="Date" type="date" value={date} onChange={setDate} />
       </div>
       <CategoryPicker categories={visibleCategoriesFor(data, transaction.categoryId)} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
+      {/* 2026-09-14 (Adam-specified follow-up) — editing an existing entry
+          "just loads the form, no flow": Location is a normal inline
+          dropdown here, same as every other field on this form, not the
+          picker-first LocationStep overlay ExpenseForm's creation wizard
+          uses. Ordered above Payment method per Adam's own follow-up. */}
+      {canEditLocation && nonPersonalLocationOptions.length > 0 && (
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
+          <select
+            value={locationOption.key}
+            onChange={(e) => {
+              const next = [PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions].find((o) => o.key === e.target.value)
+              if (next) setLocationOption(next)
+            }}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          >
+            {[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions].map((o) => (
+              <option key={o.key} value={o.key} style={{ color: '#000' }}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       {paymentMethodEditable && (
         <label className="flex flex-col gap-1">
           <span className="text-xs text-[var(--color-ink-muted)]">Payment method</span>
@@ -859,30 +883,6 @@ function EditEntryForm({
               </button>
             ))}
           </div>
-        </label>
-      )}
-      {/* 2026-09-14 (Adam-specified follow-up) — editing an existing entry
-          "just loads the form, no flow": Location is a normal inline
-          dropdown here, same as every other field on this form, not the
-          picker-first LocationStep overlay ExpenseForm's creation wizard
-          uses. */}
-      {canEditLocation && nonPersonalLocationOptions.length > 0 && (
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
-          <select
-            value={locationOption.key}
-            onChange={(e) => {
-              const next = [PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions].find((o) => o.key === e.target.value)
-              if (next) setLocationOption(next)
-            }}
-            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-          >
-            {[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions].map((o) => (
-              <option key={o.key} value={o.key} style={{ color: '#000' }}>
-                {o.label}
-              </option>
-            ))}
-          </select>
         </label>
       )}
       <FormButtonRow
@@ -1117,7 +1117,10 @@ function ExpenseForm({
   // payment_method — the last step for cash/bank_transfer/plain-card
   // (each commits and saves immediately); "Credit Card" instead advances
   // to the "Which card" step above, only offered for an expense when at
-  // least one card exists.
+  // least one card exists. "Card" is highlighted as the default (Adam-
+  // specified) — still a single tap to commit, same as every other
+  // option here, just visually pre-picked rather than requiring an extra
+  // Continue step for the common case.
   return (
     <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
       <div className="flex items-center justify-between mb-2">
@@ -1131,8 +1134,11 @@ function ExpenseForm({
           <button
             key={pm}
             onClick={() => commitSave(type, pm, undefined)}
-            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
-            style={{ background: 'var(--color-surface)' }}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm font-medium"
+            style={{
+              background: pm === 'card' ? 'var(--color-coral)' : 'var(--color-surface)',
+              color: pm === 'card' ? '#fff' : 'var(--color-ink)',
+            }}
           >
             {PAYMENT_METHOD_LABELS[pm]}
           </button>
@@ -3118,6 +3124,8 @@ function RecurringTransactionForm({
 
   // payment_method — always the last step for a recurring transaction
   // (no "charge to credit card" sub-flow the way a one-off expense has).
+  // "Card" is highlighted as the default (Adam-specified) — still a
+  // single tap to commit, just visually pre-picked for the common case.
   return (
     <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
       <div className="flex items-center justify-between mb-2">
@@ -3131,8 +3139,11 @@ function RecurringTransactionForm({
           <button
             key={pm}
             onClick={() => commitSave(pm)}
-            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
-            style={{ background: 'var(--color-surface)' }}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm font-medium"
+            style={{
+              background: pm === 'card' ? 'var(--color-coral)' : 'var(--color-surface)',
+              color: pm === 'card' ? '#fff' : 'var(--color-ink)',
+            }}
           >
             {PAYMENT_METHOD_LABELS[pm]}
           </button>
