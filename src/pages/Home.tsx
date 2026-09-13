@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet } from 'lucide-react'
@@ -193,6 +193,13 @@ export function Home() {
   // rows the person can't see was the whole problem this toggle exists
   // to fix.
   const [showCleared, setShowCleared] = useState(false)
+  // 2026-09-13 (dev.md item 2, Adam-specified) — "Group by direction", an
+  // independent toggle available on every deck card, off by default
+  // (unlike cycleTotals). Independent of Cycle-end totals: with totals
+  // off, it splits the whole flat window into Incoming/Outgoing pills;
+  // with totals on, those same two pills nest inside each cycle section
+  // instead, alongside the existing per-cycle closing balance.
+  const [groupByDirection, setGroupByDirection] = useState(false)
 
   const deck = useMemo(() => buildDeck(data), [data])
 
@@ -257,6 +264,8 @@ export function Home() {
           setCycleTotals={setCycleTotals}
           showCleared={showCleared}
           setShowCleared={setShowCleared}
+          groupByDirection={groupByDirection}
+          setGroupByDirection={setGroupByDirection}
         />
         <DeckDetail
           entry={activeEntry}
@@ -269,6 +278,7 @@ export function Home() {
           setOrder={setOrder}
           cycleTotals={cycleTotalsActive}
           showCleared={showCleared}
+          groupByDirection={groupByDirection}
         />
       </div>
     </div>
@@ -291,12 +301,14 @@ function SavingsPotDetail({
   horizon,
   cycleTotals,
   showCleared,
+  groupByDirection,
 }: {
   pot: SavingsPot
   data: AppDataV2
   horizon: ProjectionHorizon
   cycleTotals: boolean
   showCleared: boolean
+  groupByDirection?: boolean
 }) {
   const balance = savingsPotBalanceAsOf(pot, data.transactions, new Date())
 
@@ -390,7 +402,16 @@ function SavingsPotDetail({
       )}
 
       {cycleTotals ? (
-        <SavingsPotCycleGroupedList rows={activity} openingRunningBalance={openingRunningBalance} cycles={cycles} showCleared={showCleared} />
+        <SavingsPotCycleGroupedList rows={activity} openingRunningBalance={openingRunningBalance} cycles={cycles} showCleared={showCleared} groupByDirection={groupByDirection} />
+      ) : groupByDirection ? (
+        <DirectionGroupedRows
+          items={visibleActivity}
+          isIncoming={({ row }) => row.type !== 'savings_withdrawal'}
+          amountOf={({ row }) => row.amount}
+          dateOf={({ row }) => row.date}
+          keyOf={({ row }) => `${row.type}-${row.date}`}
+          renderRow={({ row }) => <SavingsPotActivityRow row={row} />}
+        />
       ) : (
         <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
           {visibleActivity.map(({ row, running }) => (
@@ -434,7 +455,8 @@ function SavingsPotActivityRow({
   runningBalance,
 }: {
   row: { date: string; type: 'savings_deposit' | 'savings_withdrawal' | 'savings_interest'; amount: number; status: 'cleared' | 'pending' }
-  runningBalance: number
+  /** Omitted when this row is shown inside a direction-grouped pill (DirectionGroupedRows) — there's no single meaningful running balance across only the incoming or only the outgoing rows. */
+  runningBalance?: number
 }) {
   const isNegative = row.type === 'savings_withdrawal'
   const label = row.type === 'savings_deposit' ? 'Deposit' : row.type === 'savings_withdrawal' ? 'Withdrawal' : 'Interest'
@@ -451,7 +473,7 @@ function SavingsPotActivityRow({
         <p className="text-sm font-mono font-semibold" style={{ color: isNegative ? 'var(--color-negative)' : 'var(--color-positive)' }}>
           {isNegative ? '-' : '+'}£{formatCurrency(row.amount)}
         </p>
-        <p className="text-[10px] text-[var(--color-ink-faint)] tabular-nums">£{formatCurrency(runningBalance)}</p>
+        {runningBalance !== undefined && <p className="text-[10px] text-[var(--color-ink-faint)] tabular-nums">£{formatCurrency(runningBalance)}</p>}
       </div>
     </div>
   )
@@ -473,11 +495,13 @@ function SavingsPotCycleGroupedList({
   openingRunningBalance,
   cycles,
   showCleared,
+  groupByDirection,
 }: {
   rows: SavingsPotScheduleRow[]
   openingRunningBalance: number
   cycles: { start: Date; end: Date }[]
   showCleared: boolean
+  groupByDirection?: boolean
 }) {
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
   const toggle = (key: string) =>
@@ -530,14 +554,25 @@ function SavingsPotCycleGroupedList({
 
             {expanded && (
               <div className="px-3 pb-1">
-                <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-                  {section.visibleRows.map(({ row, running }) => (
-                    <SavingsPotActivityRow key={`${row.type}-${row.date}`} row={row} runningBalance={running} />
-                  ))}
-                  {section.visibleRows.length === 0 && (
-                    <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-3">Nothing in this cycle.</p>
-                  )}
-                </div>
+                {groupByDirection ? (
+                  <DirectionGroupedRows
+                    items={section.visibleRows}
+                    isIncoming={({ row }) => row.type !== 'savings_withdrawal'}
+                    amountOf={({ row }) => row.amount}
+                    dateOf={({ row }) => row.date}
+                    keyOf={({ row }) => `${row.type}-${row.date}`}
+                    renderRow={({ row }) => <SavingsPotActivityRow row={row} />}
+                  />
+                ) : (
+                  <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+                    {section.visibleRows.map(({ row, running }) => (
+                      <SavingsPotActivityRow key={`${row.type}-${row.date}`} row={row} runningBalance={running} />
+                    ))}
+                    {section.visibleRows.length === 0 && (
+                      <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-3">Nothing in this cycle.</p>
+                    )}
+                  </div>
+                )}
                 <div className="flex items-center justify-between pt-2 pb-2 mt-1 border-t" style={{ borderColor: 'var(--color-track)' }}>
                   <span className="text-[11px] font-medium text-[var(--color-ink-muted)]">Balance at {formatCycleDate(section.endIso)}</span>
                   <span className="text-sm font-mono font-semibold tabular-nums text-[var(--color-ink)]">£{formatCurrency(section.closing)}</span>
@@ -972,6 +1007,7 @@ function DeckDetail(props: {
   setOrder: (v: Order) => void
   cycleTotals: boolean
   showCleared: boolean
+  groupByDirection: boolean
 }) {
   const { entry, data } = props
   switch (entry.kind) {
@@ -983,11 +1019,15 @@ function DeckDetail(props: {
       return <HouseholdDetail {...props} />
     case 'credit_card': {
       const card = data.creditCards.find((c) => c.id === entry.cardId)
-      return card ? <CreditCardDetail card={card} data={data} horizon={props.horizon} cycleTotals={props.cycleTotals} showCleared={props.showCleared} /> : null
+      return card ? (
+        <CreditCardDetail card={card} data={data} horizon={props.horizon} cycleTotals={props.cycleTotals} showCleared={props.showCleared} groupByDirection={props.groupByDirection} />
+      ) : null
     }
     case 'savings_pot': {
       const pot = data.savingsPots.find((p) => p.id === entry.potId)
-      return pot ? <SavingsPotDetail pot={pot} data={data} horizon={props.horizon} cycleTotals={props.cycleTotals} showCleared={props.showCleared} /> : null
+      return pot ? (
+        <SavingsPotDetail pot={pot} data={data} horizon={props.horizon} cycleTotals={props.cycleTotals} showCleared={props.showCleared} groupByDirection={props.groupByDirection} />
+      ) : null
     }
     case 'pot': {
       const pot = (data.pots ?? []).find((p) => p.id === entry.potId)
@@ -1051,6 +1091,8 @@ function DeckControls({
   setCycleTotals,
   showCleared,
   setShowCleared,
+  groupByDirection,
+  setGroupByDirection,
 }: {
   entry: DeckEntry
   horizon: ProjectionHorizon
@@ -1063,6 +1105,8 @@ function DeckControls({
   setCycleTotals: (v: boolean) => void
   showCleared: boolean
   setShowCleared: (v: boolean) => void
+  groupByDirection: boolean
+  setGroupByDirection: (v: boolean) => void
 }) {
   // Widened (Adam-specified, 2026-09-03): Group by/Order by/Cycle-totals/
   // Show cleared now apply to Household and Joint too, not just Personal.
@@ -1116,6 +1160,12 @@ function DeckControls({
         <div className="flex flex-col items-end gap-1.5">
           <ToggleSwitch label="Show cleared" checked={showCleared} onChange={setShowCleared} />
           {showSimpleCycleTotals && <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />}
+          {/* 2026-09-13 — independent of Cycle-end totals (see
+              groupByDirection's own comment in Home's top-level state):
+              always offered here, same as Show cleared, since a credit
+              card/savings pot has no Group-by/Order-by of its own for
+              this to conflict with. */}
+          <ToggleSwitch label="Group by direction" checked={groupByDirection} onChange={setGroupByDirection} />
         </div>
       )}
       {showGroupOrder && (
@@ -1157,6 +1207,15 @@ function DeckControls({
           {canShowCycleTotals(entry, horizon, grouping, order) && (
             <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />
           )}
+          {/* 2026-09-13 — independent of Cycle-end totals, but still only
+              offered for 'list' grouping + 'date' order: 'category'/
+              'person' already split the ledger a different way
+              (CategoryGroupedList/PersonGroupedList don't accept a
+              groupByDirection prop), and AmountOrderedList doesn't either
+              — rather than show a toggle that would quietly do nothing
+              there (the same instinct canShowCycleTotals already
+              follows), it's simply absent outside list+date. */}
+          {grouping === 'list' && order === 'date' && <ToggleSwitch label="Group by direction" checked={groupByDirection} onChange={setGroupByDirection} />}
         </div>
       )}
     </div>
@@ -1308,6 +1367,89 @@ function TransactionRow({
   )
 }
 
+/**
+ * 2026-09-13 (dev.md item 2, Adam-specified) — "Group by direction":
+ * splits whatever set of rows it's given into two independently
+ * expandable/collapsible pills, Incoming and Outgoing, each defaulting
+ * to EXPANDED (unlike a CycleGroupedList section, which defaults
+ * collapsed) since picking this toggle on is itself the signal the
+ * person wants to see the split straight away. Each pill's own rows are
+ * always ordered by date regardless of the page's "Order by" setting —
+ * Adam's own spec says the revealed rows are "ordered by date," and a
+ * direction split has no obviously meaningful "by amount" ordering of
+ * its own. Generic over the row shape so it can sit inside
+ * CycleGroupedList/DateOrderedList (real Transactions) AND
+ * SavingsPotCycleGroupedList/SavingsPotDetail's flat list (synthetic
+ * SavingsPotScheduleRow) and the credit-card equivalents, without
+ * duplicating this rendering four times over.
+ */
+function DirectionGroupedRows<T>({
+  items,
+  isIncoming,
+  amountOf,
+  dateOf,
+  keyOf,
+  renderRow,
+  incomingLabel = 'Incoming',
+  outgoingLabel = 'Outgoing',
+}: {
+  items: T[]
+  isIncoming: (item: T) => boolean
+  /** Always a positive magnitude — sign is implied by which pill it's in, not read from here. */
+  amountOf: (item: T) => number
+  dateOf: (item: T) => string
+  keyOf: (item: T) => string
+  renderRow: (item: T) => ReactNode
+  incomingLabel?: string
+  outgoingLabel?: string
+}) {
+  const [collapsed, setCollapsed] = useState<Set<'in' | 'out'>>(() => new Set())
+  const toggle = (which: 'in' | 'out') =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(which)) next.delete(which)
+      else next.add(which)
+      return next
+    })
+
+  const incoming = items.filter(isIncoming).slice().sort((a, b) => dateOf(a).localeCompare(dateOf(b)))
+  const outgoing = items.filter((i) => !isIncoming(i)).slice().sort((a, b) => dateOf(a).localeCompare(dateOf(b)))
+  const incomingTotal = incoming.reduce((sum, i) => sum + amountOf(i), 0)
+  const outgoingTotal = outgoing.reduce((sum, i) => sum + amountOf(i), 0)
+
+  function Pill({ which, label, total, rows }: { which: 'in' | 'out'; label: string; total: number; rows: T[] }) {
+    const expanded = !collapsed.has(which)
+    return (
+      <div className="rounded-xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
+        <button onClick={() => toggle(which)} className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left">
+          <span className="flex items-center gap-1.5 min-w-0">
+            {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+            <span className="text-xs font-semibold text-[var(--color-ink)] truncate">{label}</span>
+          </span>
+          <span className="text-xs font-mono font-semibold tabular-nums shrink-0" style={{ color: which === 'in' ? 'var(--color-positive)' : 'var(--color-ink-muted)' }}>
+            {which === 'in' ? '+' : '-'}£{formatCurrency(total)}
+          </span>
+        </button>
+        {expanded && (
+          <div className="px-3 pb-2 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+            {rows.map((r) => (
+              <div key={keyOf(r)}>{renderRow(r)}</div>
+            ))}
+            {rows.length === 0 && <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-2">Nothing {label.toLowerCase()}.</p>}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Pill which="in" label={incomingLabel} total={incomingTotal} rows={incoming} />
+      <Pill which="out" label={outgoingLabel} total={outgoingTotal} rows={outgoing} />
+    </div>
+  )
+}
+
 /** Compact "14 Sep" style label for cycle boundary dates — parsed as local, never via Date.toISOString, per the app's timezone rule. */
 function formatCycleDate(iso: string): string {
   const [y, m, d] = iso.split('-').map(Number)
@@ -1349,6 +1491,7 @@ function CycleGroupedList({
   cycles,
   showCleared,
   amountSign,
+  groupByDirection,
 }: {
   transactions: Transaction[]
   data: AppDataV2
@@ -1356,6 +1499,7 @@ function CycleGroupedList({
   cycles: { start: Date; end: Date }[]
   showCleared: boolean
   amountSign?: (t: Transaction) => number
+  groupByDirection?: boolean
 }) {
   const sign = amountSign ?? signedAmount
   // Collapse state tracks what's explicitly been TOGGLED away from its
@@ -1435,14 +1579,25 @@ function CycleGroupedList({
 
             {expanded && (
               <div className="px-3 pb-1">
-                <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-                  {section.visibleRows.map(({ t, running }) => (
-                    <TransactionRow key={t.id} t={t} data={data} runningBalance={running} amountSign={amountSign} />
-                  ))}
-                  {section.visibleRows.length === 0 && (
-                    <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-3">Nothing in this cycle.</p>
-                  )}
-                </div>
+                {groupByDirection ? (
+                  <DirectionGroupedRows
+                    items={section.visibleRows}
+                    isIncoming={({ t }) => (amountSign ? amountSign(t) : signedAmount(t)) > 0}
+                    amountOf={({ t }) => Math.abs(amountSign ? amountSign(t) : signedAmount(t))}
+                    dateOf={({ t }) => t.date}
+                    keyOf={({ t }) => t.id}
+                    renderRow={({ t }) => <TransactionRow t={t} data={data} amountSign={amountSign} />}
+                  />
+                ) : (
+                  <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+                    {section.visibleRows.map(({ t, running }) => (
+                      <TransactionRow key={t.id} t={t} data={data} runningBalance={running} amountSign={amountSign} />
+                    ))}
+                    {section.visibleRows.length === 0 && (
+                      <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-3">Nothing in this cycle.</p>
+                    )}
+                  </div>
+                )}
                 <div
                   className="flex items-center justify-between pt-2 pb-2 mt-1 border-t"
                   style={{ borderColor: 'var(--color-track)' }}
@@ -1478,12 +1633,14 @@ function DateOrderedList({
   openingRunningBalance,
   showCleared,
   amountSign,
+  groupByDirection,
 }: {
   transactions: Transaction[]
   data: AppDataV2
   openingRunningBalance: number
   showCleared: boolean
   amountSign?: (t: Transaction) => number
+  groupByDirection?: boolean
 }) {
   const sign = amountSign ?? signedAmount
   // Salary first within its own date (see compareByDateSalaryFirst) — the
@@ -1497,6 +1654,19 @@ function DateOrderedList({
     return { t, running }
   })
   const visible = withRunning.filter(({ t }) => showCleared || t.status !== 'cleared')
+
+  if (groupByDirection) {
+    return (
+      <DirectionGroupedRows
+        items={visible}
+        isIncoming={({ t }) => sign(t) > 0}
+        amountOf={({ t }) => Math.abs(sign(t))}
+        dateOf={({ t }) => t.date}
+        keyOf={({ t }) => t.id}
+        renderRow={({ t }) => <TransactionRow t={t} data={data} amountSign={amountSign} />}
+      />
+    )
+  }
 
   return (
     <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
@@ -1640,6 +1810,7 @@ function PersonalDetail({
   order,
   cycleTotals,
   showCleared,
+  groupByDirection,
 }: {
   data: AppDataV2
   horizon: ProjectionHorizon
@@ -1647,6 +1818,7 @@ function PersonalDetail({
   order: Order
   cycleTotals: boolean
   showCleared: boolean
+  groupByDirection?: boolean
 }) {
   const payCycle = data.payCycles.find((pc) => pc.personId === data.primaryPersonId)
   if (!payCycle) return null
@@ -1671,9 +1843,9 @@ function PersonalDetail({
       ) : order === 'amount' ? (
         <AmountOrderedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
       ) : cycleTotals ? (
-        <CycleGroupedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} cycles={cycles} showCleared={showCleared} />
+        <CycleGroupedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} cycles={cycles} showCleared={showCleared} groupByDirection={groupByDirection} />
       ) : (
-        <DateOrderedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} showCleared={showCleared} />
+        <DateOrderedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} showCleared={showCleared} groupByDirection={groupByDirection} />
       )}
 
       <LoanProgressRingsSection
@@ -1851,6 +2023,7 @@ function JointDetail({
   order,
   cycleTotals,
   showCleared,
+  groupByDirection,
 }: {
   data: AppDataV2
   horizon: ProjectionHorizon
@@ -1858,6 +2031,7 @@ function JointDetail({
   order: Order
   cycleTotals: boolean
   showCleared: boolean
+  groupByDirection?: boolean
 }) {
   // BUGFIX (Adam-reported, 2026-09 session) — this used to also compute
   // an old flat per-item `summary` list (computeJointSummary) and render
@@ -1894,6 +2068,7 @@ function JointDetail({
               cycles={cycles}
               showCleared={showCleared}
               amountSign={jointAccountSignedAmount}
+              groupByDirection={groupByDirection}
             />
           ) : (
             <DateOrderedList
@@ -1902,6 +2077,7 @@ function JointDetail({
               openingRunningBalance={jointProjection.openingBalance}
               showCleared={showCleared}
               amountSign={jointAccountSignedAmount}
+              groupByDirection={groupByDirection}
             />
           )}
 
@@ -1943,6 +2119,7 @@ function PotDetail({
   order,
   cycleTotals,
   showCleared,
+  groupByDirection,
 }: {
   pot: Pot
   data: AppDataV2
@@ -1951,6 +2128,7 @@ function PotDetail({
   order: Order
   cycleTotals: boolean
   showCleared: boolean
+  groupByDirection?: boolean
 }) {
   const projection = computePotProjection(data, pot, horizon, new Date())
   const cycles = horizonCycles(data, pot.personId, horizon, new Date())
@@ -1974,9 +2152,17 @@ function PotDetail({
           cycles={cycles}
           showCleared={showCleared}
           amountSign={potSignedAmount}
+          groupByDirection={groupByDirection}
         />
       ) : (
-        <DateOrderedList transactions={projection.transactions} data={data} openingRunningBalance={projection.openingBalance} showCleared={showCleared} amountSign={potSignedAmount} />
+        <DateOrderedList
+          transactions={projection.transactions}
+          data={data}
+          openingRunningBalance={projection.openingBalance}
+          showCleared={showCleared}
+          amountSign={potSignedAmount}
+          groupByDirection={groupByDirection}
+        />
       )}
     </div>
   )
@@ -2058,6 +2244,7 @@ function HouseholdDetail({
   order,
   cycleTotals,
   showCleared,
+  groupByDirection,
 }: {
   data: AppDataV2
   horizon: ProjectionHorizon
@@ -2065,6 +2252,7 @@ function HouseholdDetail({
   order: Order
   cycleTotals: boolean
   showCleared: boolean
+  groupByDirection?: boolean
 }) {
   // Personal-only (Adam-specified, 2026-09-03): "Household card should
   // not include joint bills at all. This is a summary of each person's
@@ -2125,9 +2313,16 @@ function HouseholdDetail({
       ) : order === 'amount' ? (
         <AmountOrderedList transactions={combinedTransactions} data={data} showCleared={showCleared} />
       ) : cycleTotals ? (
-        <CycleGroupedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} cycles={combinedCycles} showCleared={showCleared} />
+        <CycleGroupedList
+          transactions={combinedTransactions}
+          data={data}
+          openingRunningBalance={combinedOpeningBalance}
+          cycles={combinedCycles}
+          showCleared={showCleared}
+          groupByDirection={groupByDirection}
+        />
       ) : (
-        <DateOrderedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} showCleared={showCleared} />
+        <DateOrderedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} showCleared={showCleared} groupByDirection={groupByDirection} />
       )}
 
       <LoanProgressRingsSection data={data} horizon={horizon} loans={householdLoans} horizonEndDate={householdHorizonEnd} />
@@ -2171,7 +2366,15 @@ function CardActivityRow({ t }: { t: Transaction }) {
  * current cycle labelled specially" shape as CycleGroupedList, for
  * visual consistency between the two.
  */
-function CreditCardCycleGroupedList({ sections, showCleared }: { sections: CreditCardCycleSection[]; showCleared: boolean }) {
+function CreditCardCycleGroupedList({
+  sections,
+  showCleared,
+  groupByDirection,
+}: {
+  sections: CreditCardCycleSection[]
+  showCleared: boolean
+  groupByDirection?: boolean
+}) {
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
   const toggle = (key: string) =>
     setToggled((prev) => {
@@ -2181,11 +2384,31 @@ function CreditCardCycleGroupedList({ sections, showCleared }: { sections: Credi
       return next
     })
 
+  function renderCardCycleRow(r: CreditCardCycleSection['rows'][number]) {
+    const isSpend = r.type === 'credit_card_spend'
+    const isMinimumCharge = r.type === 'credit_card_payment' && !r.sourceType
+    return (
+      <div className="flex items-center justify-between py-2">
+        <div>
+          <p className="text-sm text-[var(--color-ink)]">{r.note || (isSpend ? 'Spend' : isMinimumCharge ? 'Minimum charge' : 'Payment')}</p>
+          <p className="text-[11px] text-[var(--color-ink-muted)]">
+            {r.date}
+            {r.status === 'pending' ? ' · Pending' : ''}
+          </p>
+        </div>
+        <p className="text-sm font-mono font-semibold" style={{ color: isSpend ? 'var(--color-negative)' : 'var(--color-positive)' }}>
+          {isSpend ? '+' : '-'}£{formatCurrency(r.amount)}
+        </p>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-2">
       {sections.map((section, i) => {
         const key = toLocalIsoDate(section.dueDate)
         const expanded = toggled.has(key)
+        const visibleRows = section.rows.filter((r) => showCleared || r.status !== 'cleared')
         return (
           <div key={key} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
             <button onClick={() => toggle(key)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
@@ -2198,34 +2421,30 @@ function CreditCardCycleGroupedList({ sections, showCleared }: { sections: Credi
               {!expanded && <span className="text-xs font-mono text-[var(--color-ink)] shrink-0">£{formatCurrency(section.closingBalance)}</span>}
             </button>
             {expanded && (
-              <div className="px-3 pb-2 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-                {/* UAT 2026-09-09 (retest) — "Show cleared" hides already-
-                    cleared rows here too, same as every other list on this
-                    page; `section.closingBalance` is untouched by this —
-                    it stays the real balance due regardless of which rows
-                    are currently visible. */}
-                {section.rows
-                  .filter((r) => showCleared || r.status !== 'cleared')
-                  .map((r, ri) => {
-                    const isSpend = r.type === 'credit_card_spend'
-                    const isMinimumCharge = r.type === 'credit_card_payment' && !r.sourceType
-                    return (
-                      <div key={ri} className="flex items-center justify-between py-2">
-                        <div>
-                          <p className="text-sm text-[var(--color-ink)]">{r.note || (isSpend ? 'Spend' : isMinimumCharge ? 'Minimum charge' : 'Payment')}</p>
-                          <p className="text-[11px] text-[var(--color-ink-muted)]">
-                            {r.date}
-                            {r.status === 'pending' ? ' · Pending' : ''}
-                          </p>
-                        </div>
-                        <p className="text-sm font-mono font-semibold" style={{ color: isSpend ? 'var(--color-negative)' : 'var(--color-positive)' }}>
-                          {isSpend ? '+' : '-'}£{formatCurrency(r.amount)}
-                        </p>
-                      </div>
-                    )
-                  })}
-                {section.rows.filter((r) => showCleared || r.status !== 'cleared').length === 0 && (
-                  <p className="text-xs text-[var(--color-ink-faint)] text-center py-3">Nothing this period.</p>
+              <div className="px-3 pb-2">
+                {groupByDirection ? (
+                  <DirectionGroupedRows
+                    items={visibleRows}
+                    isIncoming={(r) => r.type !== 'credit_card_spend'}
+                    amountOf={(r) => r.amount}
+                    dateOf={(r) => r.date}
+                    keyOf={(r) => `${r.type}-${r.date}-${r.amount}`}
+                    renderRow={renderCardCycleRow}
+                    incomingLabel="Payments"
+                    outgoingLabel="Spend"
+                  />
+                ) : (
+                  <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+                    {/* UAT 2026-09-09 (retest) — "Show cleared" hides already-
+                        cleared rows here too, same as every other list on this
+                        page; `section.closingBalance` is untouched by this —
+                        it stays the real balance due regardless of which rows
+                        are currently visible. */}
+                    {visibleRows.map((r, ri) => (
+                      <div key={ri}>{renderCardCycleRow(r)}</div>
+                    ))}
+                    {visibleRows.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] text-center py-3">Nothing this period.</p>}
+                  </div>
                 )}
                 <div className="flex items-center justify-between py-2">
                   <span className="text-xs font-semibold text-[var(--color-ink)]">Balance due {formatCycleDate(key)}</span>
@@ -2241,7 +2460,21 @@ function CreditCardCycleGroupedList({ sections, showCleared }: { sections: Credi
   )
 }
 
-function CreditCardDetail({ card: storedCard, data, horizon, cycleTotals, showCleared }: { card: CreditCard; data: AppDataV2; horizon: ProjectionHorizon; cycleTotals: boolean; showCleared: boolean }) {
+function CreditCardDetail({
+  card: storedCard,
+  data,
+  horizon,
+  cycleTotals,
+  showCleared,
+  groupByDirection,
+}: {
+  card: CreditCard
+  data: AppDataV2
+  horizon: ProjectionHorizon
+  cycleTotals: boolean
+  showCleared: boolean
+  groupByDirection?: boolean
+}) {
   // Both halves of this ring are now derived from the same transaction
   // list under the same on-or-before-<asOf> rule: `paid` from the payment
   // transactions, `currentBalance` by replaying them against the anchor.
@@ -2314,7 +2547,18 @@ function CreditCardDetail({ card: storedCard, data, horizon, cycleTotals, showCl
       </p>
 
       {cycleTotals ? (
-        <CreditCardCycleGroupedList sections={cardCycleSections} showCleared={showCleared} />
+        <CreditCardCycleGroupedList sections={cardCycleSections} showCleared={showCleared} groupByDirection={groupByDirection} />
+      ) : groupByDirection ? (
+        <DirectionGroupedRows
+          items={activity}
+          isIncoming={(t) => t.type !== 'credit_card_spend'}
+          amountOf={(t) => t.amount}
+          dateOf={(t) => t.date}
+          keyOf={(t) => t.id}
+          renderRow={(t) => <CardActivityRow t={t} />}
+          incomingLabel="Payments"
+          outgoingLabel="Spend"
+        />
       ) : (
         <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
           {activity.map((t) => (
