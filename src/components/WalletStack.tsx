@@ -126,12 +126,26 @@ export function WalletStack({ items, onSelect, belowCards }: WalletStackProps) {
             background: 'var(--color-bg)',
           }
 
+          // 2026-09-13 (Adam-reported) — a back card taller than the
+          // current front card (e.g. Joint's hero grew a "Current
+          // balance" row) used to spill its extra height straight past
+          // the wrapper's bottom edge with nothing to clip it — the
+          // wrapper's own height is sized around `frontHeight` alone, on
+          // the (until now safe) assumption every card is roughly the
+          // same height. Capping every NON-front card to `frontHeight`
+          // (not the wrapper itself, so the front card's own shadow is
+          // never clipped) fixes this without touching the stacking
+          // math at all — a card reverts to its full natural height the
+          // moment it becomes the front card, since only `!isFront`
+          // cards get the cap.
+          const cardStyle: React.CSSProperties = isFront ? commonStyle : { ...commonStyle, maxHeight: frontHeight, overflow: 'hidden' }
+
           if (isFront) {
             return (
               <div
                 key={item.key}
                 ref={frontRef}
-                style={commonStyle}
+                style={cardStyle}
                 role={expanded ? 'button' : undefined}
                 aria-label={expanded ? 'Collapse card stack' : undefined}
                 onClick={
@@ -151,7 +165,7 @@ export function WalletStack({ items, onSelect, belowCards }: WalletStackProps) {
           return (
             <div
               key={item.key}
-              style={commonStyle}
+              style={cardStyle}
               role={expanded ? 'button' : undefined}
               tabIndex={expanded ? 0 : undefined}
               aria-label={expanded ? `Switch to ${item.label}` : undefined}
