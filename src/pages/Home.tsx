@@ -1264,25 +1264,14 @@ function DeckControls({
             >
               <SlidersHorizontal size={17} style={{ color: 'var(--color-ink)' }} />
             </button>
-            {/* 2026-09-13 follow-up (Adam-specified) — a counter of HOW
-                MANY things are non-default, not just a bare dot — see
-                activeFilterLabels' own comment for the "differs from ITS
-                OWN default" rule the count itself is built from. */}
+            {/* 2026-09-13 follow-up (Adam-specified) — a bare red NUMBER,
+                no circular badge/dot behind it — see activeFilterLabels'
+                own comment for the "differs from ITS OWN default" rule
+                the count itself is built from. */}
             {isNonDefault && (
               <span
-                className="absolute rounded-full flex items-center justify-center font-mono font-semibold"
-                style={{
-                  top: -6,
-                  right: -6,
-                  minWidth: 18,
-                  height: 18,
-                  padding: '0 4px',
-                  fontSize: 11,
-                  lineHeight: 1,
-                  color: '#fff',
-                  background: 'var(--color-coral)',
-                  border: '2px solid var(--color-bg)',
-                }}
+                className="absolute font-mono font-bold"
+                style={{ top: -8, right: -6, fontSize: 13, lineHeight: 1, color: 'var(--color-coral)' }}
               >
                 {activeLabels.length}
               </span>
