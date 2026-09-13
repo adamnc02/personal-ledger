@@ -1264,12 +1264,28 @@ function DeckControls({
             >
               <SlidersHorizontal size={17} style={{ color: 'var(--color-ink)' }} />
             </button>
-            {/* Active-state dot — see activeFilterLabels' own comment for the "differs from ITS OWN default" rule. */}
+            {/* 2026-09-13 follow-up (Adam-specified) — a counter of HOW
+                MANY things are non-default, not just a bare dot — see
+                activeFilterLabels' own comment for the "differs from ITS
+                OWN default" rule the count itself is built from. */}
             {isNonDefault && (
               <span
-                className="absolute rounded-full"
-                style={{ top: -2, right: -2, width: 10, height: 10, background: 'var(--color-coral)', border: '2px solid var(--color-bg)' }}
-              />
+                className="absolute rounded-full flex items-center justify-center font-mono font-semibold"
+                style={{
+                  top: -6,
+                  right: -6,
+                  minWidth: 18,
+                  height: 18,
+                  padding: '0 4px',
+                  fontSize: 11,
+                  lineHeight: 1,
+                  color: '#fff',
+                  background: 'var(--color-coral)',
+                  border: '2px solid var(--color-bg)',
+                }}
+              >
+                {activeLabels.length}
+              </span>
             )}
           </div>
         </div>
@@ -1366,33 +1382,38 @@ function FiltersSheet({
           { value: 'list', label: 'List' },
           { value: 'category', label: 'Category' },
         ]
-  // Deliberately narrow: cycle-end totals only mean anything in the one
-  // view that has multiple cycles to bound (three_cycles) AND a
-  // continuous date-ordered running balance to take a subtotal FROM
-  // (list + date) — see canShowCycleTotals' own comment. Rather than
-  // showing a toggle that quietly does nothing, it's absent outside that
-  // combination — and canShowCycleTotals gates the ACTUAL render too, so
-  // a value left over from a previous selection can't leak into a view
-  // it doesn't apply to.
-  const showCycleTotalsToggle = canShowCycleTotals(entry, horizon, grouping, order)
-  // Independent of Cycle-end totals, but still only offered for 'list'
+  // 2026-09-13 follow-up (Adam-specified) — these three toggles used to
+  // be HIDDEN outright whenever the current Group by/Order by pick made
+  // them inapplicable. Adam's own ask: grey them out (disabled) instead,
+  // so every toggle this card kind can ever offer stays visible, and
+  // it's clear WHY one can't be tapped right now rather than it just
+  // vanishing. `canShowCycleTotals` is still the single source of truth
+  // for whether Cycle-end totals currently applies — only what happens
+  // when it's false changed (disabled, not omitted).
+  //
+  // Cycle-end totals only means anything in the one view that has
+  // multiple cycles to bound (three_cycles) AND a continuous date-ordered
+  // running balance to take a subtotal FROM (list + date) — see
+  // canShowCycleTotals' own comment.
+  const cycleTotalsApplicable = canShowCycleTotals(entry, horizon, grouping, order)
+  // Independent of Cycle-end totals, but still only meaningful for 'list'
   // grouping + 'date' order on a Group-by/Order-by card: 'category'/
   // 'person' already split the ledger a different way
   // (CategoryGroupedList/PersonGroupedList don't accept a
   // groupByDirection prop), and AmountOrderedList doesn't either.
   // Credit Card/Savings Pot have no Group-by/Order-by of their own to
-  // conflict with, so it's always offered there.
-  const showGroupByDirectionToggle = !showGroupOrder || (grouping === 'list' && order === 'date')
-  // 2026-09-13 (average spend forecast) — Personal/Joint only, AND only
+  // conflict with, so it's always applicable there.
+  const groupByDirectionApplicable = !showGroupOrder || (grouping === 'list' && order === 'date')
+  // 2026-09-13 (average spend forecast) — Personal/Joint only (this part
+  // STAYS a hide, not a grey-out — Household/Pot/Credit Card/Savings Pot
+  // don't have this feature at all, that's not a "current selection"
+  // problem the way the other two are). Within Personal/Joint, only
   // once Cycle-end totals is genuinely ON (not just capable of being
-  // on) — the forecast row only ever renders inside CycleGroupedList, so
-  // this toggle has nowhere to take effect otherwise (Adam-specified:
-  // "only relevant... when Cycle-end totals is already on"). Also hidden
-  // for grouping === 'person' on Joint (its per-share sections don't
-  // wire up a forecast at all — same "don't show a toggle that quietly
-  // does nothing" instinct `showGroupByDirectionToggle` already follows
-  // for 'category'/'person').
-  const showAverageSpendForecastToggle = (entry.kind === 'personal' || entry.kind === 'joint') && grouping !== 'person' && showCycleTotalsToggle && cycleTotals
+  // on) — the forecast row only ever renders inside CycleGroupedList —
+  // and not while grouping is Person (its per-share sections don't wire
+  // up a forecast at all) does it actually apply; otherwise greyed out.
+  const showAverageSpendForecastRow = entry.kind === 'personal' || entry.kind === 'joint'
+  const averageSpendForecastApplicable = grouping !== 'person' && cycleTotalsApplicable && cycleTotals
   const isNonDefault = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection, averageSpendForecast).length > 0
 
   function resetToDefault() {
@@ -1489,19 +1510,30 @@ function FiltersSheet({
               (and, for category, a total to match), so it's never gated
               on the current view the way cycle-end totals is. */}
           <ToggleSwitch full label="Show cleared" checked={showCleared} onChange={setShowCleared} />
-          {showCycleTotalsToggle && (
-            <ToggleSwitch full label="Cycle-end totals" help="Subtotal each pay cycle" checked={cycleTotals} onChange={setCycleTotals} />
-          )}
-          {showGroupByDirectionToggle && (
-            <ToggleSwitch full label="Group by direction" help="Split into incoming / outgoing" checked={groupByDirection} onChange={setGroupByDirection} />
-          )}
-          {showAverageSpendForecastToggle && (
+          <ToggleSwitch
+            full
+            label="Cycle-end totals"
+            help={cycleTotalsApplicable ? 'Subtotal each pay cycle' : "Not available for this Group by/Order by"}
+            checked={cycleTotals}
+            onChange={setCycleTotals}
+            disabled={!cycleTotalsApplicable}
+          />
+          <ToggleSwitch
+            full
+            label="Group by direction"
+            help={groupByDirectionApplicable ? 'Split into incoming / outgoing' : 'Only available for List + Date'}
+            checked={groupByDirection}
+            onChange={setGroupByDirection}
+            disabled={!groupByDirectionApplicable}
+          />
+          {showAverageSpendForecastRow && (
             <ToggleSwitch
               full
               label="Average spend forecast"
-              help="Fill empty future cycles with a spend estimate"
+              help={averageSpendForecastApplicable ? 'Fill empty future cycles with a spend estimate' : 'Requires Cycle-end totals on, List grouping'}
               checked={averageSpendForecast}
               onChange={setAverageSpendForecast}
+              disabled={!averageSpendForecastApplicable}
             />
           )}
 
@@ -1525,6 +1557,7 @@ function ToggleSwitch({
   onChange,
   help,
   full,
+  disabled,
 }: {
   label: string
   checked: boolean
@@ -1533,10 +1566,20 @@ function ToggleSwitch({
   help?: string
   /** 2026-09-13 (deck controls cleanup) — the full-width "settings row" layout FiltersSheet uses (label + optional help on the left, a slightly larger switch on the right), instead of the compact inline label+switch pair used elsewhere on this page. */
   full?: boolean
+  /** 2026-09-13 follow-up (Adam-specified) — greyed out and non-interactive when the current Group by/Order by selection makes this control inapplicable, rather than hiding the row outright. `full` layout only. */
+  disabled?: boolean
 }) {
   if (full) {
     return (
-      <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} className="w-full flex items-center justify-between gap-3 text-left">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-disabled={disabled}
+        onClick={() => !disabled && onChange(!checked)}
+        className="w-full flex items-center justify-between gap-3 text-left"
+        style={{ opacity: disabled ? 0.4 : 1, cursor: disabled ? 'default' : 'pointer' }}
+      >
         <span className="flex flex-col gap-0.5">
           <span className="text-sm font-medium text-[var(--color-ink)]">{label}</span>
           {help && <span className="text-[11px] text-[var(--color-ink-muted)]">{help}</span>}
