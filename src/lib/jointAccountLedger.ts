@@ -53,6 +53,13 @@ export function jointAccountSignedAmount(t: Pick<Transaction, 'type' | 'amount' 
   if (t.type === 'joint_deposit') return t.amount
   if (t.type === 'joint_withdrawal') return -t.amount
   if (t.type === 'transfer') return jointTransferSignedAmount(t)
+  // 2026-09-13 (dev.md item 5) — an ad-hoc expense/income can now itself
+  // carry location: 'joint' (previously only bill_payment/loan_payment
+  // ever reached this fallback, both always 'out', so a bare `-t.amount`
+  // was safe). 'income' needs the opposite sign — everything else
+  // reaching this branch (bill_payment, loan_payment, expense) is still
+  // always 'out'.
+  if (t.type === 'income') return t.amount
   return -t.amount
 }
 

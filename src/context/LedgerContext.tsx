@@ -125,6 +125,17 @@ interface AdHocInput {
   paymentMethod: PaymentMethod
   personId: string
   note?: string
+  /**
+   * 2026-09-13 (dev.md item 5) — which account this ad-hoc entry is
+   * really against: Personal (default, omit entirely), Joint, or a
+   * regular Pot (never a Savings Pot — excluded by design). Same
+   * `location`/`potId` fields a bill/loan payment already carries;
+   * `jointAccountSignedAmount`/`potSignedAmount` were extended to sign
+   * 'income' correctly on those ledgers, since only always-'out' types
+   * (bill_payment/loan_payment) ever reached that fallback before.
+   */
+  location?: 'joint' | 'pot'
+  potId?: string
 }
 
 interface LedgerContextValue {
@@ -412,7 +423,8 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
       paymentMethod: input.paymentMethod,
       status: input.date <= todayIso() ? 'cleared' : 'pending',
       type: input.type,
-      location: 'personal',
+      location: input.location ?? 'personal',
+      potId: input.location === 'pot' ? input.potId : undefined,
       ownerId: input.personId,
       personId: input.type === 'income' ? input.personId : undefined,
       note: input.note,

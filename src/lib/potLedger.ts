@@ -308,7 +308,12 @@ export function potSignedAmount(t: Pick<Transaction, 'type' | 'amount' | 'fromLo
     if (t.fromLocation?.type === 'pot') return -t.amount
     return 0
   }
-  return -t.amount // pot_withdrawal, bill_payment, loan_payment
+  // 2026-09-13 (dev.md item 5) — an ad-hoc expense/income can now itself
+  // carry location: 'pot' (previously only pot_withdrawal/bill_payment/
+  // loan_payment ever reached this fallback, all always 'out', so a bare
+  // `-t.amount` was safe). 'income' needs the opposite sign.
+  if (t.type === 'income') return t.amount
+  return -t.amount // pot_withdrawal, bill_payment, loan_payment, expense
 }
 
 /**
