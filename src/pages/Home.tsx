@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet } from 'lucide-react'
@@ -504,6 +504,14 @@ function SavingsPotCycleGroupedList({
   groupByDirection?: boolean
 }) {
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
+  // 2026-09-14 — see CycleGroupedList's identical effect for the full
+  // reasoning: every cycle auto-expands while "Group by direction" is
+  // on, so its nested Incoming/Outgoing subtotal pills are visible
+  // without an extra manual tap per cycle.
+  useEffect(() => {
+    setToggled(new Set())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupByDirection])
   const toggle = (key: string) =>
     setToggled((prev) => {
       const next = new Set(prev)
@@ -535,7 +543,7 @@ function SavingsPotCycleGroupedList({
   return (
     <div className="flex flex-col gap-2">
       {sections.map((section) => {
-        const expanded = toggled.has(section.key)
+        const expanded = groupByDirection ? !toggled.has(section.key) : toggled.has(section.key)
         return (
           <div key={section.key} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
             <button onClick={() => toggle(section.key)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
@@ -1370,10 +1378,13 @@ function TransactionRow({
 /**
  * 2026-09-13 (dev.md item 2, Adam-specified) — "Group by direction":
  * splits whatever set of rows it's given into two independently
- * expandable/collapsible pills, Incoming and Outgoing, each defaulting
- * to EXPANDED (unlike a CycleGroupedList section, which defaults
- * collapsed) since picking this toggle on is itself the signal the
- * person wants to see the split straight away. Each pill's own rows are
+ * expandable/collapsible pills, Incoming and Outgoing. Both pills
+ * default to COLLAPSED (2026-09-14 follow-up, Adam-specified: turning
+ * the toggle on should surface the incoming/outgoing SUBTOTALS, not
+ * dump every individual transaction on screen) — each pill's header
+ * always shows its own running total regardless of expand state, so the
+ * subtotal is visible immediately either way; expanding one is an
+ * explicit further step to see its rows. Each pill's own rows are
  * always ordered by date regardless of the page's "Order by" setting —
  * Adam's own spec says the revealed rows are "ordered by date," and a
  * direction split has no obviously meaningful "by amount" ordering of
@@ -1403,7 +1414,7 @@ function DirectionGroupedRows<T>({
   incomingLabel?: string
   outgoingLabel?: string
 }) {
-  const [collapsed, setCollapsed] = useState<Set<'in' | 'out'>>(() => new Set())
+  const [collapsed, setCollapsed] = useState<Set<'in' | 'out'>>(() => new Set(['in', 'out']))
   const toggle = (which: 'in' | 'out') =>
     setCollapsed((prev) => {
       const next = new Set(prev)
@@ -1503,10 +1514,24 @@ function CycleGroupedList({
 }) {
   const sign = amountSign ?? signedAmount
   // Collapse state tracks what's explicitly been TOGGLED away from its
-  // default, so the default (every cycle collapsed) holds without seeding
-  // state per cycle — including for a cycle that first appears mid-session
-  // as the horizon rolls forward.
+  // default, so the default (every cycle collapsed, or expanded while
+  // groupByDirection is on — see below) holds without seeding state per
+  // cycle — including for a cycle that first appears mid-session as the
+  // horizon rolls forward.
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
+  // 2026-09-14 (follow-up, Adam-specified) — turning "Group by direction"
+  // on should surface the incoming/outgoing SUBTOTALS straight away,
+  // which live inside each cycle's own expanded body — so every cycle
+  // auto-expands the moment the toggle switches on (and any per-cycle
+  // override a person made is dropped, so the toggle always produces a
+  // clean, fully-expanded state rather than a confusing mix). The
+  // DirectionGroupedRows pills nested inside default back to COLLAPSED
+  // themselves (their own header still always shows the subtotal), so
+  // this doesn't dump every individual transaction on screen.
+  useEffect(() => {
+    setToggled(new Set())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupByDirection])
   const toggle = (key: string) =>
     setToggled((prev) => {
       const next = new Set(prev)
@@ -1554,8 +1579,11 @@ function CycleGroupedList({
   return (
     <div className="flex flex-col gap-2">
       {sections.map((section) => {
-        // Every cycle collapsed by default.
-        const expanded = toggled.has(section.key)
+        // Every cycle collapsed by default — except while "Group by
+        // direction" is on, when every cycle auto-expands instead (see
+        // the useEffect above), so its nested Incoming/Outgoing subtotal
+        // pills are visible without an extra manual tap per cycle.
+        const expanded = groupByDirection ? !toggled.has(section.key) : toggled.has(section.key)
         return (
           <div key={section.key} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
             <button onClick={() => toggle(section.key)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
@@ -2376,6 +2404,14 @@ function CreditCardCycleGroupedList({
   groupByDirection?: boolean
 }) {
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
+  // 2026-09-14 — see CycleGroupedList's identical effect for the full
+  // reasoning: every cycle auto-expands while "Group by direction" is
+  // on, so its nested Payments/Spend subtotal pills are visible without
+  // an extra manual tap per cycle.
+  useEffect(() => {
+    setToggled(new Set())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupByDirection])
   const toggle = (key: string) =>
     setToggled((prev) => {
       const next = new Set(prev)
@@ -2407,7 +2443,7 @@ function CreditCardCycleGroupedList({
     <div className="flex flex-col gap-2">
       {sections.map((section, i) => {
         const key = toLocalIsoDate(section.dueDate)
-        const expanded = toggled.has(key)
+        const expanded = groupByDirection ? !toggled.has(key) : toggled.has(key)
         const visibleRows = section.rows.filter((r) => showCleared || r.status !== 'cleared')
         return (
           <div key={key} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
