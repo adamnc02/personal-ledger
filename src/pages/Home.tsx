@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
-import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet } from 'lucide-react'
+import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, type ProjectionHorizon } from '../lib/projection'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
@@ -1102,10 +1102,46 @@ function canShowCycleTotals(entry: DeckEntry, horizon: ProjectionHorizon, groupi
   )
 }
 
-// ── Deck controls — cycle toggle + Group by/Order by, living BETWEEN the
-// hero deck and the detail card (not inside either one). Cycle toggle on
-// the left; Group by/Order by stacked on the right, as inline dropdown
-// text buttons rather than segmented pills, per the redesign. ──
+const DECK_CONTROLS_SHOW_GROUP_ORDER = (entry: DeckEntry) =>
+  entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot'
+
+/**
+ * 2026-09-13 (deck controls cleanup, Adam-specified) — a plain-English
+ * list of everything about the current view that differs from ITS OWN
+ * default, used for both the Filters button's active dot and the
+ * one-line caption underneath it. Deliberately compares each control
+ * against its own default rather than a blanket "is this switch on" —
+ * Cycle-end totals defaults to ON, so turning it OFF is just as much a
+ * non-default view as turning something else on (Adam's own question,
+ * settled live: "what about toggling cycle end off?"). Group by/Order by
+ * are only checked for card kinds that actually offer them — the
+ * grouping/order state is shared page-wide, so a stale 'category' left
+ * over from viewing a DIFFERENT card must never light this card's own
+ * dot (Show cleared/Cycle-end totals/Group by direction have no such
+ * cross-card leakage risk, since their own defaults are globally
+ * consistent regardless of which card is showing).
+ */
+function activeFilterLabels(entry: DeckEntry, grouping: Grouping, order: Order, showCleared: boolean, cycleTotals: boolean, groupByDirection: boolean): string[] {
+  const showGroupOrder = DECK_CONTROLS_SHOW_GROUP_ORDER(entry)
+  const labels: string[] = []
+  if (showGroupOrder && grouping !== 'list') labels.push(`Group by ${grouping === 'category' ? 'category' : 'person'}`)
+  if (showGroupOrder && order !== 'date') labels.push('Order by amount')
+  if (showCleared) labels.push('Show cleared')
+  if (!cycleTotals) labels.push('Cycle-end totals off')
+  if (groupByDirection) labels.push('Group by direction')
+  return labels
+}
+
+// ── Deck controls — cycle toggle + a single "Filters" button, living
+// BETWEEN the hero deck and the detail card (not inside either one).
+// 2026-09-13 cleanup (Adam-specified — see
+// PROMPT-deck-controls-cleanup-2026-09-13.md): this used to be the cycle
+// toggle plus up to 2 inline dropdowns and 4 stacked toggle switches,
+// always visible — cluttered on a narrow phone screen. Now only the
+// cycle toggle stays inline; everything else lives behind one Filters
+// button (FiltersSheet, below), with an active-state dot + one-line
+// caption so the collapsed state doesn't hide WHAT changed, only the
+// controls for changing it. ──
 
 function DeckControls({
   entry,
@@ -1136,35 +1172,122 @@ function DeckControls({
   groupByDirection: boolean
   setGroupByDirection: (v: boolean) => void
 }) {
-  // Widened (Adam-specified, 2026-09-03): Group by/Order by/Cycle-totals/
-  // Show cleared now apply to Household and Joint too, not just Personal.
-  // Pots backlog item (2026-09 session) — a Pot DOES get the full
-  // toolkit, unlike SavingsPot: Adam's own spec for it, verbatim, is "the
-  // same style as the Personal swipe card... group by / sort by
-  // features, with the same default settings and layout as Personal" —
-  // genuinely different from a SavingsPot's much simpler deposit/interest
-  // history, which has no meaningful "category" to group by.
-  const showHorizon = true
-  const showGroupOrder = entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot'
-  // UAT 2026-09-08 (Summary page cycle-end totals, Adam-specified) — a
-  // credit card gets ONLY the Cycle-end totals toggle, not Group-by/
-  // Order-by (no meaningful category to group a single card's own
-  // activity by), so it renders in its own spot below rather than
-  // inside the showGroupOrder cluster. UAT 2026-09-09 (retest) — Show
-  // cleared IS offered for a credit card now, alongside it — every
-  // other list on this page hides cleared rows by default, and the
-  // credit card's own lists (flat and cycle-grouped) had no way to
-  // toggle that at all.
-  //
-  // Widened again (Adam-specified, 2026-09-12) to include 'savings_pot'
-  // — every card in the deck now offers Show cleared/Cycle-end totals in
-  // SOME form; a Savings Pot gets the same narrow cluster a credit card
-  // does (no Group-by/Order-by, still no meaningful category to group a
-  // single pot's own deposit/interest/withdrawal history by), just using
-  // the household pay-cycle dates instead of a credit card's own billing
-  // dates — see canShowCycleTotals' own comment.
-  const showSimpleToggles = entry.kind === 'credit_card' || entry.kind === 'savings_pot'
-  const showSimpleCycleTotals = showSimpleToggles && canShowCycleTotals(entry, horizon, grouping, order)
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const activeLabels = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection)
+  const isNonDefault = activeLabels.length > 0
+
+  function resetToDefault() {
+    if (DECK_CONTROLS_SHOW_GROUP_ORDER(entry)) {
+      setGrouping('list')
+      setOrder('date')
+    }
+    setShowCleared(false)
+    setCycleTotals(true)
+    setGroupByDirection(false)
+  }
+
+  return (
+    <div className="mb-5 px-1">
+      <div className="flex items-center justify-between">
+        <CycleToggle value={horizon} onChange={setHorizon} />
+        <div className="flex items-center gap-3">
+          {/* "Reset to default", added 2026-09-13 (Adam-specified) —
+              shown next to the Filters button itself (a second copy also
+              lives inside FiltersSheet), gated by the exact same
+              `isNonDefault` check the active dot uses, so it only ever
+              appears when there's actually something to reset. */}
+          {isNonDefault && (
+            <button onClick={resetToDefault} className="text-xs font-medium" style={{ color: 'var(--color-coral)' }}>
+              Reset
+            </button>
+          )}
+          <div className="relative">
+            <button
+              onClick={() => setFiltersOpen(true)}
+              aria-label="Filters"
+              className="w-10 h-10 rounded-full flex items-center justify-center"
+              style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}
+            >
+              <SlidersHorizontal size={17} style={{ color: 'var(--color-ink)' }} />
+            </button>
+            {/* Active-state dot — see activeFilterLabels' own comment for the "differs from ITS OWN default" rule. */}
+            {isNonDefault && (
+              <span
+                className="absolute rounded-full"
+                style={{ top: -2, right: -2, width: 10, height: 10, background: 'var(--color-coral)', border: '2px solid var(--color-bg)' }}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+      {isNonDefault && (
+        <p className="text-[11px] mt-2" style={{ color: 'var(--color-ink-faint)' }}>
+          {activeLabels.join(' · ')}
+        </p>
+      )}
+      {filtersOpen && (
+        <FiltersSheet
+          entry={entry}
+          horizon={horizon}
+          grouping={grouping}
+          setGrouping={setGrouping}
+          order={order}
+          setOrder={setOrder}
+          cycleTotals={cycleTotals}
+          setCycleTotals={setCycleTotals}
+          showCleared={showCleared}
+          setShowCleared={setShowCleared}
+          groupByDirection={groupByDirection}
+          setGroupByDirection={setGroupByDirection}
+          onClose={() => setFiltersOpen(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * 2026-09-13 (deck controls cleanup, Adam-specified) — everything that
+ * used to live in DeckControls' own always-visible dropdown/toggle stack
+ * now lives here instead, opened from the Filters button. Group by/Order
+ * by become segmented pill rows (every option visible at once, no
+ * tap-to-open dropdown); every toggle becomes a full-width row with room
+ * for a short helper caption on the less self-explanatory ones. Every
+ * pick still applies live the instant it's tapped — there is nothing to
+ * "cancel," so the X and a tap on the backdrop both just close the
+ * sheet (Adam-specified: "any selections made are instant, so no need
+ * for a cancel button").
+ */
+function FiltersSheet({
+  entry,
+  horizon,
+  grouping,
+  setGrouping,
+  order,
+  setOrder,
+  cycleTotals,
+  setCycleTotals,
+  showCleared,
+  setShowCleared,
+  groupByDirection,
+  setGroupByDirection,
+  onClose,
+}: {
+  entry: DeckEntry
+  horizon: ProjectionHorizon
+  grouping: Grouping
+  setGrouping: (v: Grouping) => void
+  order: Order
+  setOrder: (v: Order) => void
+  cycleTotals: boolean
+  setCycleTotals: (v: boolean) => void
+  showCleared: boolean
+  setShowCleared: (v: boolean) => void
+  groupByDirection: boolean
+  setGroupByDirection: (v: boolean) => void
+  onClose: () => void
+}) {
+  const showGroupOrder = DECK_CONTROLS_SHOW_GROUP_ORDER(entry)
   // Household is the only card with a genuine "group by person" —
   // Personal is already one person, and Joint deliberately shows no
   // individuals at all (Adam-specified, 2026-09-03).
@@ -1179,78 +1302,168 @@ function DeckControls({
           { value: 'list', label: 'List' },
           { value: 'category', label: 'Category' },
         ]
-  if (!showHorizon && !showGroupOrder) return null
+  // Deliberately narrow: cycle-end totals only mean anything in the one
+  // view that has multiple cycles to bound (three_cycles) AND a
+  // continuous date-ordered running balance to take a subtotal FROM
+  // (list + date) — see canShowCycleTotals' own comment. Rather than
+  // showing a toggle that quietly does nothing, it's absent outside that
+  // combination — and canShowCycleTotals gates the ACTUAL render too, so
+  // a value left over from a previous selection can't leak into a view
+  // it doesn't apply to.
+  const showCycleTotalsToggle = canShowCycleTotals(entry, horizon, grouping, order)
+  // Independent of Cycle-end totals, but still only offered for 'list'
+  // grouping + 'date' order on a Group-by/Order-by card: 'category'/
+  // 'person' already split the ledger a different way
+  // (CategoryGroupedList/PersonGroupedList don't accept a
+  // groupByDirection prop), and AmountOrderedList doesn't either.
+  // Credit Card/Savings Pot have no Group-by/Order-by of their own to
+  // conflict with, so it's always offered there.
+  const showGroupByDirectionToggle = !showGroupOrder || (grouping === 'list' && order === 'date')
+  const isNonDefault = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection).length > 0
+
+  function resetToDefault() {
+    if (showGroupOrder) {
+      setGrouping('list')
+      setOrder('date')
+    }
+    setShowCleared(false)
+    setCycleTotals(true)
+    setGroupByDirection(false)
+  }
 
   return (
-    <div className="flex items-start justify-between mb-5 px-1">
-      <div>{showHorizon && <CycleToggle value={horizon} onChange={setHorizon} />}</div>
-      {showSimpleToggles && (
-        <div className="flex flex-col items-end gap-1.5">
-          <ToggleSwitch label="Show cleared" checked={showCleared} onChange={setShowCleared} />
-          {showSimpleCycleTotals && <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />}
-          {/* 2026-09-13 — independent of Cycle-end totals (see
-              groupByDirection's own comment in Home's top-level state):
-              always offered here, same as Show cleared, since a credit
-              card/savings pot has no Group-by/Order-by of its own for
-              this to conflict with. */}
-          <ToggleSwitch label="Group by direction" checked={groupByDirection} onChange={setGroupByDirection} />
+    <>
+      <div role="button" aria-label="Close filters" onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(5,7,13,0.72)', zIndex: 40 }} />
+      <div
+        style={{
+          position: 'fixed',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          zIndex: 41,
+          background: 'var(--color-bg-elevated)',
+          borderTop: '1px solid var(--color-track)',
+          borderRadius: '24px 24px 0 0',
+          padding: '20px 20px calc(20px + env(safe-area-inset-bottom, 0px))',
+          boxShadow: '0 -12px 32px rgba(0,0,0,0.4)',
+          maxHeight: '80vh',
+          overflowY: 'auto',
+        }}
+      >
+        <div className="flex flex-col items-center gap-3.5">
+          <div style={{ width: 36, height: 4, borderRadius: 999, background: 'var(--color-track)' }} />
+          <div className="w-full flex items-center justify-between">
+            <span className="font-display text-base font-semibold text-[var(--color-ink)]">Ledger view</span>
+            <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+              <X size={18} />
+            </button>
+          </div>
         </div>
-      )}
-      {showGroupOrder && (
-        <div className="flex flex-col items-end gap-1.5">
-          <InlineDropdown
-            label="Group by"
-            value={grouping}
-            options={groupingOptions}
-            onChange={setGrouping}
-          />
-          <InlineDropdown
-            label="Order by"
-            value={order}
-            options={[
-              { value: 'date', label: 'Date' },
-              { value: 'amount', label: 'Amount' },
-            ]}
-            onChange={setOrder}
-            disabled={grouping === 'category'}
-          />
+
+        <div className="flex flex-col gap-4 mt-4">
+          {showGroupOrder && (
+            <>
+              <div className="flex flex-col gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-ink-muted)]">Group by</span>
+                <div className="flex gap-1.5">
+                  {groupingOptions.map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setGrouping(opt.value)}
+                      className="flex-1 py-2 rounded-full text-sm font-medium"
+                      style={{ background: grouping === opt.value ? 'var(--color-coral)' : 'var(--color-surface)', color: grouping === opt.value ? '#fff' : 'var(--color-ink-muted)' }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex flex-col gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-ink-muted)]">Order by</span>
+                <div className="flex gap-1.5">
+                  {(
+                    [
+                      { value: 'date', label: 'Date' },
+                      { value: 'amount', label: 'Amount' },
+                    ] as { value: Order; label: string }[]
+                  ).map((opt) => (
+                    <button
+                      key={opt.value}
+                      disabled={grouping === 'category'}
+                      onClick={() => setOrder(opt.value)}
+                      className="flex-1 py-2 rounded-full text-sm font-medium disabled:opacity-40"
+                      style={{ background: order === opt.value ? 'var(--color-coral)' : 'var(--color-surface)', color: order === opt.value ? '#fff' : 'var(--color-ink-muted)' }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div style={{ height: 1, background: 'var(--color-surface-raised)' }} />
+            </>
+          )}
+
           {/* Unlike cycle-end totals below, this one applies to every
               grouping/order combination — list, category, and amount all
               have SOME notion of "hide the rows that already cleared"
               (and, for category, a total to match), so it's never gated
               on the current view the way cycle-end totals is. */}
-          <ToggleSwitch label="Show cleared" checked={showCleared} onChange={setShowCleared} />
-          {/* Deliberately narrow: cycle-end totals only mean anything in
-              the one view that has multiple cycles to bound (three_cycles)
-              AND a continuous date-ordered running balance to take a
-              subtotal FROM (list + date). Grouping by category destroys
-              the date ordering the fold depends on; ordering by amount
-              does the same; and the current-cycle view has exactly one
-              cycle, so a per-cycle subtotal would just restate the
-              projected balance. Rather than showing a toggle that quietly
-              does nothing, it's absent outside that combination — and
-              canShowCycleTotals gates the RENDER too, so a value left
-              over from a previous selection can't leak into a view it
-              doesn't apply to. */}
-          {canShowCycleTotals(entry, horizon, grouping, order) && (
-            <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />
+          <ToggleSwitch full label="Show cleared" checked={showCleared} onChange={setShowCleared} />
+          {showCycleTotalsToggle && (
+            <ToggleSwitch full label="Cycle-end totals" help="Subtotal each pay cycle" checked={cycleTotals} onChange={setCycleTotals} />
           )}
-          {/* 2026-09-13 — independent of Cycle-end totals, but still only
-              offered for 'list' grouping + 'date' order: 'category'/
-              'person' already split the ledger a different way
-              (CategoryGroupedList/PersonGroupedList don't accept a
-              groupByDirection prop), and AmountOrderedList doesn't either
-              — rather than show a toggle that would quietly do nothing
-              there (the same instinct canShowCycleTotals already
-              follows), it's simply absent outside list+date. */}
-          {grouping === 'list' && order === 'date' && <ToggleSwitch label="Group by direction" checked={groupByDirection} onChange={setGroupByDirection} />}
+          {showGroupByDirectionToggle && (
+            <ToggleSwitch full label="Group by direction" help="Split into incoming / outgoing" checked={groupByDirection} onChange={setGroupByDirection} />
+          )}
+
+          {isNonDefault && (
+            <button onClick={resetToDefault} className="text-sm font-medium text-center py-1" style={{ color: 'var(--color-coral)' }}>
+              Reset to default
+            </button>
+          )}
+          <button onClick={onClose} className="w-full py-3 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
+            Done
+          </button>
         </div>
-      )}
-    </div>
+      </div>
+    </>
   )
 }
 
-function ToggleSwitch({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+function ToggleSwitch({
+  label,
+  checked,
+  onChange,
+  help,
+  full,
+}: {
+  label: string
+  checked: boolean
+  onChange: (v: boolean) => void
+  /** 2026-09-13 (deck controls cleanup) — a short helper caption under the label, only used in the `full` (FiltersSheet row) layout. */
+  help?: string
+  /** 2026-09-13 (deck controls cleanup) — the full-width "settings row" layout FiltersSheet uses (label + optional help on the left, a slightly larger switch on the right), instead of the compact inline label+switch pair used elsewhere on this page. */
+  full?: boolean
+}) {
+  if (full) {
+    return (
+      <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} className="w-full flex items-center justify-between gap-3 text-left">
+        <span className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium text-[var(--color-ink)]">{label}</span>
+          {help && <span className="text-[11px] text-[var(--color-ink-muted)]">{help}</span>}
+        </span>
+        <span
+          className="relative inline-block rounded-full transition-colors shrink-0"
+          style={{ width: 38, height: 22, background: checked ? 'var(--color-coral)' : 'var(--color-track)' }}
+        >
+          <span
+            className="absolute rounded-full bg-white transition-transform"
+            style={{ width: 18, height: 18, top: 2, left: 2, transform: checked ? 'translateX(16px)' : 'translateX(0)', boxShadow: '0 1px 2px rgba(0,0,0,0.2)' }}
+          />
+        </span>
+      </button>
+    )
+  }
   return (
     <button
       type="button"
@@ -1287,57 +1500,6 @@ function CycleToggle({ value, onChange }: { value: ProjectionHorizon; onChange: 
           {HORIZON_LABELS[h]}
         </button>
       ))}
-    </div>
-  )
-}
-
-function InlineDropdown<T extends string>({
-  label,
-  value,
-  options,
-  onChange,
-  disabled,
-}: {
-  label: string
-  value: T
-  options: { value: T; label: string }[]
-  onChange: (v: T) => void
-  disabled?: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  const currentLabel = options.find((o) => o.value === value)?.label ?? value
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => !disabled && setOpen((o) => !o)}
-        disabled={disabled}
-        className="flex items-center gap-1 text-xs font-medium"
-        style={{ color: disabled ? 'var(--color-ink-faint)' : 'var(--color-ink-muted)', cursor: disabled ? 'default' : 'pointer' }}
-      >
-        {label}: {currentLabel}
-        <ChevronDown size={12} />
-      </button>
-      {open && !disabled && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 rounded-xl overflow-hidden z-20 shadow-lg" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}>
-            {options.map((opt) => (
-              <button
-                key={opt.value}
-                onClick={() => {
-                  onChange(opt.value)
-                  setOpen(false)
-                }}
-                className="block w-full text-left px-3 py-2 text-xs whitespace-nowrap"
-                style={{ color: value === opt.value ? 'var(--color-coral)' : 'var(--color-ink)' }}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
     </div>
   )
 }
