@@ -58,6 +58,28 @@ export function horizonRangeEnd(data: AppDataV2, personId: string, horizon: Proj
 }
 
 /**
+ * The N pay cycles immediately BEFORE the one containing `asOfDate` —
+ * the mirror-image walk of `horizonCycles`, which only ever walks
+ * forward. Index 0 in the returned array is the cycle immediately
+ * before "now"'s cycle; index N-1 is the oldest. Used by the average
+ * spend forecast feature (2026-09-13) to build its trailing lookback
+ * window — deliberately NOT anchored to any opening-balance date (see
+ * that feature's own callers), since this is pure calendar/payday
+ * arithmetic via `resolveCycleBounds`, same as `horizonCycles` itself.
+ */
+export function previousCycles(data: AppDataV2, personId: string, n: number, asOfDate: Date): { start: Date; end: Date }[] {
+  const current = resolveCycleBounds(data, personId, asOfDate)
+  const cycles: { start: Date; end: Date }[] = []
+  let cursor = current.start
+  for (let i = 0; i < n; i++) {
+    const prev = resolveCycleBounds(data, personId, addDays(cursor, -1))
+    cycles.push(prev)
+    cursor = prev.start
+  }
+  return cycles
+}
+
+/**
  * A stable key for matching a generated occurrence against an already-
  * materialized real Transaction, so the same bill/loan/card-payment/
  * salary date never gets counted twice. Returns null for transaction

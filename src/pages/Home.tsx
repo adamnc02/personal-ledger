@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
-import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X } from 'lucide-react'
+import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, type ProjectionHorizon } from '../lib/projection'
+import { averageAdHocExpensePerCycle, forecastSpendForCycle, type SpendScope } from '../lib/averageSpendForecast'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary } from '../lib/jointLedger'
 import { computeJointAccountProjection, jointAccountSignedAmount } from '../lib/jointAccountLedger'
@@ -200,6 +201,12 @@ export function Home() {
   // with totals on, those same two pills nest inside each cycle section
   // instead, alongside the existing per-cycle closing balance.
   const [groupByDirection, setGroupByDirection] = useState(false)
+  // 2026-09-13 (average spend forecast, Adam-specified) — Personal and
+  // Joint cards only, off by default. Threaded exactly like
+  // groupByDirection; the per-card gating (which entry.kind actually
+  // offers it, and only once Cycle-end totals is on) lives in
+  // activeFilterLabels/FiltersSheet, not here.
+  const [averageSpendForecast, setAverageSpendForecast] = useState(false)
 
   const deck = useMemo(() => buildDeck(data), [data])
 
@@ -266,6 +273,8 @@ export function Home() {
           setShowCleared={setShowCleared}
           groupByDirection={groupByDirection}
           setGroupByDirection={setGroupByDirection}
+          averageSpendForecast={averageSpendForecast}
+          setAverageSpendForecast={setAverageSpendForecast}
         />
         <DeckDetail
           entry={activeEntry}
@@ -279,6 +288,7 @@ export function Home() {
           cycleTotals={cycleTotalsActive}
           showCleared={showCleared}
           groupByDirection={groupByDirection}
+          averageSpendForecast={averageSpendForecast}
         />
       </div>
     </div>
@@ -1036,6 +1046,7 @@ function DeckDetail(props: {
   cycleTotals: boolean
   showCleared: boolean
   groupByDirection: boolean
+  averageSpendForecast: boolean
 }) {
   const { entry, data } = props
   switch (entry.kind) {
@@ -1102,6 +1113,30 @@ function canShowCycleTotals(entry: DeckEntry, horizon: ProjectionHorizon, groupi
   )
 }
 
+/**
+ * The forecast row data for every FUTURE cycle (never the current one)
+ * that needs one — see PROMPT-average-spend-forecast-toggle-2026-09-13.md.
+ * Shared between PersonalDetail (`{ location: 'personal', ownerId }`) and
+ * JointDetail (`{ location: 'joint' }`); `personId` is always
+ * `data.primaryPersonId` for BOTH — the joint account has no independent
+ * "joint pay cycle" concept of its own, it borrows the primary person's.
+ * Keyed by each cycle's own start date (ISO) so `CycleGroupedList` can
+ * look a cycle's forecast up by its own `section.startIso`. Returns an
+ * empty map (not undefined) when the average itself is 0 — simplifies
+ * every caller to a single `.get(...)` with no extra null-check.
+ */
+function buildForecastByCycle(data: AppDataV2, scope: SpendScope, personId: string, cycles: { start: Date; end: Date }[]): Map<string, { forecastAmount: number; realSpend: number }> {
+  const map = new Map<string, { forecastAmount: number; realSpend: number }>()
+  const averagePerCycle = averageAdHocExpensePerCycle(data, scope, personId, new Date())
+  if (averagePerCycle <= 0) return map
+  // cycles[0] is always "Current cycle" (horizonCycles' own convention) — the forecast only ever fills in FUTURE cycles.
+  for (const cycle of cycles.slice(1)) {
+    const { forecastAmount, realSpend } = forecastSpendForCycle(data, scope, averagePerCycle, cycle)
+    if (forecastAmount > 0) map.set(toLocalIsoDate(cycle.start), { forecastAmount, realSpend })
+  }
+  return map
+}
+
 const DECK_CONTROLS_SHOW_GROUP_ORDER = (entry: DeckEntry) =>
   entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot'
 
@@ -1121,7 +1156,15 @@ const DECK_CONTROLS_SHOW_GROUP_ORDER = (entry: DeckEntry) =>
  * cross-card leakage risk, since their own defaults are globally
  * consistent regardless of which card is showing).
  */
-function activeFilterLabels(entry: DeckEntry, grouping: Grouping, order: Order, showCleared: boolean, cycleTotals: boolean, groupByDirection: boolean): string[] {
+function activeFilterLabels(
+  entry: DeckEntry,
+  grouping: Grouping,
+  order: Order,
+  showCleared: boolean,
+  cycleTotals: boolean,
+  groupByDirection: boolean,
+  averageSpendForecast: boolean,
+): string[] {
   const showGroupOrder = DECK_CONTROLS_SHOW_GROUP_ORDER(entry)
   const labels: string[] = []
   if (showGroupOrder && grouping !== 'list') labels.push(`Group by ${grouping === 'category' ? 'category' : 'person'}`)
@@ -1129,6 +1172,12 @@ function activeFilterLabels(entry: DeckEntry, grouping: Grouping, order: Order, 
   if (showCleared) labels.push('Show cleared')
   if (!cycleTotals) labels.push('Cycle-end totals off')
   if (groupByDirection) labels.push('Group by direction')
+  // Personal/Joint only — the toggle doesn't exist for any other card
+  // kind, so a stale `true` from viewing Personal must never light
+  // Household/Pot/Credit Card/Savings Pot's own dot (unlike Cycle-end
+  // totals/Group by direction, which genuinely apply everywhere, this
+  // one doesn't).
+  if ((entry.kind === 'personal' || entry.kind === 'joint') && averageSpendForecast) labels.push('Average spend forecast')
   return labels
 }
 
@@ -1157,6 +1206,8 @@ function DeckControls({
   setShowCleared,
   groupByDirection,
   setGroupByDirection,
+  averageSpendForecast,
+  setAverageSpendForecast,
 }: {
   entry: DeckEntry
   horizon: ProjectionHorizon
@@ -1171,9 +1222,11 @@ function DeckControls({
   setShowCleared: (v: boolean) => void
   groupByDirection: boolean
   setGroupByDirection: (v: boolean) => void
+  averageSpendForecast: boolean
+  setAverageSpendForecast: (v: boolean) => void
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false)
-  const activeLabels = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection)
+  const activeLabels = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection, averageSpendForecast)
   const isNonDefault = activeLabels.length > 0
 
   function resetToDefault() {
@@ -1184,6 +1237,7 @@ function DeckControls({
     setShowCleared(false)
     setCycleTotals(true)
     setGroupByDirection(false)
+    setAverageSpendForecast(false)
   }
 
   return (
@@ -1239,6 +1293,8 @@ function DeckControls({
           setShowCleared={setShowCleared}
           groupByDirection={groupByDirection}
           setGroupByDirection={setGroupByDirection}
+          averageSpendForecast={averageSpendForecast}
+          setAverageSpendForecast={setAverageSpendForecast}
           onClose={() => setFiltersOpen(false)}
         />
       )}
@@ -1271,6 +1327,8 @@ function FiltersSheet({
   setShowCleared,
   groupByDirection,
   setGroupByDirection,
+  averageSpendForecast,
+  setAverageSpendForecast,
   onClose,
 }: {
   entry: DeckEntry
@@ -1285,6 +1343,8 @@ function FiltersSheet({
   setShowCleared: (v: boolean) => void
   groupByDirection: boolean
   setGroupByDirection: (v: boolean) => void
+  averageSpendForecast: boolean
+  setAverageSpendForecast: (v: boolean) => void
   onClose: () => void
 }) {
   const showGroupOrder = DECK_CONTROLS_SHOW_GROUP_ORDER(entry)
@@ -1319,7 +1379,13 @@ function FiltersSheet({
   // Credit Card/Savings Pot have no Group-by/Order-by of their own to
   // conflict with, so it's always offered there.
   const showGroupByDirectionToggle = !showGroupOrder || (grouping === 'list' && order === 'date')
-  const isNonDefault = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection).length > 0
+  // 2026-09-13 (average spend forecast) — Personal/Joint only, AND only
+  // once Cycle-end totals is genuinely ON (not just capable of being
+  // on) — the forecast row only ever renders inside CycleGroupedList, so
+  // this toggle has nowhere to take effect otherwise (Adam-specified:
+  // "only relevant... when Cycle-end totals is already on").
+  const showAverageSpendForecastToggle = (entry.kind === 'personal' || entry.kind === 'joint') && showCycleTotalsToggle && cycleTotals
+  const isNonDefault = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection, averageSpendForecast).length > 0
 
   function resetToDefault() {
     if (showGroupOrder) {
@@ -1329,6 +1395,7 @@ function FiltersSheet({
     setShowCleared(false)
     setCycleTotals(true)
     setGroupByDirection(false)
+    setAverageSpendForecast(false)
   }
 
   return (
@@ -1414,6 +1481,15 @@ function FiltersSheet({
           )}
           {showGroupByDirectionToggle && (
             <ToggleSwitch full label="Group by direction" help="Split into incoming / outgoing" checked={groupByDirection} onChange={setGroupByDirection} />
+          )}
+          {showAverageSpendForecastToggle && (
+            <ToggleSwitch
+              full
+              label="Average spend forecast"
+              help="Fill empty future cycles with a spend estimate"
+              checked={averageSpendForecast}
+              onChange={setAverageSpendForecast}
+            />
           )}
 
           {isNonDefault && (
@@ -1677,6 +1753,46 @@ function formatCycleDate(iso: string): string {
  * shorter than it is. Its subtotal is simply the balance carried in from
  * the previous cycle (or folded through whatever cleared automatically).
  */
+
+/** 2026-09-13 (average spend forecast) — the row-shaped item DirectionGroupedRows folds a cycle's real transactions AND its (at most one) synthetic forecast row into, so the forecast row can sit inside the "Outgoing" pill alongside real expenses rather than needing its own separate treatment. */
+type CycleRowItem = { kind: 'real'; t: Transaction; running: number } | { kind: 'forecast'; forecastAmount: number; realSpend: number; cycleEndIso: string }
+
+/**
+ * 2026-09-13 (average spend forecast, Adam-specified) — "a completely
+ * different design to normal ledger rows", not a `TransactionRow` (this
+ * isn't a real `Transaction` and shouldn't be forced into that shape).
+ * The icon badge is deliberately the INVERSE of `CategoryIcon`'s own
+ * treatment — a solid-filled coral circle with the glyph drawn in the
+ * page's own background colour, so it reads as a cutout through the
+ * fill rather than a coloured-icon-on-neutral-circle. Dashed outline +
+ * italic muted label reinforce "this is an estimate, not a real entry."
+ * The "Reduced from £X" caption only appears once the reduction
+ * actually did something (`realSpend > 0`) — otherwise it's just noise
+ * ("Reduced from £0" says nothing true).
+ */
+function ProjectedSpendRow({ forecastAmount, realSpend }: { forecastAmount: number; realSpend: number }) {
+  const averagePerCycle = round2(forecastAmount + realSpend)
+  return (
+    <div className="flex items-center gap-3 py-2 px-2 my-1 rounded-xl" style={{ border: '1px dashed var(--color-ink-faint)' }}>
+      <span className="inline-flex items-center justify-center shrink-0 rounded-full" style={{ width: 30, height: 30, background: 'var(--color-coral)' }}>
+        <TrendingUp size={14} strokeWidth={2} style={{ color: 'var(--color-bg)' }} />
+      </span>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm italic" style={{ color: 'var(--color-ink-muted)' }}>
+          Average spend forecast
+        </p>
+        {realSpend > 0 && (
+          <p className="text-[11px]" style={{ color: 'var(--color-ink-faint)' }}>
+            Reduced from £{formatCurrency(averagePerCycle)} · estimate
+          </p>
+        )}
+      </div>
+      <span className="text-sm font-mono font-semibold shrink-0" style={{ color: 'var(--color-ink-muted)' }}>
+        -£{formatCurrency(forecastAmount)}
+      </span>
+    </div>
+  )
+}
 function CycleGroupedList({
   transactions,
   data,
@@ -1685,6 +1801,7 @@ function CycleGroupedList({
   showCleared,
   amountSign,
   groupByDirection,
+  forecastByCycle,
 }: {
   transactions: Transaction[]
   data: AppDataV2
@@ -1693,6 +1810,8 @@ function CycleGroupedList({
   showCleared: boolean
   amountSign?: (t: Transaction) => number
   groupByDirection?: boolean
+  /** 2026-09-13 (average spend forecast) — one entry per FUTURE cycle that needs a synthetic forecast row, keyed by that cycle's own start date (ISO). Personal/Joint only; every other caller omits this entirely. See buildForecastByCycle's own comment. */
+  forecastByCycle?: Map<string, { forecastAmount: number; realSpend: number }>
 }) {
   const sign = amountSign ?? signedAmount
   // Collapse state tracks what's explicitly been TOGGLED away from its
@@ -1749,13 +1868,21 @@ function CycleGroupedList({
     const rows = withRunning.filter(({ t }) => (i === 0 || t.date >= startIso) && t.date <= endIso)
     // Balance carried OUT of this cycle — the last row's running figure,
     // or, for an empty cycle, whatever came in from the one before.
-    const closing = rows.length > 0 ? rows[rows.length - 1].running : carried
+    const realClosing = rows.length > 0 ? rows[rows.length - 1].running : carried
+    // 2026-09-13 (average spend forecast) — a forecast row for this
+    // cycle (if any) reduces its closing balance by its own forecast
+    // amount, same as a real expense would — and that ADJUSTED figure
+    // is what carries forward into every later cycle's own opening
+    // point, so the projected balance genuinely reflects it rather than
+    // being a purely cosmetic row.
+    const forecast = forecastByCycle?.get(startIso)
+    const closing = forecast ? round2(realClosing - forecast.forecastAmount) : realClosing
     carried = closing
     // Respects the "Show cleared" toggle — computed here, AFTER `closing`
     // above already folded every row (cleared included), so this can
     // never change the balance figures, only which rows render.
     const visibleRows = rows.filter(({ t }) => showCleared || t.status !== 'cleared')
-    return { key: startIso, isCurrent: i === 0, startIso, endIso, rows, visibleRows, closing }
+    return { key: startIso, isCurrent: i === 0, startIso, endIso, rows, visibleRows, closing, forecast }
   })
 
   return (
@@ -1790,22 +1917,27 @@ function CycleGroupedList({
             {expanded && (
               <div className="px-3 pb-1">
                 {groupByDirection ? (
-                  <DirectionGroupedRows
-                    items={section.visibleRows}
-                    isIncoming={({ t }) => (amountSign ? amountSign(t) : signedAmount(t)) > 0}
-                    amountOf={({ t }) => Math.abs(amountSign ? amountSign(t) : signedAmount(t))}
-                    dateOf={({ t }) => t.date}
-                    keyOf={({ t }) => t.id}
-                    renderRow={({ t }) => <TransactionRow t={t} data={data} amountSign={amountSign} />}
+                  <DirectionGroupedRows<CycleRowItem>
+                    items={[
+                      ...section.visibleRows.map((r): CycleRowItem => ({ kind: 'real', t: r.t, running: r.running })),
+                      ...(section.forecast ? [{ kind: 'forecast' as const, forecastAmount: section.forecast.forecastAmount, realSpend: section.forecast.realSpend, cycleEndIso: section.endIso }] : []),
+                    ]}
+                    isIncoming={(item) => item.kind === 'real' && (amountSign ? amountSign(item.t) : signedAmount(item.t)) > 0}
+                    amountOf={(item) => (item.kind === 'real' ? Math.abs(amountSign ? amountSign(item.t) : signedAmount(item.t)) : item.forecastAmount)}
+                    dateOf={(item) => (item.kind === 'real' ? item.t.date : item.cycleEndIso)}
+                    keyOf={(item) => (item.kind === 'real' ? item.t.id : 'forecast')}
+                    renderRow={(item) => (item.kind === 'real' ? <TransactionRow t={item.t} data={data} amountSign={amountSign} /> : <ProjectedSpendRow forecastAmount={item.forecastAmount} realSpend={item.realSpend} />)}
                   />
                 ) : (
                   <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
                     {section.visibleRows.map(({ t, running }) => (
                       <TransactionRow key={t.id} t={t} data={data} runningBalance={running} amountSign={amountSign} />
                     ))}
-                    {section.visibleRows.length === 0 && (
+                    {section.visibleRows.length === 0 && !section.forecast && (
                       <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-3">Nothing in this cycle.</p>
                     )}
+                    {/* Always the LAST line in the cycle, regardless of date — Adam's own explicit requirement (see PROMPT-average-spend-forecast-toggle-2026-09-13.md). */}
+                    {section.forecast && <ProjectedSpendRow forecastAmount={section.forecast.forecastAmount} realSpend={section.forecast.realSpend} />}
                   </div>
                 )}
                 <div
@@ -2021,6 +2153,7 @@ function PersonalDetail({
   cycleTotals,
   showCleared,
   groupByDirection,
+  averageSpendForecast,
 }: {
   data: AppDataV2
   horizon: ProjectionHorizon
@@ -2029,6 +2162,7 @@ function PersonalDetail({
   cycleTotals: boolean
   showCleared: boolean
   groupByDirection?: boolean
+  averageSpendForecast?: boolean
 }) {
   const payCycle = data.payCycles.find((pc) => pc.personId === data.primaryPersonId)
   if (!payCycle) return null
@@ -2040,6 +2174,7 @@ function PersonalDetail({
   // final section's closing balance is the projected balance by
   // construction rather than by coincidence.
   const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
+  const forecastByCycle = averageSpendForecast ? buildForecastByCycle(data, { location: 'personal', ownerId: data.primaryPersonId }, data.primaryPersonId, cycles) : undefined
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
@@ -2053,7 +2188,15 @@ function PersonalDetail({
       ) : order === 'amount' ? (
         <AmountOrderedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
       ) : cycleTotals ? (
-        <CycleGroupedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} cycles={cycles} showCleared={showCleared} groupByDirection={groupByDirection} />
+        <CycleGroupedList
+          transactions={ledgerTxns}
+          data={data}
+          openingRunningBalance={projection.openingBalance}
+          cycles={cycles}
+          showCleared={showCleared}
+          groupByDirection={groupByDirection}
+          forecastByCycle={forecastByCycle}
+        />
       ) : (
         <DateOrderedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} showCleared={showCleared} groupByDirection={groupByDirection} />
       )}
@@ -2234,6 +2377,7 @@ function JointDetail({
   cycleTotals,
   showCleared,
   groupByDirection,
+  averageSpendForecast,
 }: {
   data: AppDataV2
   horizon: ProjectionHorizon
@@ -2242,6 +2386,7 @@ function JointDetail({
   cycleTotals: boolean
   showCleared: boolean
   groupByDirection?: boolean
+  averageSpendForecast?: boolean
 }) {
   // BUGFIX (Adam-reported, 2026-09 session) — this used to also compute
   // an old flat per-item `summary` list (computeJointSummary) and render
@@ -2254,6 +2399,10 @@ function JointDetail({
   // line or "Real ledger" heading in between).
   const jointProjection = computeJointAccountProjection(data, horizon)
   const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
+  // Cycle boundaries borrow the primary person's own pay cycle — there's
+  // no independent "joint pay cycle" concept in this app, same anchor
+  // computeJointAccountProjection's own cycles use.
+  const forecastByCycle = averageSpendForecast ? buildForecastByCycle(data, { location: 'joint' }, data.primaryPersonId, cycles) : undefined
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
@@ -2279,6 +2428,7 @@ function JointDetail({
               showCleared={showCleared}
               amountSign={jointAccountSignedAmount}
               groupByDirection={groupByDirection}
+              forecastByCycle={forecastByCycle}
             />
           ) : (
             <DateOrderedList
