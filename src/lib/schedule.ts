@@ -461,6 +461,29 @@ export function applyTemplateSingleOccurrenceAmountChange(
 }
 
 /**
+ * Builds the patch for a SINGLE-occurrence date change — mirrors
+ * `applyTemplateSingleOccurrenceAmountChange` exactly, same reasoning:
+ * reuses `occurrenceOverrides`'s existing `date` field (already read
+ * generically by `walkOccurrences`, see its own comment) rather than a
+ * new mechanism. Merges onto any existing override for the same slot
+ * (e.g. one that already has an amount override) instead of clobbering
+ * it. `newDate` is the natural (pre-payday-resolution) date the caller
+ * wants this occurrence to fall on instead — `walkOccurrences` still
+ * runs it through the same payday/cycle-start resolution as every other
+ * date, exactly like the natural, un-overridden date would be.
+ */
+export function applyTemplateSingleOccurrenceDateChange(
+  template: RecurringTemplate,
+  newDate: string,
+  originalDate: string,
+): Pick<RecurringTemplate, 'occurrenceOverrides'> {
+  const existing = template.occurrenceOverrides ?? []
+  const priorEntry = existing.find((o) => o.originalDate === originalDate)
+  const withoutThis = existing.filter((o) => o.originalDate !== originalDate)
+  return { occurrenceOverrides: [...withoutThis, { ...priorEntry, originalDate, date: newDate }] }
+}
+
+/**
  * The most recent past occurrence (if any) and the next 3 upcoming ones,
  * for Bills.tsx's "apply this change from which payment?" picker —
  * always computed from the template's CURRENT schedule shape (frequency/

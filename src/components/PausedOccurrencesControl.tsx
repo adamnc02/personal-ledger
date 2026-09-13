@@ -55,6 +55,7 @@ export function PausedOccurrencesControl({
   onSave,
   itemLabel = 'payments',
   onSaveAmount,
+  onSaveDate,
 }: {
   /**
    * UAT 2026-09-11 (manage-upcoming-payments-override-key-bug) —
@@ -85,13 +86,28 @@ export function PausedOccurrencesControl({
    * entity with no single-occurrence amount write at all.
    */
   onSaveAmount?: (originalDate: string, newAmount: number) => void
+  /**
+   * 2026-09-13 (single-occurrence date editing, Adam-specified: recurring
+   * Transactions and Transfers only — not Bills, Loans, Pension, or
+   * Credit Card, so left as an opt-in prop like `onSaveAmount`). Tapping
+   * the date itself (a second, independent tap target from the amount)
+   * swaps it into a `type="date"` input; Save opens the same confirm-
+   * modal pattern, then calls this with the natural `originalDate` key
+   * and the newly chosen date (also expressed as a natural date — the
+   * caller/`walkOccurrences` still resolves it through payday/cycle-start
+   * logic same as any other date, see `applyTemplateSingleOccurrenceDateChange`'s
+   * own comment in schedule.ts).
+   */
+  onSaveDate?: (originalDate: string, newDate: string) => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const [editingDate, setEditingDate] = useState<string | null>(null)
+  const [editingKind, setEditingKind] = useState<'amount' | 'date' | null>(null)
   const [editValue, setEditValue] = useState('')
   const [confirming, setConfirming] = useState<
     | { kind: 'pause'; originalDate: string; displayDate: string }
     | { kind: 'amount'; originalDate: string; displayDate: string; oldAmount: number; newAmount: number }
+    | { kind: 'date'; originalDate: string; displayDate: string; oldDate: string; newDate: string }
     | null
   >(null)
   // UAT 2026-09-11 — every save on a row (pause on/off, amount edit) now
@@ -108,6 +124,7 @@ export function PausedOccurrencesControl({
       if (prev) {
         // Collapsing — nothing left mid-flight should linger for next time it opens.
         setEditingDate(null)
+        setEditingKind(null)
         setConfirming(null)
       }
       return !prev
@@ -124,14 +141,26 @@ export function PausedOccurrencesControl({
       setConfirming({ kind: 'pause', originalDate, displayDate })
     }
   }
-  function startEditing(originalDate: string) {
-    setEditingDate((prev) => (prev === originalDate ? null : originalDate))
+  function startEditingAmount(originalDate: string) {
+    const isSameEdit = editingDate === originalDate && editingKind === 'amount'
+    setEditingDate(isSameEdit ? null : originalDate)
+    setEditingKind(isSameEdit ? null : 'amount')
     setEditValue(String(amountForDate(originalDate)))
   }
   function requestSaveAmount(originalDate: string, displayDate: string) {
     const newAmount = Number(editValue)
     if (!Number.isFinite(newAmount)) return
     setConfirming({ kind: 'amount', originalDate, displayDate, oldAmount: amountForDate(originalDate), newAmount })
+  }
+  function startEditingDate(originalDate: string, currentDisplayDate: string) {
+    const isSameEdit = editingDate === originalDate && editingKind === 'date'
+    setEditingDate(isSameEdit ? null : originalDate)
+    setEditingKind(isSameEdit ? null : 'date')
+    setEditValue(currentDisplayDate)
+  }
+  function requestSaveDate(originalDate: string, displayDate: string) {
+    if (!editValue) return
+    setConfirming({ kind: 'date', originalDate, displayDate, oldDate: displayDate, newDate: editValue })
   }
 
   const nextPayment = expanded ? nextPaymentPreview([...currentlyPaused]) : null
@@ -153,19 +182,37 @@ export function PausedOccurrencesControl({
           <div className="flex flex-col gap-2 max-h-72 overflow-y-auto mb-2">
             {sortedDates.map(({ originalDate, date }) => {
               const isPaused = currentlyPaused.has(originalDate)
-              const isEditing = editingDate === originalDate
+              const isEditingAmount = editingDate === originalDate && editingKind === 'amount'
+              const isEditingDate = editingDate === originalDate && editingKind === 'date'
               return (
                 <div key={originalDate} className="relative shrink-0 overflow-hidden rounded-xl px-3 py-2" style={{ background: 'var(--color-surface)' }}>
                   <SavedFlashOverlay active={flashActive && flashDate === originalDate} />
                   <div className="flex items-center gap-2">
-                    <div
-                      role={onSaveAmount ? 'button' : undefined}
-                      tabIndex={onSaveAmount ? 0 : undefined}
-                      className={`flex-1 min-w-0 flex items-center justify-between gap-2 text-left ${onSaveAmount ? 'cursor-pointer' : ''}`}
-                      onClick={() => onSaveAmount && startEditing(originalDate)}
-                    >
-                      <span className="text-sm text-[var(--color-ink)]">{date}</span>
-                      {isEditing ? (
+                    <div className="flex-1 min-w-0 flex items-center justify-between gap-2 text-left">
+                      {isEditingDate ? (
+                        <input
+                          type="date"
+                          value={editValue}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          className="bg-transparent border-b text-sm text-[var(--color-ink)] outline-none"
+                          style={{ borderColor: 'var(--color-track)', boxSizing: 'border-box', WebkitAppearance: 'none' }}
+                          autoFocus
+                        />
+                      ) : (
+                        <span
+                          role={onSaveDate ? 'button' : undefined}
+                          tabIndex={onSaveDate ? 0 : undefined}
+                          className={`text-sm text-[var(--color-ink)] ${onSaveDate ? 'cursor-pointer underline decoration-dotted underline-offset-2' : ''}`}
+                          onClick={(e) => {
+                            if (!onSaveDate) return
+                            e.stopPropagation()
+                            startEditingDate(originalDate, date)
+                          }}
+                        >
+                          {date}
+                        </span>
+                      )}
+                      {isEditingAmount ? (
                         <span className="flex items-center gap-1 font-mono text-sm text-[var(--color-ink)]">
                           £
                           <NumberInput
@@ -178,12 +225,31 @@ export function PausedOccurrencesControl({
                           />
                         </span>
                       ) : (
-                        <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(amountForDate(originalDate))}</span>
+                        <span
+                          role={onSaveAmount ? 'button' : undefined}
+                          tabIndex={onSaveAmount ? 0 : undefined}
+                          className={`font-mono text-sm text-[var(--color-ink)] ${onSaveAmount ? 'cursor-pointer' : ''}`}
+                          onClick={(e) => {
+                            if (!onSaveAmount) return
+                            e.stopPropagation()
+                            startEditingAmount(originalDate)
+                          }}
+                        >
+                          £{formatCurrency(amountForDate(originalDate))}
+                        </span>
                       )}
                     </div>
-                    {isEditing ? (
+                    {isEditingAmount ? (
                       <button
                         onClick={() => requestSaveAmount(originalDate, date)}
+                        className="shrink-0 px-3 py-1 rounded-full text-xs font-semibold text-white"
+                        style={{ background: 'var(--color-coral)' }}
+                      >
+                        Save
+                      </button>
+                    ) : isEditingDate ? (
+                      <button
+                        onClick={() => requestSaveDate(originalDate, date)}
                         className="shrink-0 px-3 py-1 rounded-full text-xs font-semibold text-white"
                         style={{ background: 'var(--color-coral)' }}
                       >
@@ -230,6 +296,24 @@ export function PausedOccurrencesControl({
             triggerFlash()
             setConfirming(null)
             setEditingDate(null)
+            setEditingKind(null)
+          }}
+          onCancel={() => setConfirming(null)}
+        />
+      )}
+      {confirming?.kind === 'date' && (
+        <ConfirmModal
+          title="Move this payment?"
+          description={`Moves the payment on ${confirming.oldDate} to ${confirming.newDate}. Every other payment — before and after — is unaffected.`}
+          confirmLabel="Confirm"
+          cancelLabel="Cancel"
+          onConfirm={() => {
+            onSaveDate?.(confirming.originalDate, confirming.newDate)
+            setFlashDate(confirming.originalDate)
+            triggerFlash()
+            setConfirming(null)
+            setEditingDate(null)
+            setEditingKind(null)
           }}
           onCancel={() => setConfirming(null)}
         />

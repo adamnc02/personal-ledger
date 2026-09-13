@@ -17,6 +17,7 @@ import {
   recentAndUpcomingOccurrences,
   applyTemplateAmountChange,
   applyTemplateSingleOccurrenceAmountChange,
+  applyTemplateSingleOccurrenceDateChange,
   resolveOccurrenceAmount,
   templateOccurrencePreviews,
   setPausedTemplateOccurrences,
@@ -2708,6 +2709,7 @@ function TransferRecurringRow({
               }}
               onSave={(pausedDates) => onUpdate(setPausedTemplateOccurrences(template, [...windowOriginalDates], pausedDates))}
               onSaveAmount={(originalDate, newAmount) => onUpdate(applyTemplateSingleOccurrenceAmountChange(template, newAmount, originalDate))}
+              onSaveDate={(originalDate, newDate) => onUpdate(applyTemplateSingleOccurrenceDateChange(template, newDate, originalDate))}
             />
           </div>
         )}
