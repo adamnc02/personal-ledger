@@ -504,7 +504,7 @@ function SavingsPotCycleGroupedList({
   groupByDirection?: boolean
 }) {
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
-  // 2026-09-14 — see CycleGroupedList's identical effect for the full
+  // 2026-09-13 — see CycleGroupedList's identical effect for the full
   // reasoning: every cycle auto-expands while "Group by direction" is
   // on, so its nested Incoming/Outgoing subtotal pills are visible
   // without an extra manual tap per cycle.
@@ -605,7 +605,7 @@ function CardRow({
   value: number
   emphasized?: boolean
   light?: boolean
-  /** 2026-09-14 (Adam-specified) — Joint hero's per-person name rows read slightly smaller than every other CardRow label, now that "Current balance" leads the card as the more prominent figure. */
+  /** 2026-09-13 (Adam-specified) — Joint hero's per-person name rows read slightly smaller than every other CardRow label, now that "Current balance" leads the card as the more prominent figure. */
   small?: boolean
 }) {
   const negative = value < 0
@@ -877,7 +877,7 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
       const bounds = { start: cycles[0].start, end: cycles[cycles.length - 1].end }
       const summary = computeJointSummary(data, bounds.start, bounds.end)
-      // 2026-09-14 (Adam-specified) — a real "Current balance" row now
+      // 2026-09-13 (Adam-specified) — a real "Current balance" row now
       // leads the card, same figure JointDetail/JointBreakdownCard's own
       // clearedBalance already shows (computeJointAccountProjection),
       // rendered here only once the joint account actually exists (mirrors
@@ -1399,7 +1399,7 @@ function TransactionRow({
  * 2026-09-13 (dev.md item 2, Adam-specified) — "Group by direction":
  * splits whatever set of rows it's given into two independently
  * expandable/collapsible pills, Incoming and Outgoing. Both pills
- * default to COLLAPSED (2026-09-14 follow-up, Adam-specified: turning
+ * default to COLLAPSED (2026-09-13 follow-up, Adam-specified: turning
  * the toggle on should surface the incoming/outgoing SUBTOTALS, not
  * dump every individual transaction on screen) — each pill's header
  * always shows its own running total regardless of expand state, so the
@@ -1539,7 +1539,7 @@ function CycleGroupedList({
   // cycle — including for a cycle that first appears mid-session as the
   // horizon rolls forward.
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
-  // 2026-09-14 (follow-up, Adam-specified) — turning "Group by direction"
+  // 2026-09-13 (follow-up, Adam-specified) — turning "Group by direction"
   // on should surface the incoming/outgoing SUBTOTALS straight away,
   // which live inside each cycle's own expanded body — so every cycle
   // auto-expands the moment the toggle switches on (and any per-cycle
@@ -2424,7 +2424,7 @@ function CreditCardCycleGroupedList({
   groupByDirection?: boolean
 }) {
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
-  // 2026-09-14 — see CycleGroupedList's identical effect for the full
+  // 2026-09-13 — see CycleGroupedList's identical effect for the full
   // reasoning: every cycle auto-expands while "Group by direction" is
   // on, so its nested Payments/Spend subtotal pills are visible without
   // an extra manual tap per cycle.

@@ -841,7 +841,7 @@ function EditEntryForm({
         <EditField label="Date" type="date" value={date} onChange={setDate} />
       </div>
       <CategoryPicker categories={visibleCategoriesFor(data, transaction.categoryId)} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
-      {/* 2026-09-14 (Adam-specified follow-up) — editing an existing entry
+      {/* 2026-09-13 (Adam-specified follow-up) — editing an existing entry
           "just loads the form, no flow": Location is a normal inline
           dropdown here, same as every other field on this form, not the
           picker-first LocationStep overlay ExpenseForm's creation wizard
@@ -925,7 +925,7 @@ interface ExpenseFormEntry {
 type ExpenseFormStep = 'direction' | 'amount' | 'location' | 'date' | 'name' | 'category' | 'payment_method' | 'card'
 
 /**
- * 2026-09-14 (Adam-specified follow-up) — rebuilt from one flat card
+ * 2026-09-13 (Adam-specified follow-up) — rebuilt from one flat card
  * (every field visible at once) into the full picker-wizard shape: every
  * editable field is its own step — Direction → Amount → Location
  * (skipped entirely when there's no non-Personal option — see the
@@ -999,7 +999,7 @@ function ExpenseForm({
     })
   }
 
-  // 2026-09-14 (Adam-specified follow-up, "mirror transfers") — Direction
+  // 2026-09-13 (Adam-specified follow-up, "mirror transfers") — Direction
   // and Amount now share ONE first screen, same shape as TransferForm's
   // own first step (mode toggle + amount together, one Continue). Every
   // step after this one is unchanged.
@@ -2933,7 +2933,7 @@ function RecurringFrequencyEditor({
 type RecurringTransactionFormStep = 'direction' | 'amount' | 'location' | 'frequency' | 'date' | 'name' | 'category' | 'payment_method'
 
 /**
- * 2026-09-14 (Adam-specified follow-up, "recurring transactions get the
+ * 2026-09-13 (Adam-specified follow-up, "recurring transactions get the
  * same treatment") — same full picker-wizard shape as ExpenseForm above,
  * every editable field its own step: Direction → Amount → Location
  * (skipped when there's no non-Personal option) → Frequency → Date →
@@ -2997,7 +2997,7 @@ function RecurringTransactionForm({
     })
   }
 
-  // 2026-09-14 (Adam-specified follow-up, "mirror transfers") — Direction
+  // 2026-09-13 (Adam-specified follow-up, "mirror transfers") — Direction
   // and Amount now share ONE first screen, same shape as TransferForm's
   // own first step (mode toggle + amount together, one Continue).
   if (step === 'direction' || step === 'amount') {
