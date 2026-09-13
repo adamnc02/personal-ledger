@@ -6,7 +6,7 @@ import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, type ProjectionHorizon } from '../lib/projection'
 import { averageAdHocExpensePerCycle, forecastSpendForCycle, type SpendScope } from '../lib/averageSpendForecast'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
-import { computeJointSummary } from '../lib/jointLedger'
+import { computeJointSummary, buildJointPersonGroups, type JointPersonGroup } from '../lib/jointLedger'
 import { computeJointAccountProjection, jointAccountSignedAmount } from '../lib/jointAccountLedger'
 import { computeHouseholdProjections, type HouseholdPersonProjection } from '../lib/householdLedger'
 import { nextMinimumChargeAmount, totalPaidForCard, withLiveBalance, creditCardCyclePeriods, buildCreditCardCycleSections, type CreditCardCycleSection } from '../lib/creditCards'
@@ -1348,11 +1348,15 @@ function FiltersSheet({
   onClose: () => void
 }) {
   const showGroupOrder = DECK_CONTROLS_SHOW_GROUP_ORDER(entry)
-  // Household is the only card with a genuine "group by person" —
-  // Personal is already one person, and Joint deliberately shows no
-  // individuals at all (Adam-specified, 2026-09-03).
+  // Household's "group by person" splits each person's own SEPARATE
+  // personal ledger out. Joint's own "group by person" (added 2026-09-13,
+  // Adam-specified — previously deliberately excluded, 2026-09-03) is a
+  // genuinely different thing: ONE shared ledger split into each
+  // person's SHARE of joint bills/loans/transfers, plus an unattributed
+  // "Spend" bucket — see buildJointPersonGroups' own comment. Personal
+  // still has no "group by person" at all — it's already one person.
   const groupingOptions: { value: Grouping; label: string }[] =
-    entry.kind === 'household'
+    entry.kind === 'household' || entry.kind === 'joint'
       ? [
           { value: 'list', label: 'List' },
           { value: 'category', label: 'Category' },
@@ -1383,8 +1387,12 @@ function FiltersSheet({
   // once Cycle-end totals is genuinely ON (not just capable of being
   // on) — the forecast row only ever renders inside CycleGroupedList, so
   // this toggle has nowhere to take effect otherwise (Adam-specified:
-  // "only relevant... when Cycle-end totals is already on").
-  const showAverageSpendForecastToggle = (entry.kind === 'personal' || entry.kind === 'joint') && showCycleTotalsToggle && cycleTotals
+  // "only relevant... when Cycle-end totals is already on"). Also hidden
+  // for grouping === 'person' on Joint (its per-share sections don't
+  // wire up a forecast at all — same "don't show a toggle that quietly
+  // does nothing" instinct `showGroupByDirectionToggle` already follows
+  // for 'category'/'person').
+  const showAverageSpendForecastToggle = (entry.kind === 'personal' || entry.kind === 'joint') && grouping !== 'person' && showCycleTotalsToggle && cycleTotals
   const isNonDefault = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection, averageSpendForecast).length > 0
 
   function resetToDefault() {
@@ -1400,14 +1408,19 @@ function FiltersSheet({
 
   return (
     <>
-      <div role="button" aria-label="Close filters" onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(5,7,13,0.72)', zIndex: 40 }} />
+      {/* 2026-09-13 (Adam-reported) — z-[40]/[41] sat BEHIND BottomNav's
+          own z-[100], so the sheet rendered under the nav bar. Every
+          other modal in the app (ConfirmModal, CategoryIconPickerModal)
+          uses z-[500]/[600] specifically to clear it — matching that
+          convention here instead of inventing a new one. */}
+      <div role="button" aria-label="Close filters" onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(5,7,13,0.72)', zIndex: 500 }} />
       <div
         style={{
           position: 'fixed',
           left: 0,
           right: 0,
           bottom: 0,
-          zIndex: 41,
+          zIndex: 501,
           background: 'var(--color-bg-elevated)',
           borderTop: '1px solid var(--color-track)',
           borderRadius: '24px 24px 0 0',
@@ -2415,7 +2428,16 @@ function JointDetail({
           <p className="text-xs text-[var(--color-ink-faint)] mb-4">
             £{formatCurrency(jointProjection.clearedBalance)} now · £{formatCurrency(jointProjection.projectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
           </p>
-          {grouping === 'category' ? (
+          {grouping === 'person' ? (
+            <JointPersonGroupedList
+              groups={buildJointPersonGroups(data, jointProjection.transactions)}
+              data={data}
+              cycles={cycles}
+              order={order}
+              cycleTotals={cycleTotals}
+              showCleared={showCleared}
+            />
+          ) : grouping === 'category' ? (
             <CategoryGroupedList transactions={jointProjection.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
           ) : order === 'amount' ? (
             <AmountOrderedList transactions={jointProjection.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
@@ -2593,6 +2615,77 @@ function PersonGroupedList({
       {personProjections.length === 0 && (
         <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">Nobody has a pay cycle set up yet.</p>
       )}
+    </div>
+  )
+}
+
+/**
+ * 2026-09-13 (Joint's "Group by Person", Adam-specified) — same
+ * collapsible-section-per-bucket shape as `PersonGroupedList`
+ * (Household's own "group by person"), but structurally different
+ * underneath: Household's sections are genuinely separate personal
+ * ledgers, each with its own real opening balance; Joint's sections
+ * (from `buildJointPersonGroups`) are SHARES/slices of the one real
+ * joint ledger, so each section's own `openingRunningBalance` is
+ * deliberately 0 here — there's no real "this person's own opening
+ * balance" to anchor to, only a notional running total of their
+ * share/spend within the visible window. The section's own "Balance at
+ * [date]" footer (inherited from CycleGroupedList/DateOrderedList,
+ * unchanged) reads as "total this person's share/spend has come to,"
+ * not a real balance — a reasonable reading given the label, but worth
+ * a quick sanity check with Adam once it's visible.
+ */
+function JointPersonGroupedList({
+  groups,
+  data,
+  cycles,
+  order,
+  cycleTotals,
+  showCleared,
+}: {
+  groups: JointPersonGroup[]
+  data: AppDataV2
+  cycles: { start: Date; end: Date }[]
+  order: Order
+  cycleTotals: boolean
+  showCleared: boolean
+}) {
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+  const toggle = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  return (
+    <div className="flex flex-col gap-4">
+      {groups.map((group) => {
+        const isCollapsed = collapsed.has(group.id)
+        const total = round2(group.transactions.reduce((sum, t) => sum + jointAccountSignedAmount(t), 0))
+        return (
+          <div key={group.id}>
+            <button onClick={() => toggle(group.id)} className="w-full flex items-center justify-between gap-2 mb-2 text-left">
+              <span className="flex items-center gap-1.5">
+                {isCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                <span className="text-sm font-semibold text-[var(--color-ink)]">{group.name}</span>
+              </span>
+              <span className="text-xs font-mono font-semibold tabular-nums" style={{ color: 'var(--color-ink-muted)' }}>
+                £{formatCurrency(total)}
+              </span>
+            </button>
+            {!isCollapsed &&
+              (order === 'amount' ? (
+                <AmountOrderedList transactions={group.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
+              ) : cycleTotals ? (
+                <CycleGroupedList transactions={group.transactions} data={data} openingRunningBalance={0} cycles={cycles} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
+              ) : (
+                <DateOrderedList transactions={group.transactions} data={data} openingRunningBalance={0} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
+              ))}
+          </div>
+        )
+      })}
     </div>
   )
 }
