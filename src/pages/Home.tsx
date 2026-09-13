@@ -594,7 +594,20 @@ function SavingsPotCycleGroupedList({
   )
 }
 
-function CardRow({ label, value, emphasized, light }: { label: string; value: number; emphasized?: boolean; light?: boolean }) {
+function CardRow({
+  label,
+  value,
+  emphasized,
+  light,
+  small,
+}: {
+  label: string
+  value: number
+  emphasized?: boolean
+  light?: boolean
+  /** 2026-09-14 (Adam-specified) — Joint hero's per-person name rows read slightly smaller than every other CardRow label, now that "Current balance" leads the card as the more prominent figure. */
+  small?: boolean
+}) {
   const negative = value < 0
   // BUGFIX (Adam-reported, 2026-09 session — "joint account swipe card
   // text is the same colour as the card, can't see it") — CardRow's own
@@ -608,7 +621,7 @@ function CardRow({ label, value, emphasized, light }: { label: string; value: nu
   const valueColor = light ? '#1a1a1a' : '#fff'
   return (
     <div className="flex items-baseline justify-between">
-      <span className="font-body text-[13px] uppercase tracking-wider" style={{ color: labelColor, opacity: emphasized ? 1 : 0.9 }}>
+      <span className={`font-body ${small ? 'text-[11px]' : 'text-[13px]'} uppercase tracking-wider`} style={{ color: labelColor, opacity: emphasized ? 1 : 0.9 }}>
         {label}
       </span>
       <span className={`font-display tabular-nums ${emphasized ? 'text-xl font-bold' : 'text-base font-semibold'}`} style={{ color: valueColor }}>
@@ -864,9 +877,16 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
       const bounds = { start: cycles[0].start, end: cycles[cycles.length - 1].end }
       const summary = computeJointSummary(data, bounds.start, bounds.end)
+      // 2026-09-14 (Adam-specified) — a real "Current balance" row now
+      // leads the card, same figure JointDetail/JointBreakdownCard's own
+      // clearedBalance already shows (computeJointAccountProjection),
+      // rendered here only once the joint account actually exists (mirrors
+      // JointDetail's own "no joint account set up yet" guard).
+      const jointProjection = computeJointAccountProjection(data, horizon)
       return (
         <BankCard variant="light" bankLabel={primaryPerson?.name ?? 'Me'} accountLabel="Joint">
           <div className="mt-6 space-y-1.5">
+            {jointProjection && <CardRow label="Current balance" value={jointProjection.clearedBalance} light />}
             {/* Hero-card consistency sweep (Adam-specified, 2026-09-12):
                 every other hero ends on an emphasized "Projected ·
                 {horizon}" row — Joint's own row used to be first, labelled
@@ -880,7 +900,7 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
                 of a single "Current balance" row, since a joint account
                 has no per-person balance of its own to show instead. */}
             {summary.perPerson.map((p) => (
-              <CardRow key={p.personId} label={p.name} value={p.amount} light />
+              <CardRow key={p.personId} label={p.name} value={p.amount} light small />
             ))}
             <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={summary.totalOutgoings} emphasized light />
           </div>
