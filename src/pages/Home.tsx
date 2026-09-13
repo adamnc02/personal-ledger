@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp } from 'lucide-react'
@@ -1271,7 +1272,7 @@ function DeckControls({
             {isNonDefault && (
               <span
                 className="absolute font-mono font-bold"
-                style={{ top: -8, right: -6, fontSize: 13, lineHeight: 1, color: 'var(--color-coral)' }}
+                style={{ top: -6, right: -6, fontSize: 13, lineHeight: 1, color: 'var(--color-coral)' }}
               >
                 {activeLabels.length}
               </span>
@@ -1416,29 +1417,29 @@ function FiltersSheet({
     setAverageSpendForecast(false)
   }
 
-  return (
-    <>
-      {/* 2026-09-13 (Adam-reported) — z-[40]/[41] sat BEHIND BottomNav's
-          own z-[100], so the sheet rendered under the nav bar. Every
-          other modal in the app (ConfirmModal, CategoryIconPickerModal)
-          uses z-[500]/[600] specifically to clear it — matching that
-          convention here instead of inventing a new one. */}
-      <div role="button" aria-label="Close filters" onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(5,7,13,0.72)', zIndex: 500 }} />
+  // 2026-09-13 (Adam-reported) — raising z-index alone did NOT clear
+  // BottomNav, because this sheet was rendered inline inside #app-shell/
+  // #app-content's own DOM tree, not at the document root. EVERY other
+  // modal in this app (ConfirmModal, CategoryIconPickerModal, etc.) uses
+  // `createPortal(..., document.body)` for exactly this reason — a
+  // portalled node sits outside the app shell's stacking context
+  // entirely, so z-index actually behaves as written. Mirrors
+  // CategoryIconPickerModal's own bottom-sheet shape (single backdrop+
+  // sheet div, `items-end` flex, `paddingBottom` clearing the real nav
+  // bar height) rather than reinventing a two-div fixed-position layout.
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(5,7,13,0.72)' }} onClick={onClose}>
       <div
+        className="w-full max-w-md max-h-[80vh] overflow-y-auto"
         style={{
-          position: 'fixed',
-          left: 0,
-          right: 0,
-          bottom: 0,
-          zIndex: 501,
           background: 'var(--color-bg-elevated)',
           borderTop: '1px solid var(--color-track)',
           borderRadius: '24px 24px 0 0',
-          padding: '20px 20px calc(20px + env(safe-area-inset-bottom, 0px))',
+          padding: '20px',
+          paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)',
           boxShadow: '0 -12px 32px rgba(0,0,0,0.4)',
-          maxHeight: '80vh',
-          overflowY: 'auto',
         }}
+        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex flex-col items-center gap-3.5">
           <div style={{ width: 36, height: 4, borderRadius: 999, background: 'var(--color-track)' }} />
@@ -1536,7 +1537,8 @@ function FiltersSheet({
           </button>
         </div>
       </div>
-    </>
+    </div>,
+    document.body,
   )
 }
 
