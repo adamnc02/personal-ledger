@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
-import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp } from 'lucide-react'
+import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, type ProjectionHorizon } from '../lib/projection'
 import { averageAdHocExpensePerCycle, forecastSpendForCycle, type SpendScope } from '../lib/averageSpendForecast'
@@ -1267,12 +1267,15 @@ function DeckControls({
         <div className="flex items-center gap-3">
           {/* "Reset to default", added 2026-09-13 (Adam-specified) —
               shown next to the Filters button itself (a second copy also
-              lives inside FiltersSheet), gated by the exact same
-              `isNonDefault` check the active dot uses, so it only ever
-              appears when there's actually something to reset. */}
+              lives inside FiltersSheet's header, next to its own close
+              icon), gated by the exact same `isNonDefault` check the
+              active count uses, so it only ever appears when there's
+              actually something to reset. 2026-09-14: swapped from a
+              text label to a RotateCcw icon, matching the Filters
+              button's own icon-only treatment. */}
           {isNonDefault && (
-            <button onClick={resetToDefault} className="text-xs font-medium" style={{ color: 'var(--color-coral)' }}>
-              Reset
+            <button onClick={resetToDefault} aria-label="Reset to default" style={{ color: 'var(--color-coral)' }}>
+              <RotateCcw size={17} />
             </button>
           )}
           <div className="relative">
@@ -1464,9 +1467,19 @@ function FiltersSheet({
           <div style={{ width: 36, height: 4, borderRadius: 999, background: 'var(--color-track)' }} />
           <div className="w-full flex items-center justify-between">
             <span className="font-display text-base font-semibold text-[var(--color-ink)]">Ledger view</span>
-            <button onClick={onClose} className="text-[var(--color-ink-muted)]">
-              <X size={18} />
-            </button>
+            <div className="flex items-center gap-3">
+              {/* 2026-09-14 — relocated here from the bottom of the sheet's
+                  control list, as an icon (RotateCcw) rather than a text
+                  label, sitting immediately left of the close icon. */}
+              {isNonDefault && (
+                <button onClick={resetToDefault} aria-label="Reset to default" style={{ color: 'var(--color-coral)' }}>
+                  <RotateCcw size={18} />
+                </button>
+              )}
+              <button onClick={onClose} className="text-[var(--color-ink-muted)]" aria-label="Close">
+                <X size={18} />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1546,11 +1559,6 @@ function FiltersSheet({
             />
           )}
 
-          {isNonDefault && (
-            <button onClick={resetToDefault} className="text-sm font-medium text-center py-1" style={{ color: 'var(--color-coral)' }}>
-              Reset to default
-            </button>
-          )}
           <button onClick={onClose} className="w-full py-3 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
             Done
           </button>
