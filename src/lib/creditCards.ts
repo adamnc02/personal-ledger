@@ -20,6 +20,8 @@
 import { nanoid } from 'nanoid'
 import { addDays } from 'date-fns'
 import { CREDIT_CARD_CATEGORY_ID, SHARED_CARD_COLORS, type AppDataV2, type CreditCard, type CreditCardLumpPayment, type Transaction } from '../types/ledger'
+import { daysBetweenInclusive, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries, type DailyBalancePoint } from './runningBalance'
+import { resolveCycleBounds } from './pensionLedger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 import { toLocalIsoDate as toIso } from './date'
@@ -911,6 +913,92 @@ export function simulateCardPayoffMonths(card: CreditCard, extraPerMonth = 0, ma
 export function pickNextSharedCardColor(data: Pick<AppDataV2, 'creditCards' | 'pots' | 'savingsPots'>): string {
   const existingCount = data.creditCards.length + data.pots.length + data.savingsPots.length
   return SHARED_CARD_COLORS[existingCount % SHARED_CARD_COLORS.length]
+}
+
+// ── Trends feature (2026-09-15 build) ──────────────────────────────────
+// Deliberately a LOCAL, near-copy of projection.ts's horizonCycles/
+// previousCycles rather than importing them — projection.ts already
+// imports generateMinimumPaymentTransactions FROM this file, so importing
+// projection.ts back here would create a circular module dependency.
+// Both tiny helpers are pure calendar/payday arithmetic via
+// resolveCycleBounds (pensionLedger.ts), same underlying primitive
+// projection.ts's own versions use, so they can't disagree with the real
+// ones — just a separate copy to keep the import graph acyclic.
+const CC_THREE_CYCLES_AHEAD = 3
+
+function creditCardHorizonCycles(data: AppDataV2, personId: string, aheadCount: number, asOfDate: Date): { start: Date; end: Date }[] {
+  const cycles = [resolveCycleBounds(data, personId, asOfDate)]
+  for (let i = 0; i < aheadCount; i++) cycles.push(resolveCycleBounds(data, personId, addDays(cycles[cycles.length - 1].end, 1)))
+  return cycles
+}
+
+function creditCardPreviousCycles(data: AppDataV2, personId: string, n: number, asOfDate: Date): { start: Date; end: Date }[] {
+  const current = resolveCycleBounds(data, personId, asOfDate)
+  const cycles: { start: Date; end: Date }[] = []
+  let cursor = current.start
+  for (let i = 0; i < n; i++) {
+    const prev = resolveCycleBounds(data, personId, addDays(cursor, -1))
+    cycles.push(prev)
+    cursor = prev.start
+  }
+  return cycles
+}
+
+function isCardSpend(cardId: string) {
+  return (t: Transaction) => t.type === 'credit_card_spend' && t.creditCardId === cardId
+}
+
+/**
+ * Builds the Credit Card's Balance/Spend trend series. Balance = the
+ * card's own OUTSTANDING/owed balance over the period (Adam-confirmed
+ * clarification), NOT a cash balance — sampled directly via
+ * cardBalanceAsOf per day rather than folded incrementally the way a cash
+ * ledger's balance is, since cardBalanceAsOf already correctly replays
+ * interest/statement-window mechanics and a naive incremental sum would
+ * have to reimplement all of that separately (and could drift from it).
+ * cardBalanceAsOf doesn't distinguish cleared vs pending by status, only
+ * by date, so there's no genuine "cleared vs projected" split to make the
+ * way a cash ledger has — both DailyBalancePoint fields carry the same
+ * value so the shared chart component doesn't need a credit-card special
+ * case. Spend = credit_card_spend charged to this card in the period.
+ *
+ * JUDGMENT CALL (flagged per the prompt doc's own instruction to decide
+ * and document, not leave ambiguous): the dotted forecast continuation on
+ * this card's Spend view does NOT layer in averageSpendForecast.ts's
+ * dailyAvg rate — that lib's SpendScope is defined for personal/joint ad-
+ * hoc expense only (see its own file header), and extending it to a new
+ * scope wasn't part of what Adam confirmed. The Balance view's dotted
+ * portion still reads correctly as "projected" via generated future
+ * minimum-charge transactions (see above); the Spend view's dotted
+ * portion is a flat continuation from the last actual cumulative spend
+ * figure (no further growth assumed) rather than a fabricated rate.
+ */
+export function buildCreditCardTrendSeries(data: AppDataV2, card: CreditCard, granularity: BalanceSpendGranularity, asOfDate: Date = new Date()): BalanceSpendTrendSeries {
+  const personId = card.ownerId
+  const aheadCount = granularity === 'this_cycle' ? 0 : CC_THREE_CYCLES_AHEAD
+  const cycles = creditCardHorizonCycles(data, personId, aheadCount, asOfDate)
+  const periodStart = cycles[0].start
+  const periodEnd = cycles[cycles.length - 1].end
+  const days = daysBetweenInclusive(periodStart, periodEnd)
+  const todayIso = toIso(asOfDate)
+
+  const generatedMinimums = generateMinimumPaymentTransactions(card, periodStart, periodEnd, data.transactions)
+  const existingMinDates = new Set(data.transactions.filter((t) => t.type === 'credit_card_payment' && t.creditCardId === card.id).map((t) => t.date))
+  const dedupedGenerated = generatedMinimums.filter((t) => !existingMinDates.has(t.date)).map((t, i) => ({ ...t, id: `generated:cc-trend:${i}` }))
+  const activity = [...data.transactions, ...dedupedGenerated]
+
+  const balance: DailyBalancePoint[] = days.map((date) => {
+    const owed = cardBalanceAsOf(card, activity, new Date(date))
+    return { date, clearedBalance: owed, projectedBalance: owed }
+  })
+  const spend = buildDailySpendSeries(activity, days, isCardSpend(card.id))
+
+  const cyclesBack = aheadCount === 0 ? 1 : CC_THREE_CYCLES_AHEAD + 1
+  const prevCyclesAsc = [...creditCardPreviousCycles(data, personId, cyclesBack, asOfDate)].reverse()
+  const prevDays = daysBetweenInclusive(prevCyclesAsc[0].start, prevCyclesAsc[prevCyclesAsc.length - 1].end)
+  const previousPeriodSpend = buildDailySpendSeries(data.transactions, prevDays, isCardSpend(card.id))
+
+  return { granularity, days, todayIso, balance, spend, previousPeriodSpend }
 }
 
 /** Total paid to date against this card — the "paid" half of the card page's pie chart (doc addendum). Sums credit_card_payment transactions for this card from the full transaction list, since payments aren't tracked as a running total on the CreditCard itself. */

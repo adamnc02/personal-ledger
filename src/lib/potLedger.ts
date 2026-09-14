@@ -21,10 +21,11 @@ import { addMonths } from 'date-fns'
 import { toLocalIsoDate as toIso } from './date'
 import { generateTransactionsForTemplate } from './schedule'
 import { generateLoanPaymentTransactions } from './ledgerLoans'
-import { dedupeKey, horizonCycles, type ProjectionHorizon } from './projection'
+import { dedupeKey, horizonCycles, previousCycles, THREE_CYCLES_AHEAD, type ProjectionHorizon } from './projection'
 import { potTransferSignedAmount, transferTouchesPot } from './transferLedger'
 import { nanoid } from 'nanoid'
 import { SAVINGS_CATEGORY_ID } from '../types/ledger'
+import { daysBetweenInclusive, buildDailyBalanceSeries, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries } from './runningBalance'
 import type { AppDataV2, Loan, PayCycleConfig, Pot, RecurringOccurrenceOverride, RecurringTemplate, Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -481,4 +482,36 @@ export function buildPotScheduleRows(data: AppDataV2, pot: Pot, asOfDate: Date =
     ...generatedOutgoing.map((t) => ({ date: t.date, type: t.type as 'bill_payment' | 'loan_payment', amount: t.amount, status: 'pending' as const, note: t.note })),
   ]
   return rows.sort((a, b) => a.date.localeCompare(b.date))
+}
+
+// ── Trends feature (2026-09-15 build) ──────────────────────────────────
+// Pot (bills pot, not Savings Pot) gets the SAME Balance/Spend chart shape
+// as Personal (Adam-confirmed): balance = pot's own end-of-day balance,
+// spend = accumulating drawdown from the pot in the period.
+
+/** "Spend" (drawdown) for a Pot's Balance/Spend chart — every negative-signed activity against the pot (a funded bill/loan payment, or a pot_withdrawal/outgoing-transfer leg) — mirrors buildPersonalTrendSeries' isPersonalSpend, scoped to potSignedAmount instead. */
+function isPotSpend(pot: Pot) {
+  return (t: Transaction) => potSignedAmount(t, pot.id) < 0
+}
+
+export function buildPotTrendSeries(data: AppDataV2, pot: Pot, granularity: BalanceSpendGranularity, asOfDate: Date = new Date()): BalanceSpendTrendSeries {
+  const horizon: ProjectionHorizon = granularity === 'this_cycle' ? 'current_cycle' : 'three_cycles'
+  const cycles = horizonCycles(data, pot.personId, horizon, asOfDate)
+  const periodStart = cycles[0].start
+  const periodEnd = cycles[cycles.length - 1].end
+  const days = daysBetweenInclusive(periodStart, periodEnd)
+  const todayIso = toIso(asOfDate)
+
+  const projection = computePotProjection(data, pot, horizon, asOfDate)
+  const signFn = (t: Transaction) => potSignedAmount(t, pot.id)
+  const balance = buildDailyBalanceSeries(pot.openingBalance, projection.transactions, days, signFn)
+  const spend = buildDailySpendSeries(projection.transactions, days, isPotSpend(pot))
+
+  const cyclesBack = horizon === 'current_cycle' ? 1 : THREE_CYCLES_AHEAD + 1
+  const prevCyclesAsc = [...previousCycles(data, pot.personId, cyclesBack, asOfDate)].reverse()
+  const prevDays = daysBetweenInclusive(prevCyclesAsc[0].start, prevCyclesAsc[prevCyclesAsc.length - 1].end)
+  const prevStored = data.transactions.filter((t) => transactionTouchesPot(t, pot.id))
+  const previousPeriodSpend = buildDailySpendSeries(prevStored, prevDays, isPotSpend(pot))
+
+  return { granularity, days, todayIso, balance, spend, previousPeriodSpend }
 }

@@ -19,9 +19,10 @@
 import { nanoid } from 'nanoid'
 import { generateTransactionsForTemplate } from './schedule'
 import { generateLoanPaymentTransactions } from './ledgerLoans'
-import { dedupeKey, horizonCycles, type ProjectionHorizon } from './projection'
+import { dedupeKey, horizonCycles, previousCycles, THREE_CYCLES_AHEAD, type ProjectionHorizon } from './projection'
 import { jointTransferSignedAmount, transferTouchesJoint } from './transferLedger'
 import { toLocalIsoDate as toIso } from './date'
+import { daysBetweenInclusive, buildDailyBalanceSeries, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries } from './runningBalance'
 import type { AppDataV2, Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -156,4 +157,37 @@ export function computeJointAccountProjection(
     projectedBalance,
     transactions: combined.filter((t) => t.date <= horizonEndIso).sort((a, b) => a.date.localeCompare(b.date)),
   }
+}
+
+// ── Trends feature (2026-09-15 build) ──────────────────────────────────
+
+/** "Spend" for the Joint Balance/Spend chart — every outgoing joint transaction (joint-location bills/loans, joint_withdrawal, a joint-side transfer leg), same "broader than averageSpendForecast's own ad-hoc-only scope" reasoning as buildPersonalTrendSeries' isPersonalSpend. */
+function isJointSpend(t: Transaction): boolean {
+  return jointAccountSignedAmount(t) < 0
+}
+
+/** Joint account equivalent of buildPersonalTrendSeries — see that function's own comment for the shared approach. Returns null (same convention as computeJointAccountProjection) until a joint account exists. */
+export function buildJointTrendSeries(data: AppDataV2, granularity: BalanceSpendGranularity, asOfDate: Date = new Date()): BalanceSpendTrendSeries | null {
+  if (!data.jointAccount) return null
+  const horizon: ProjectionHorizon = granularity === 'this_cycle' ? 'current_cycle' : 'three_cycles'
+  const cycles = horizonCycles(data, data.primaryPersonId, horizon, asOfDate)
+  const periodStart = cycles[0].start
+  const periodEnd = cycles[cycles.length - 1].end
+  const days = daysBetweenInclusive(periodStart, periodEnd)
+  const todayIso = toIso(asOfDate)
+
+  const projection = computeJointAccountProjection(data, horizon, asOfDate)
+  if (!projection) return null
+  const balance = buildDailyBalanceSeries(projection.openingBalance, projection.transactions, days, jointAccountSignedAmount)
+  const spend = buildDailySpendSeries(projection.transactions, days, isJointSpend)
+
+  const cyclesBack = horizon === 'current_cycle' ? 1 : THREE_CYCLES_AHEAD + 1
+  const prevCyclesAsc = [...previousCycles(data, data.primaryPersonId, cyclesBack, asOfDate)].reverse()
+  const prevDays = daysBetweenInclusive(prevCyclesAsc[0].start, prevCyclesAsc[prevCyclesAsc.length - 1].end)
+  const prevStored = data.transactions.filter(
+    (t) => t.location === 'joint' || t.type === 'joint_deposit' || t.type === 'joint_withdrawal' || (t.type === 'transfer' && transferTouchesJoint(t.fromLocation, t.toLocation)),
+  )
+  const previousPeriodSpend = buildDailySpendSeries(prevStored, prevDays, isJointSpend)
+
+  return { granularity, days, todayIso, balance, spend, previousPeriodSpend }
 }

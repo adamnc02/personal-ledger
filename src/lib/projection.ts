@@ -24,7 +24,7 @@ import { generateSavingsContributions } from './savingsLedger'
 import { generateSavingsDepositTransactions, generateSavingsInterestTransactions, generateSavingsWithdrawalTransactions } from './savingsPotLedger'
 import { generatePotDepositTransactions } from './potLedger'
 import { resolveCycleBounds } from './pensionLedger'
-import { isLedgerTransaction, signedAmount } from './runningBalance'
+import { isLedgerTransaction, signedAmount, daysBetweenInclusive, buildDailyBalanceSeries, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries } from './runningBalance'
 import type { AppDataV2, PayCycleConfig, Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -344,4 +344,52 @@ export function transactionsInRange(transactions: Transaction[], start: Date, en
   const s = toIso(start)
   const e = toIso(end)
   return transactions.filter((t) => t.date >= s && t.date <= e)
+}
+
+// ── Trends feature (2026-09-15 build) ──────────────────────────────────
+
+/** "Spend" for the Personal Balance/Spend chart: every outgoing, ledger-eligible transaction (bills, loans, ad-hoc expense, card minimums, etc) — deliberately BROADER than averageSpendForecast's own ad-hoc-only SpendScope, which is reused unchanged only for the dotted line's daily RATE (see the Trends prompt doc's own clarification: reuse the existing forecast lib as-is, don't rebuild it) — not as the definition of the solid actual-spend-so-far line. */
+function isPersonalSpend(t: Transaction): boolean {
+  return isLedgerTransaction(t) && signedAmount(t) < 0
+}
+
+/**
+ * Builds the Personal card's Balance/Spend trend series for the Trends
+ * modal (and its small inline preview) — samples computeProjectionToDate
+ * across every day of the requested granularity's period via
+ * buildDailyBalanceSeries/buildDailySpendSeries, rather than re-deriving
+ * balance/spend maths independently. The previous-period comparison line
+ * reads directly from `data.transactions` (real, already-settled history)
+ * rather than re-running the forward-looking projection engine, since a
+ * fully past period has nothing left to project.
+ */
+export function buildPersonalTrendSeries(
+  data: AppDataV2,
+  personId: string,
+  payCycle: PayCycleConfig,
+  granularity: BalanceSpendGranularity,
+  asOfDate: Date = new Date(),
+): BalanceSpendTrendSeries {
+  const horizon: ProjectionHorizon = granularity === 'this_cycle' ? 'current_cycle' : 'three_cycles'
+  const cycles = horizonCycles(data, personId, horizon, asOfDate)
+  const periodStart = cycles[0].start
+  const periodEnd = cycles[cycles.length - 1].end
+  const days = daysBetweenInclusive(periodStart, periodEnd)
+  const todayIso = toIso(asOfDate)
+
+  const projection = computeProjectionToDate(data, personId, payCycle, periodEnd, asOfDate)
+  const balance = buildDailyBalanceSeries(payCycle.openingBalance, projection.transactions, days, signedAmount, isLedgerTransaction)
+  const spend = buildDailySpendSeries(projection.transactions, days, isPersonalSpend)
+
+  // Previous period: "This Cycle" compares to the single prior cycle;
+  // "Next 3 Cycles" compares offsets 0-3 against -4 to -1 (per the prompt
+  // doc's own table) — i.e. the same number of cycles immediately before.
+  const cyclesBack = horizon === 'current_cycle' ? 1 : THREE_CYCLES_AHEAD + 1
+  const prevCyclesDesc = previousCycles(data, personId, cyclesBack, asOfDate)
+  const prevCyclesAsc = [...prevCyclesDesc].reverse()
+  const prevDays = daysBetweenInclusive(prevCyclesAsc[0].start, prevCyclesAsc[prevCyclesAsc.length - 1].end)
+  const prevStored = data.transactions.filter((t) => t.location === 'personal' && t.ownerId === personId)
+  const previousPeriodSpend = buildDailySpendSeries(prevStored, prevDays, isPersonalSpend)
+
+  return { granularity, days, todayIso, balance, spend, previousPeriodSpend }
 }

@@ -7,14 +7,16 @@
 // either. The date-walking shape for recurring deposits mirrors
 // pensionLedger.ts's walkPensionOccurrences closely on purpose.
 
-import { addDays, addMonths, addYears } from 'date-fns'
+import { addDays, addMonths, addYears, startOfWeek } from 'date-fns'
 import { toLocalIsoDate as toIso } from './date'
 import { periodThresholdsFor, type PayFrequency } from './tax'
 import { aerCreditedInterest, dailyAccrualInterest, walkCreditingDates, walkMonthlyCreditingDates } from './savingsInterest'
 import { generateTransactionsForTemplate } from './schedule'
 import { savingsPotSignedAmount, transferTouchesSavingsPot } from './transferLedger'
+import { resolveCycleBounds } from './pensionLedger'
+import { daysBetweenInclusive } from './runningBalance'
 import { SAVINGS_CATEGORY_ID } from '../types/ledger'
-import type { PayCycleConfig, RecurringOccurrenceOverride, RecurringTemplate, SavingsInterestMethod, SavingsPot, Transaction, TransferLocation } from '../types/ledger'
+import type { AppDataV2, PayCycleConfig, RecurringOccurrenceOverride, RecurringTemplate, SavingsInterestMethod, SavingsPot, Transaction, TransferLocation } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 const MAX_OCCURRENCES = 2000
@@ -536,6 +538,166 @@ export function buildSavingsPotScheduleRows(
     ...generatedInterest.map((t) => ({ date: t.date, type: 'savings_interest' as const, amount: t.amount, status: 'pending' as const, overridable: true })),
   ]
   return rows.sort((a, b) => a.date.localeCompare(b.date))
+}
+
+// ── Trends feature (2026-09-15 build) — the pill/column chart ─────────
+// Savings Pot is the one card type that gets the pill-chart style instead
+// of the Balance/Spend line-area chart (Adam-confirmed). Each column is
+// the pot's own END-OF-PERIOD balance (not a net-change-only bar); the
+// tap-and-hold tooltip's headline metric switches meaning by sign of that
+// period's net movement — "total saved" when positive, "amount withdrawn"
+// when negative (both per the prompt doc's own clarification).
+//
+// `resolveCycleBounds`/local cycle walking is duplicated from
+// projection.ts's horizonCycles/previousCycles here (not imported) for the
+// same reason creditCards.ts duplicates it: projection.ts already imports
+// FROM this file (generateSavingsDepositTransactions et al), so importing
+// projection.ts back here would be circular.
+
+export type SavingsPotPillGranularity = 'this_cycle' | 'last_6_cycles' | 'year'
+
+export interface SavingsPotPillPoint {
+  periodStart: string
+  periodEnd: string
+  endBalance: number
+  netChange: number // positive = net saved this period, negative = net withdrawn
+  axisLabel: string // this point's own natural label — the chart component caps how many are actually SHOWN (max 4), per the prompt doc's table
+  tooltipLabel: string // fuller label for the tooltip (e.g. "w/c 1 Sep · w/e 7 Sep", or "Jul 2026")
+}
+
+export interface SavingsPotTrendSeries {
+  granularity: SavingsPotPillGranularity
+  points: SavingsPotPillPoint[] // ascending by period
+}
+
+function savingsPotCycleBounds(data: AppDataV2, personId: string, asOfDate: Date): { start: Date; end: Date } {
+  return resolveCycleBounds(data, personId, asOfDate)
+}
+
+/** Every real+generated activity row touching this pot across [rangeStart, rangeEnd] — same generate-then-dedupe-against-real shape as buildSavingsPotScheduleRows, just parameterised by an arbitrary range instead of the fixed ramp-up preview window (which only ever looks a couple of months back — too short for "Last 6 Cycles"/"Year"). Deliberately NOT reused wholesale from buildSavingsPotScheduleRows for that reason. */
+function savingsPotActivityForRange(
+  pot: SavingsPot,
+  stored: Transaction[],
+  rangeStart: Date,
+  rangeEnd: Date,
+  transferTemplates: RecurringTemplate[] = [],
+  payCycle?: PayCycleConfig,
+): Transaction[] {
+  const potStored = stored.filter((t) => transactionTouchesSavingsPot(t, pot.id) && t.date >= pot.openingDate)
+  const storedKeys = new Set(potStored.map((t) => `${t.type}:${t.date}`))
+  const generatedDeposits = generateSavingsDepositTransactions(pot, rangeStart, rangeEnd, transferTemplates, payCycle).filter((t) => !storedKeys.has(`${t.type}:${t.date}`))
+  const generatedWithdrawals = generateSavingsWithdrawalTransactions(pot, rangeStart, rangeEnd, transferTemplates, payCycle).filter((t) => !storedKeys.has(`${t.type}:${t.date}`))
+  const generatedInterest = generateSavingsInterestTransactions(
+    pot,
+    [...potStored, ...generatedDeposits.map((t, i) => ({ ...t, id: `generated:trend-dep:${i}` })), ...generatedWithdrawals.map((t, i) => ({ ...t, id: `generated:trend-wd:${i}` }))],
+    rangeStart,
+    rangeEnd,
+  ).filter((t) => !storedKeys.has(`savings_interest:${t.date}`))
+  const generated = [...generatedDeposits, ...generatedWithdrawals, ...generatedInterest].map((t, i) => ({ ...t, id: `generated:trend:${i}` }))
+  return [...potStored, ...generated]
+}
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function shortDateLabel(iso: string): string {
+  const [, m, d] = iso.split('-').map(Number)
+  return `${d} ${MONTH_ABBR[m - 1]}`
+}
+
+/**
+ * Builds the pill-chart series for one of the three Savings Pot
+ * granularities: This Cycle (one column per DAY of the current pay
+ * cycle), Last 6 Cycles (one column per WEEK across the current cycle
+ * plus the 5 before it), or Year (one column per PAY CYCLE across the
+ * current one plus the 11 before it, offset-labelled 0/-1/-2/... —
+ * deliberately ignoring any this-cycle/next-cycle filter elsewhere on the
+ * page, per the prompt doc's own table).
+ */
+export function buildSavingsPotTrendSeries(
+  data: AppDataV2,
+  pot: SavingsPot,
+  granularity: SavingsPotPillGranularity,
+  asOfDate: Date = new Date(),
+): SavingsPotTrendSeries {
+  const personId = pot.personId
+  const payCycle = data.payCycles.find((c) => c.personId === personId)
+  const transferTemplates = data.recurringTemplates
+  const stored = data.transactions
+
+  if (granularity === 'this_cycle') {
+    const { start, end } = savingsPotCycleBounds(data, personId, asOfDate)
+    const rangeStart = new Date(Math.max(start.getTime(), new Date(pot.openingDate).getTime()))
+    const days = daysBetweenInclusive(rangeStart, end)
+    const activity = savingsPotActivityForRange(pot, stored, rangeStart, end, transferTemplates, payCycle)
+    let prevBalance = savingsPotBalanceAsOf(pot, activity, addDays(rangeStart, -1))
+    const points: SavingsPotPillPoint[] = days.map((date) => {
+      const endBalance = savingsPotBalanceAsOf(pot, activity, new Date(date))
+      const netChange = round2(endBalance - prevBalance)
+      prevBalance = endBalance
+      return { periodStart: date, periodEnd: date, endBalance, netChange, axisLabel: shortDateLabel(date), tooltipLabel: shortDateLabel(date) }
+    })
+    return { granularity, points }
+  }
+
+  if (granularity === 'last_6_cycles') {
+    const current = savingsPotCycleBounds(data, personId, asOfDate)
+    let cursor = current.start
+    for (let i = 0; i < 5; i++) cursor = savingsPotCycleBounds(data, personId, addDays(cursor, -1)).start
+    const rangeStart = new Date(Math.max(cursor.getTime(), new Date(pot.openingDate).getTime()))
+    const rangeEnd = current.end
+    const activity = savingsPotActivityForRange(pot, stored, rangeStart, rangeEnd, transferTemplates, payCycle)
+
+    // Weekly buckets, Monday-start ("w/c" = week commencing).
+    const weekStarts: Date[] = []
+    let weekCursor = startOfWeek(rangeStart, { weekStartsOn: 1 })
+    while (weekCursor <= rangeEnd) {
+      weekStarts.push(weekCursor)
+      weekCursor = addDays(weekCursor, 7)
+    }
+    let prevBalance = savingsPotBalanceAsOf(pot, activity, addDays(weekStarts[0] ?? rangeStart, -1))
+    const points: SavingsPotPillPoint[] = weekStarts.map((wStart) => {
+      const wEnd = new Date(Math.min(addDays(wStart, 6).getTime(), rangeEnd.getTime()))
+      const endBalance = savingsPotBalanceAsOf(pot, activity, wEnd)
+      const netChange = round2(endBalance - prevBalance)
+      prevBalance = endBalance
+      const startIso = toIso(wStart)
+      const endIso = toIso(wEnd)
+      return {
+        periodStart: startIso,
+        periodEnd: endIso,
+        endBalance,
+        netChange,
+        axisLabel: `w/c ${shortDateLabel(startIso)}`,
+        tooltipLabel: `w/c ${shortDateLabel(startIso)} · w/e ${shortDateLabel(endIso)}`,
+      }
+    })
+    return { granularity, points }
+  }
+
+  // 'year' — one column per pay cycle, current + 11 before it, offset-labelled.
+  const cyclesDesc: { start: Date; end: Date }[] = [savingsPotCycleBounds(data, personId, asOfDate)]
+  for (let i = 0; i < 11; i++) cyclesDesc.push(savingsPotCycleBounds(data, personId, addDays(cyclesDesc[cyclesDesc.length - 1].start, -1)))
+  const cyclesAsc = [...cyclesDesc].reverse() // oldest..current
+  const rangeStart = new Date(Math.max(cyclesAsc[0].start.getTime(), new Date(pot.openingDate).getTime()))
+  const rangeEnd = cyclesAsc[cyclesAsc.length - 1].end
+  const activity = savingsPotActivityForRange(pot, stored, rangeStart, rangeEnd, transferTemplates, payCycle)
+  let prevBalance = savingsPotBalanceAsOf(pot, activity, addDays(cyclesAsc[0].start, -1))
+  const points: SavingsPotPillPoint[] = cyclesAsc.map((cycle, i) => {
+    const offset = i - (cyclesAsc.length - 1) // 0 for current (last element), negative going back
+    const endBalance = savingsPotBalanceAsOf(pot, activity, cycle.end)
+    const netChange = round2(endBalance - prevBalance)
+    prevBalance = endBalance
+    const startIso = toIso(cycle.start)
+    return {
+      periodStart: startIso,
+      periodEnd: toIso(cycle.end),
+      endBalance,
+      netChange,
+      axisLabel: `${offset}`,
+      tooltipLabel: `${MONTH_ABBR[cycle.start.getMonth()]} ${cycle.start.getFullYear()}`,
+    }
+  })
+  return { granularity, points }
 }
 
 // ── Goal helpers — two independent triggers, per Adam's spec ─────────

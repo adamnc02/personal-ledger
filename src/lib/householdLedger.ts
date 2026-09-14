@@ -16,8 +16,9 @@
 // jointAccountLedger.ts). Nothing here reads AppDataV2.jointAccount.
 
 import { computeProjection, type ProjectionHorizon } from './projection'
-import { horizonCycles } from './projection'
-import { isLedgerTransaction, signedAmount } from './runningBalance'
+import { horizonCycles, previousCycles, THREE_CYCLES_AHEAD } from './projection'
+import { isLedgerTransaction, signedAmount, daysBetweenInclusive, buildDailyBalanceSeries, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries, type DailyBalancePoint, type DailySpendPoint } from './runningBalance'
+import { toLocalIsoDate as toIso } from './date'
 import type { AppDataV2, Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -95,4 +96,62 @@ export function computeHouseholdProjections(data: AppDataV2, horizon: Projection
   return data.people
     .map((p) => computeHouseholdPersonProjection(data, p.id, horizon, asOfDate))
     .filter((r): r is HouseholdPersonProjection => r !== null)
+}
+
+// ── Trends feature (2026-09-15 build) ──────────────────────────────────
+// "Household" Balance/Spend = combined across every member's own personal
+// ledger, summed — not a per-member breakdown (Adam-confirmed). Day range
+// is drawn from the PRIMARY person's own cycle bounds (same established
+// convention Joint/Pot already use for "no independent cycle concept of
+// its own") and every member's own daily series is then sampled against
+// that SAME day list — deliberately not each member's own cycle bounds,
+// which could disagree in length/start — so summing them day-index-by-
+// day-index is always meaningful.
+
+function sumBalancePoints(days: string[], perMember: DailyBalancePoint[][]): DailyBalancePoint[] {
+  return days.map((date, i) => ({
+    date,
+    clearedBalance: round2(perMember.reduce((sum, series) => sum + series[i].clearedBalance, 0)),
+    projectedBalance: round2(perMember.reduce((sum, series) => sum + series[i].projectedBalance, 0)),
+  }))
+}
+
+function sumSpendPoints(days: string[], perMember: DailySpendPoint[][]): DailySpendPoint[] {
+  return days.map((date, i) => ({
+    date,
+    spendToDate: round2(perMember.reduce((sum, series) => sum + series[i].spendToDate, 0)),
+  }))
+}
+
+export function buildHouseholdTrendSeries(data: AppDataV2, granularity: BalanceSpendGranularity, asOfDate: Date = new Date()): BalanceSpendTrendSeries {
+  const horizon: ProjectionHorizon = granularity === 'this_cycle' ? 'current_cycle' : 'three_cycles'
+  const primaryCycles = horizonCycles(data, data.primaryPersonId, horizon, asOfDate)
+  const days = daysBetweenInclusive(primaryCycles[0].start, primaryCycles[primaryCycles.length - 1].end)
+  const todayIso = toIso(asOfDate)
+
+  const memberIds = data.people.map((p) => p.id).filter((id) => data.payCycles.some((pc) => pc.personId === id))
+  const perMemberBalance: DailyBalancePoint[][] = []
+  const perMemberSpend: DailySpendPoint[][] = []
+  for (const personId of memberIds) {
+    const payCycle = data.payCycles.find((pc) => pc.personId === personId)!
+    const projection = computeProjection(data, personId, payCycle, horizon, asOfDate)
+    perMemberBalance.push(buildDailyBalanceSeries(payCycle.openingBalance, projection.transactions, days, signedAmount, isLedgerTransaction))
+    perMemberSpend.push(buildDailySpendSeries(projection.transactions, days, (t) => isLedgerTransaction(t) && signedAmount(t) < 0))
+  }
+  const balance = memberIds.length > 0 ? sumBalancePoints(days, perMemberBalance) : days.map((date) => ({ date, clearedBalance: 0, projectedBalance: 0 }))
+  const spend = memberIds.length > 0 ? sumSpendPoints(days, perMemberSpend) : days.map((date) => ({ date, spendToDate: 0 }))
+
+  const cyclesBack = horizon === 'current_cycle' ? 1 : THREE_CYCLES_AHEAD + 1
+  const prevCyclesAsc = [...previousCycles(data, data.primaryPersonId, cyclesBack, asOfDate)].reverse()
+  const prevDays = daysBetweenInclusive(prevCyclesAsc[0].start, prevCyclesAsc[prevCyclesAsc.length - 1].end)
+  const prevPerMemberSpend: DailySpendPoint[][] = memberIds.map((personId) =>
+    buildDailySpendSeries(
+      data.transactions.filter((t) => t.location === 'personal' && t.ownerId === personId),
+      prevDays,
+      (t) => isLedgerTransaction(t) && signedAmount(t) < 0,
+    ),
+  )
+  const previousPeriodSpend = memberIds.length > 0 ? sumSpendPoints(prevDays, prevPerMemberSpend) : prevDays.map((date) => ({ date, spendToDate: 0 }))
+
+  return { granularity, days, todayIso, balance, spend, previousPeriodSpend }
 }
