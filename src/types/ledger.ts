@@ -1161,6 +1161,18 @@ export interface SavingsPot {
   // from current pace, never overridden by an explicit targetDate.
   targetAmount?: number
   targetDate?: string
+
+  // ── Category icon (2026-09-14, "Group by category" fix) ─────────────
+  // A SavingsPot's own deposit/withdrawal/interest transactions group
+  // under THIS pot's own name in the "Group by category" view (see
+  // Home.tsx's groupingCategoryId/CategoryGroupedList), never folded
+  // into the shared built-in "Savings" category any more. Optional —
+  // unset falls back to one shared generic icon, same "pick one later"
+  // convention as Pot.color's own backfill story. Same {icon, iconColor}
+  // shape as Category's own fields (see CategoryIconPickerModal), chosen
+  // via the exact same picker, opened from this pot's own edit form.
+  categoryIcon?: string
+  categoryIconColor?: string
 }
 
 // ── Pots (App Dev.md "Pots" backlog item, Adam-specified 2026-09-03) ───
@@ -1212,6 +1224,13 @@ export interface Pot {
   recurringDepositDayOfMonth?: number // 1–31, clamped to the shorter month
   recurringDepositStartDate?: string // ISO date of the first occurrence
   recurringDepositOverrides?: RecurringOccurrenceOverride[]
+
+  // ── Category icon (2026-09-14) — same field/reasoning as
+  // SavingsPot.categoryIcon above; a Pot's own deposit/withdrawal
+  // transactions group under this pot's own name, not the shared
+  // "Savings" category.
+  categoryIcon?: string
+  categoryIconColor?: string
 }
 
 // ── Salary Sort (App_Dev.md "Salary Sorter & Transfer Pill", 2026-09

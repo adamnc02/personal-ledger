@@ -9,7 +9,7 @@ import { calculateBonusOnTop } from '../lib/tax'
 import { AttachBonusButton } from '../components/AttachBonusButton'
 import { downloadLedgerBackup, parseLedgerBackupJson } from '../lib/ledgerStorage'
 import { Plus, Trash2, Download, Upload, ChevronDown, ChevronUp, Settings, X, Users, CalendarClock, Info, ArrowUpDown } from 'lucide-react'
-import type { AppDataV2, Loan, PayCycleConfig, Pension, Person, Pot, RecurrenceFrequency, RecurringTemplate, SavingsInterestMethod, SavingsPot, Transaction } from '../types/ledger'
+import type { AppDataV2, Category, Loan, PayCycleConfig, Pension, Person, Pot, RecurrenceFrequency, RecurringTemplate, SavingsInterestMethod, SavingsPot, Transaction } from '../types/ledger'
 import { nanoid } from 'nanoid'
 import { DeductionModal } from '../components/DeductionModal'
 import { SwipeToDelete } from '../components/SwipeToDelete'
@@ -22,6 +22,9 @@ import { SavedFlashOverlay, useSavedFlash } from '../components/SavedFlash'
 import { NumberInput } from '../components/NumberInput'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { EditField } from '../components/EditField'
+import { CategoryIcon } from '../components/CategoryIcon'
+import { CategoryIconPickerModal } from '../components/CategoryIconPickerModal'
+import { DEFAULT_POT_CATEGORY_ICON, DEFAULT_POT_CATEGORY_ICON_COLOR } from '../lib/categories'
 import { hasSalaryConfigured } from '../lib/household'
 import { pensionOccurrencePreviews, applyPensionAmountChange, newPension, scheduledPensionDates, setPausedPensionOccurrences, resolvePensionOccurrenceAmount, applyPensionSingleOccurrenceAmountChange } from '../lib/pensionLedger'
 import { JointAccountSetupModal } from '../components/JointAccountSetupModal'
@@ -1007,6 +1010,7 @@ function RecurringTransferEditor({
 function SavingsPotRow({
   pot,
   people,
+  categories,
   transactions,
   isOpen,
   onToggle,
@@ -1030,6 +1034,7 @@ function SavingsPotRow({
 }: {
   pot: SavingsPot
   people: Person[]
+  categories: Category[]
   transactions: Transaction[]
   isOpen: boolean
   onToggle: () => void
@@ -1064,6 +1069,10 @@ function SavingsPotRow({
   const balance = savingsPotBalanceAsOf(pot, transactions, new Date())
   const nextDeposit = depositOccurrencePreviews(pot, new Date(), 1)[0]
   const [ledgerOpen, setLedgerOpen] = useState(false)
+  // 2026-09-14 (group-by-category fix) — this pot's own "Group by
+  // category" icon, chosen via the exact same CategoryIconPickerModal a
+  // real Category uses. Unset falls back to DEFAULT_POT_CATEGORY_ICON.
+  const [pickingIcon, setPickingIcon] = useState(false)
   // Batch 9 (2026-09-07, Bug 11) — one shared flash for this card's main
   // Save, its "+ Log a deposit or withdrawal", and its "+ Add a recurring
   // transfer" — all three show "Saved".
@@ -1092,10 +1101,25 @@ function SavingsPotRow({
             </div>
             <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
           </button>
+          <button onClick={() => setPickingIcon(true)} className="shrink-0" aria-label={`Choose ${pot.name}'s category icon`}>
+            <CategoryIcon category={{ icon: pot.categoryIcon ?? DEFAULT_POT_CATEGORY_ICON, iconColor: pot.categoryIconColor ?? DEFAULT_POT_CATEGORY_ICON_COLOR }} size={14} />
+          </button>
           <button onClick={() => setLedgerOpen(true)} className="shrink-0 text-[var(--color-ink-faint)]" aria-label={`View ${pot.name}'s ledger`}>
             <Info size={16} />
           </button>
         </div>
+
+        {pickingIcon && (
+          <CategoryIconPickerModal
+            name={pot.name}
+            categories={categories}
+            onCancel={() => setPickingIcon(false)}
+            onConfirm={(icon, iconColor) => {
+              onSave({ categoryIcon: icon, categoryIconColor: iconColor })
+              setPickingIcon(false)
+            }}
+          />
+        )}
 
         {ledgerOpen && <SavingsPotLedgerModal pot={pot} transactions={transactions} onOverrideInterest={onOverrideInterest} onClose={() => setLedgerOpen(false)} />}
 
@@ -1799,6 +1823,7 @@ function PotEditForm({
 function PotRow({
   pot,
   people,
+  categories,
   templates,
   loans,
   transactions,
@@ -1819,6 +1844,7 @@ function PotRow({
 }: {
   pot: Pot
   people: Person[]
+  categories: Category[]
   templates: RecurringTemplate[]
   loans: Loan[]
   transactions: Transaction[]
@@ -1852,6 +1878,10 @@ function PotRow({
   // Save, its "+ Log a deposit or withdrawal", and its "+ Add a recurring
   // transfer" — all three show "Saved".
   const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  // 2026-09-14 (group-by-category fix) — same CategoryIconPickerModal-
+  // backed icon picker as SavingsPotRow's own, see that component's
+  // comment.
+  const [pickingIcon, setPickingIcon] = useState(false)
   useEffect(() => {
     if (shouldFlashOnMount) {
       triggerFlash()
@@ -1863,23 +1893,40 @@ function PotRow({
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
       <div className="relative rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
-        <button onClick={onToggle} className="w-full flex items-center justify-between text-left">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="font-display text-base font-semibold text-[var(--color-ink)] truncate">{pot.name}</span>
-              {people.length > 1 && <span className="text-xs text-[var(--color-ink-muted)] shrink-0">{owner?.name ?? 'Unknown'}</span>}
+        <div className="flex items-center gap-2">
+          <button onClick={onToggle} className="flex-1 min-w-0 flex items-center justify-between text-left">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-display text-base font-semibold text-[var(--color-ink)] truncate">{pot.name}</span>
+                {people.length > 1 && <span className="text-xs text-[var(--color-ink-muted)] shrink-0">{owner?.name ?? 'Unknown'}</span>}
+              </div>
+              <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+                £{formatCurrency(pot.openingBalance)} opening ({formatFullDate(pot.openingDate)})
+                {netActivity !== 0 ? ` · ${netActivity > 0 ? '+' : '-'}£${formatCurrency(Math.abs(netActivity))} since` : ''}
+              </p>
+              <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
+                £{formatCurrency(balance)} now · {payingCount > 0 ? `pays ${payingCount} bill${payingCount === 1 ? '' : 's'}/loan${payingCount === 1 ? '' : 's'}` : 'not paying anything yet'}
+                {nextDeposit ? ` · next deposit ${nextDeposit.date}` : ''}
+              </p>
             </div>
-            <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
-              £{formatCurrency(pot.openingBalance)} opening ({formatFullDate(pot.openingDate)})
-              {netActivity !== 0 ? ` · ${netActivity > 0 ? '+' : '-'}£${formatCurrency(Math.abs(netActivity))} since` : ''}
-            </p>
-            <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
-              £{formatCurrency(balance)} now · {payingCount > 0 ? `pays ${payingCount} bill${payingCount === 1 ? '' : 's'}/loan${payingCount === 1 ? '' : 's'}` : 'not paying anything yet'}
-              {nextDeposit ? ` · next deposit ${nextDeposit.date}` : ''}
-            </p>
-          </div>
-          <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
-        </button>
+            <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
+          </button>
+          <button onClick={() => setPickingIcon(true)} className="shrink-0" aria-label={`Choose ${pot.name}'s category icon`}>
+            <CategoryIcon category={{ icon: pot.categoryIcon ?? DEFAULT_POT_CATEGORY_ICON, iconColor: pot.categoryIconColor ?? DEFAULT_POT_CATEGORY_ICON_COLOR }} size={14} />
+          </button>
+        </div>
+
+        {pickingIcon && (
+          <CategoryIconPickerModal
+            name={pot.name}
+            categories={categories}
+            onCancel={() => setPickingIcon(false)}
+            onConfirm={(icon, iconColor) => {
+              onSave({ categoryIcon: icon, categoryIconColor: iconColor })
+              setPickingIcon(false)
+            }}
+          />
+        )}
 
         {/* UAT 2026-09-08 (6-bug4-pots): these two action buttons now
             render regardless of isOpen, matching Joint Account's own
@@ -2737,6 +2784,7 @@ export function Salary() {
               key={pot.id}
               pot={pot}
               people={data.people}
+              categories={data.categories}
               transactions={data.transactions}
               isOpen={expandedPotId === pot.id}
               onToggle={() => setExpandedPotId(expandedPotId === pot.id ? null : pot.id)}
@@ -2826,6 +2874,7 @@ export function Salary() {
               key={pot.id}
               pot={pot}
               people={data.people}
+              categories={data.categories}
               templates={data.recurringTemplates}
               loans={data.loans}
               transactions={data.transactions}

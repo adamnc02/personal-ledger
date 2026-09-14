@@ -23,7 +23,7 @@ import { BankCard } from '../components/BankCard'
 import { ProgressRing } from '../components/ProgressRing'
 import { CategoryIcon } from '../components/CategoryIcon'
 import { SAVINGS_CATEGORY_ID, CREDIT_CARD_CATEGORY_ID } from '../types/ledger'
-import { seededCategoryIdForIcon } from '../lib/categories'
+import { seededCategoryIdForIcon, DEFAULT_POT_CATEGORY_ICON, DEFAULT_POT_CATEGORY_ICON_COLOR } from '../lib/categories'
 import type { AppDataV2, CreditCard, Loan, Pot, SavingsPot, Transaction } from '../types/ledger'
 
 // ── Deck construction — doc addendum on Summary card visibility ────────
@@ -133,6 +133,14 @@ const JOINT_ACCOUNT_GROUP_CATEGORY_ID = seededCategoryIdForIcon('joint')
  * SAVINGS_CATEGORY_ID directly (no separate real category to preserve),
  * so grouping by `categoryId` already does the right thing for them.
  */
+/** Synthetic, collision-proof group keys for a Pot/SavingsPot's own deposit/withdrawal/interest activity — never a real Category.id, so a pot named the same as a real category can never merge with it. */
+function potGroupCategoryId(potId: string): string {
+  return `pot:${potId}`
+}
+function savingsPotGroupCategoryId(savingsPotId: string): string {
+  return `savingspot:${savingsPotId}`
+}
+
 function groupingCategoryId(t: Transaction): string {
   if (t.type === 'loan_payment') return LOANS_GROUP_CATEGORY_ID
   if (t.type === 'credit_card_payment' || t.type === 'credit_card_spend') return CREDIT_CARD_CATEGORY_ID
@@ -140,6 +148,17 @@ function groupingCategoryId(t: Transaction): string {
   // ad-hoc expense, etc. — folds into the same Credit Card bucket even
   // though it isn't tied to a specific CreditCard entity at all.
   if (t.paymentMethod === 'card') return CREDIT_CARD_CATEGORY_ID
+  // 2026-09-14 — a Pot/SavingsPot's own deposit/withdrawal/interest
+  // transaction groups under THAT pot's own name, never the shared
+  // "Savings" category. Deliberately scoped to just these types — a
+  // pot-FUNDED bill_payment/loan_payment also carries `potId` (see
+  // TransactionType's own comment on pot_withdrawal) but is handled by
+  // the loan_payment check above / falls through to its own real
+  // categoryId below, exactly as before this change.
+  if (t.potId && (t.type === 'pot_deposit' || t.type === 'pot_withdrawal' || t.type === 'transfer')) return potGroupCategoryId(t.potId)
+  if (t.savingsPotId && (t.type === 'savings_deposit' || t.type === 'savings_withdrawal' || t.type === 'savings_interest' || t.type === 'transfer')) {
+    return savingsPotGroupCategoryId(t.savingsPotId)
+  }
   return t.categoryId
 }
 
@@ -2152,20 +2171,32 @@ function CategoryGroupedList({
   return (
     <div className="flex flex-col gap-3">
       {sortedGroups.map(({ groupKey, visibleItems, total }) => {
-        const category = data.categories.find((c) => c.id === groupKey)
+        const potMatch = groupKey.startsWith('pot:') ? data.pots.find((p) => p.id === groupKey.slice(4)) : undefined
+        const savingsPotMatch = groupKey.startsWith('savingspot:') ? data.savingsPots.find((p) => p.id === groupKey.slice(11)) : undefined
+        const potOrSavingsPot = potMatch ?? savingsPotMatch
+        const category = potOrSavingsPot ? undefined : data.categories.find((c) => c.id === groupKey)
         // The Loans/Credit Card buckets fall back to their own name even
         // if the underlying category record has been renamed away from
         // it, or (for the Borrowing bucket, which is an ordinary deletable
         // seeded category rather than a protected built-in) deleted
         // outright — the bucket itself is still meaningful either way.
+        // A Pot/SavingsPot bucket falls back to "Uncategorised" only if
+        // the pot itself has since been deleted (its own transactions
+        // still exist in the window) — same reasoning, a different case.
         const fallbackName = groupKey === LOANS_GROUP_CATEGORY_ID ? 'Loans' : groupKey === CREDIT_CARD_CATEGORY_ID ? 'Credit Card' : groupKey === JOINT_ACCOUNT_GROUP_CATEGORY_ID ? 'Joint Account' : 'Uncategorised'
+        // A Pot/SavingsPot's own chosen icon (CategoryIconPickerModal),
+        // falling back to the shared generic pot icon if none was ever
+        // picked — see potOrSavingsPot's own comment on categoryIcon.
+        const potIconCategory = potOrSavingsPot
+          ? { icon: potOrSavingsPot.categoryIcon ?? DEFAULT_POT_CATEGORY_ICON, iconColor: potOrSavingsPot.categoryIconColor ?? DEFAULT_POT_CATEGORY_ICON_COLOR }
+          : undefined
         const isCollapsed = collapsed.has(groupKey)
         return (
           <div key={groupKey}>
             <button onClick={() => toggleGroup(groupKey)} className="w-full flex items-center gap-2 mb-1 text-left">
-              <CategoryIcon category={category} size={13} />
+              <CategoryIcon category={potIconCategory ?? category} size={13} />
               <span className="text-xs font-semibold text-[var(--color-ink)] flex-1">
-                {category?.name ?? fallbackName}
+                {potOrSavingsPot?.name ?? category?.name ?? fallbackName}
                 {isCollapsed && <span className="font-normal text-[var(--color-ink-faint)]"> · {visibleItems.length}</span>}
               </span>
               <span className="text-xs font-mono" style={{ color: total >= 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
