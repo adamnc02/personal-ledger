@@ -1867,6 +1867,69 @@ function ProjectedSpendRow({ forecastAmount, realSpend }: { forecastAmount: numb
     </div>
   )
 }
+
+/**
+ * 2026-09-14 (Joint's "Group by Person," Adam-specified redesign) —
+ * nested inside CycleGroupedList's own per-cycle body exactly like
+ * DirectionGroupedRows is for "Group by direction" (see that component's
+ * own comment) — this is what actually flips Joint's person split from
+ * person-outer/cycle-inner (the old JointPersonGroupedList, now removed)
+ * to cycle-outer/person-inner, matching the direction view's own shape:
+ * a cycle expands to reveal each person's own pill, and a person's pill
+ * expands to reveal their individual transactions.
+ *
+ * `groups` is scoped to just ONE cycle's already-visible rows (built via
+ * `buildJointPersonGroups(data, section.visibleRows...)` at the call
+ * site) — unlike DirectionGroupedRows' fixed Incoming/Outgoing pair,
+ * the person list varies (2+ people, plus the unattributed "Spend"
+ * bucket) and an empty bucket for THIS cycle specifically is just noise,
+ * so empty groups are dropped entirely rather than shown with a "Nothing
+ * here" placeholder each.
+ */
+function JointPersonPills({ groups, data }: { groups: JointPersonGroup[]; data: AppDataV2 }) {
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+  const toggle = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  const nonEmpty = groups.filter((g) => g.transactions.length > 0)
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {nonEmpty.map((group) => {
+        const expanded = !collapsed.has(group.id)
+        const total = round2(group.transactions.reduce((sum, t) => sum + jointAccountSignedAmount(t), 0))
+        const ordered = group.transactions.slice().sort(compareByDateSalaryFirst)
+        return (
+          <div key={group.id} className="rounded-xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
+            <button onClick={() => toggle(group.id)} className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left">
+              <span className="flex items-center gap-1.5 min-w-0">
+                {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                <span className="text-xs font-semibold text-[var(--color-ink)] truncate">{group.name}</span>
+              </span>
+              <span className="text-xs font-mono font-semibold tabular-nums shrink-0" style={{ color: total >= 0 ? 'var(--color-positive)' : 'var(--color-ink-muted)' }}>
+                {total >= 0 ? '+' : '-'}£{formatCurrency(Math.abs(total))}
+              </span>
+            </button>
+            {expanded && (
+              <div className="px-3 pb-2 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+                {ordered.map((t) => (
+                  <TransactionRow key={t.id} t={t} data={data} amountSign={jointAccountSignedAmount} />
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+      {nonEmpty.length === 0 && <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-2">Nothing in this cycle.</p>}
+    </div>
+  )
+}
+
 function CycleGroupedList({
   transactions,
   data,
@@ -1875,6 +1938,7 @@ function CycleGroupedList({
   showCleared,
   amountSign,
   groupByDirection,
+  groupByPerson,
   forecastByCycle,
 }: {
   transactions: Transaction[]
@@ -1884,6 +1948,8 @@ function CycleGroupedList({
   showCleared: boolean
   amountSign?: (t: Transaction) => number
   groupByDirection?: boolean
+  /** 2026-09-14 (Joint's "Group by Person," cycle-outer/person-inner redesign) — mutually exclusive with groupByDirection at the FiltersSheet level (Joint's own "Group by" pills only ever select one of List/Category/Person, and Direction is its own independent toggle only offered while grouping is List+Date). When on, each expanded cycle's body renders JointPersonPills instead of a flat/direction-split row list — see that component's own comment. Joint-only; every other caller omits this entirely. */
+  groupByPerson?: boolean
   /** 2026-09-13 (average spend forecast) — one entry per FUTURE cycle that needs a synthetic forecast row, keyed by that cycle's own start date (ISO). Personal/Joint only; every other caller omits this entirely. See buildForecastByCycle's own comment. */
   forecastByCycle?: Map<string, { forecastAmount: number; realSpend: number }>
 }) {
@@ -1902,11 +1968,13 @@ function CycleGroupedList({
   // clean, fully-expanded state rather than a confusing mix). The
   // DirectionGroupedRows pills nested inside default back to COLLAPSED
   // themselves (their own header still always shows the subtotal), so
-  // this doesn't dump every individual transaction on screen.
+  // this doesn't dump every individual transaction on screen. 2026-09-14:
+  // same reasoning extended to groupByPerson — the two are mutually
+  // exclusive (see groupByPerson's own comment) but share this effect.
   useEffect(() => {
     setToggled(new Set())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupByDirection])
+  }, [groupByDirection, groupByPerson])
   const toggle = (key: string) =>
     setToggled((prev) => {
       const next = new Set(prev)
@@ -1963,10 +2031,11 @@ function CycleGroupedList({
     <div className="flex flex-col gap-2">
       {sections.map((section) => {
         // Every cycle collapsed by default — except while "Group by
-        // direction" is on, when every cycle auto-expands instead (see
-        // the useEffect above), so its nested Incoming/Outgoing subtotal
-        // pills are visible without an extra manual tap per cycle.
-        const expanded = groupByDirection ? !toggled.has(section.key) : toggled.has(section.key)
+        // direction" (or, 2026-09-14, "Group by person") is on, when
+        // every cycle auto-expands instead (see the useEffect above), so
+        // its nested subtotal pills are visible without an extra manual
+        // tap per cycle.
+        const expanded = groupByDirection || groupByPerson ? !toggled.has(section.key) : toggled.has(section.key)
         return (
           <div key={section.key} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
             <button onClick={() => toggle(section.key)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
@@ -1990,7 +2059,9 @@ function CycleGroupedList({
 
             {expanded && (
               <div className="px-3 pb-1">
-                {groupByDirection ? (
+                {groupByPerson ? (
+                  <JointPersonPills groups={buildJointPersonGroups(data, section.visibleRows.map(({ t }) => t))} data={data} />
+                ) : groupByDirection ? (
                   <DirectionGroupedRows<CycleRowItem>
                     items={[
                       ...section.visibleRows.map((r): CycleRowItem => ({ kind: 'real', t: r.t, running: r.running })),
@@ -2502,13 +2573,20 @@ function JointDetail({
             £{formatCurrency(jointProjection.clearedBalance)} now · £{formatCurrency(jointProjection.projectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
           </p>
           {grouping === 'person' ? (
-            <JointPersonGroupedList
-              groups={buildJointPersonGroups(data, jointProjection.transactions)}
+            // 2026-09-14 (Adam-specified redesign) — cycle-outer,
+            // person-inner, same shape as "Group by direction": always
+            // routes through CycleGroupedList regardless of `order`/
+            // `cycleTotals`, exactly like `grouping === 'category'`
+            // below already ignores those two — Person grouping is now
+            // its own fixed view, not a further order/totals choice.
+            <CycleGroupedList
+              transactions={jointProjection.transactions}
               data={data}
+              openingRunningBalance={jointProjection.openingBalance}
               cycles={cycles}
-              order={order}
-              cycleTotals={cycleTotals}
               showCleared={showCleared}
+              amountSign={jointAccountSignedAmount}
+              groupByPerson
             />
           ) : grouping === 'category' ? (
             <CategoryGroupedList transactions={jointProjection.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
@@ -2688,77 +2766,6 @@ function PersonGroupedList({
       {personProjections.length === 0 && (
         <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">Nobody has a pay cycle set up yet.</p>
       )}
-    </div>
-  )
-}
-
-/**
- * 2026-09-13 (Joint's "Group by Person", Adam-specified) — same
- * collapsible-section-per-bucket shape as `PersonGroupedList`
- * (Household's own "group by person"), but structurally different
- * underneath: Household's sections are genuinely separate personal
- * ledgers, each with its own real opening balance; Joint's sections
- * (from `buildJointPersonGroups`) are SHARES/slices of the one real
- * joint ledger, so each section's own `openingRunningBalance` is
- * deliberately 0 here — there's no real "this person's own opening
- * balance" to anchor to, only a notional running total of their
- * share/spend within the visible window. The section's own "Balance at
- * [date]" footer (inherited from CycleGroupedList/DateOrderedList,
- * unchanged) reads as "total this person's share/spend has come to,"
- * not a real balance — a reasonable reading given the label, but worth
- * a quick sanity check with Adam once it's visible.
- */
-function JointPersonGroupedList({
-  groups,
-  data,
-  cycles,
-  order,
-  cycleTotals,
-  showCleared,
-}: {
-  groups: JointPersonGroup[]
-  data: AppDataV2
-  cycles: { start: Date; end: Date }[]
-  order: Order
-  cycleTotals: boolean
-  showCleared: boolean
-}) {
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
-  const toggle = (id: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-
-  return (
-    <div className="flex flex-col gap-4">
-      {groups.map((group) => {
-        const isCollapsed = collapsed.has(group.id)
-        const total = round2(group.transactions.reduce((sum, t) => sum + jointAccountSignedAmount(t), 0))
-        return (
-          <div key={group.id}>
-            <button onClick={() => toggle(group.id)} className="w-full flex items-center justify-between gap-2 mb-2 text-left">
-              <span className="flex items-center gap-1.5">
-                {isCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-                <span className="text-sm font-semibold text-[var(--color-ink)]">{group.name}</span>
-              </span>
-              <span className="text-xs font-mono font-semibold tabular-nums" style={{ color: 'var(--color-ink-muted)' }}>
-                £{formatCurrency(total)}
-              </span>
-            </button>
-            {!isCollapsed &&
-              (order === 'amount' ? (
-                <AmountOrderedList transactions={group.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
-              ) : cycleTotals ? (
-                <CycleGroupedList transactions={group.transactions} data={data} openingRunningBalance={0} cycles={cycles} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
-              ) : (
-                <DateOrderedList transactions={group.transactions} data={data} openingRunningBalance={0} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
-              ))}
-          </div>
-        )
-      })}
     </div>
   )
 }
