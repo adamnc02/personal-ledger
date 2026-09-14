@@ -313,6 +313,12 @@ export function potSignedAmount(t: Pick<Transaction, 'type' | 'amount' | 'fromLo
   // loan_payment ever reached this fallback, all always 'out', so a bare
   // `-t.amount` was safe). 'income' needs the opposite sign.
   if (t.type === 'income') return t.amount
+  // 2026-09-14 (savings interest destination) — a savings pot's interest
+  // can now be paid into a Pot (SavingsPot.interestDestination), so this
+  // fallback whitelist needs its own case too, same reason 'income' got
+  // one — without it, this always-'out' default would wrongly treat
+  // incoming interest as a withdrawal from the pot.
+  if (t.type === 'savings_interest') return t.amount
   return -t.amount // pot_withdrawal, bill_payment, loan_payment, expense
 }
 

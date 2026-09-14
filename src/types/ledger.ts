@@ -209,6 +209,12 @@ export interface TransferLocation {
   potId?: string // set only when type === 'pot'
 }
 
+// 2026-09-14 — Transaction.location's own type: everywhere BillLocation
+// already reaches ('personal' | 'joint' | 'pot'), plus 'savings', used
+// exclusively by a savings_interest row paid into a Savings Pot. Scoped to
+// Transaction alone — see Transaction.location's own comment.
+export type TransactionLocation = BillLocation | 'savings'
+
 // ── Category ────────────────────────────────────────────────────────────
 // First-class entity (doc Section 3.5 / 4.1). Icon + colour live here now,
 // not on the individual Bill/Loan/Transaction — every item in a category
@@ -282,7 +288,18 @@ export interface Transaction {
   // same split model as Bill/Loan today. Not used for direction: 'in'
   // salary/bonus/income entries tied to a specific person (use personId
   // instead); used for bill/loan payments and ad-hoc expenses.
-  location: BillLocation
+  //
+  // 2026-09-14 — Transaction's OWN location is `TransactionLocation`
+  // (BillLocation + 'savings'), not `BillLocation` directly — deliberately
+  // scoped to just this one field. A Bill/Loan/RecurringTemplate's own
+  // `location: BillLocation` field is completely untouched by this and
+  // still only ever offers personal/joint/pot — this does NOT give bills
+  // the ability to be tagged against a savings pot. 'savings' only ever
+  // appears here on a `type: 'savings_interest'` row whose chosen
+  // interestDestination is a Savings Pot (see SavingsPot.interestDestination),
+  // so it can correctly avoid ALSO counting toward the personal ledger's
+  // cash balance the way a plain `location: 'personal'` row would.
+  location: TransactionLocation
   ownerId: string // whose personal account, when location = 'personal'
   payee?: string
   payeeSharePercent?: number
@@ -1114,6 +1131,22 @@ export interface SavingsPot {
   // just without a date-move option since a crediting date is a
   // structural/calendar concept, not something a bank lets you shift.
   interestOverrides?: { date: string; amount: number }[]
+  // 2026-09-14 (Adam-reported) — where a GENERATED interest payment
+  // actually lands. Undefined means "the same savings pot" (self) — the
+  // sensible default (interest compounding into the account that earned
+  // it), and deliberately NOT stored as an explicit `{type:'savings',
+  // savingsPotId: this pot's own id}` so a brand-new pot (no id assigned
+  // yet at the point this is first chosen, in the picker-first creation
+  // flow) can still mean "self" before it has one. Reuses TransferLocation
+  // rather than inventing a new type — the exact same "personal / joint /
+  // a pot / a savings pot" vocabulary the Transfer pill already offers.
+  // Before this field existed, generated interest was unconditionally
+  // `location: 'personal'` AND carried this pot's own `savingsPotId` at
+  // once — real double-counted money (it inflated BOTH the pot's own
+  // balance and the owner's personal cash balance simultaneously), not
+  // just a duplicated row. See savingsPotLedger.ts's
+  // resolveInterestDestinationFields.
+  interestDestination?: TransferLocation
 
   // ── Recurring deposits (step 4) ──────────────────────────────────────
   // SUPERSEDED (2026-09-04 session, Transfer pill) — a recurring deposit

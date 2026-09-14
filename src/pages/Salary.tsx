@@ -559,6 +559,46 @@ interface SavingsPotFields {
   targetDate?: string
   recurringDepositAmount?: number
   recurringDepositDayOfMonth?: number
+  // 2026-09-14 (Adam-specified) — undefined means "the same savings pot"
+  // (self), same convention as SavingsPot.interestDestination itself; see
+  // that field's own comment.
+  interestDestination?: TransferLocation
+}
+
+/**
+ * Shared by the inline form field (above Save/Cancel) AND the new
+ * picker-first wizard step below — one `<select>` so both stay in sync
+ * by construction rather than risking two independently-maintained
+ * copies drifting apart. "Same savings pot" is a synthetic option
+ * representing `undefined`, not one of `locationOptions` (a NEW pot has
+ * no id yet to reference itself with — see interestDestination's own
+ * comment) — selecting an existing pot's own name from the list below it
+ * produces the exact same resolved destination regardless.
+ */
+function InterestDestinationField({ value, onChange, locationOptions }: { value: TransferLocation | undefined; onChange: (v: TransferLocation | undefined) => void; locationOptions: TransferLocationOption[] }) {
+  return (
+    <select
+      value={value ? transferLocationKey(value) : 'self'}
+      onChange={(e) => {
+        if (e.target.value === 'self') {
+          onChange(undefined)
+          return
+        }
+        const opt = locationOptions.find((o) => o.key === e.target.value)
+        onChange(opt?.location)
+      }}
+      className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+    >
+      <option value="self" style={{ color: '#000' }}>
+        Same savings pot
+      </option>
+      {locationOptions.map((o) => (
+        <option key={o.key} value={o.key} style={{ color: '#000' }}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  )
 }
 
 /**
@@ -578,12 +618,15 @@ export function SavingsPotForm({
   initial,
   onSave,
   onCancel,
+  locationOptions = [],
 }: {
   people: Person[]
   defaultPersonId: string
   initial?: SavingsPotFields
   onSave: (personId: string, fields: SavingsPotFields) => void
   onCancel: () => void
+  /** Optional (defaults to []) so the pre-existing SavingsPotForm.test.tsx call sites (which predate this field and don't pass it) still type-check unchanged — "Same savings pot" alone still works fine with an empty list. */
+  locationOptions?: TransferLocationOption[]
 }) {
   const [personId, setPersonId] = useState(defaultPersonId)
   const [kind, setKind] = useState<'new' | 'existing' | null>(initial ? 'existing' : null)
@@ -599,7 +642,15 @@ export function SavingsPotForm({
   const [targetDate, setTargetDate] = useState(initial?.targetDate ?? '')
   const [recurringDepositAmount, setRecurringDepositAmount] = useState(initial?.recurringDepositAmount ?? 0)
   const [recurringDepositDayOfMonth, setRecurringDepositDayOfMonth] = useState(initial?.recurringDepositDayOfMonth ?? 28)
+  const [interestDestination, setInterestDestination] = useState<TransferLocation | undefined>(initial?.interestDestination)
+  // 2026-09-14 (Adam-specified) — "Looks good, save" on the interest
+  // explanation no longer saves directly; it advances to a final
+  // "where does interest get paid" step instead, whose OWN Save button
+  // actually commits. `confirming` now means "showing the explanation";
+  // `pickingInterestDestination` means "showing the final destination
+  // step" — mutually exclusive, only ever one visible at a time.
   const [confirming, setConfirming] = useState(false)
+  const [pickingInterestDestination, setPickingInterestDestination] = useState(false)
 
   const method = defaultMethodOfType(methodType, aer)
   // UAT follow-up (2026-09-04, Adam-reported): Save used to gate on
@@ -619,6 +670,7 @@ export function SavingsPotForm({
       targetDate: targetDate || undefined,
       recurringDepositAmount: recurringDepositAmount > 0 ? recurringDepositAmount : undefined,
       recurringDepositDayOfMonth: recurringDepositAmount > 0 ? recurringDepositDayOfMonth : undefined,
+      interestDestination,
     }
   }
 
@@ -777,6 +829,17 @@ export function SavingsPotForm({
       <p className="text-[10px] text-[var(--color-ink-faint)] mt-2">
         Target amount shows a progress pie chart on this pot's card. Target date shows how much to save each payday to hit it by then — the two are independent; set either, both, or neither.
       </p>
+      {/* 2026-09-14 (Adam-specified) — editable here, above Save/Cancel,
+          feeding the same `dirty`/draft check every other field on this
+          form already does (buildFields() includes interestDestination
+          above), NOT a separate side-channel save. Also re-offered as its
+          own step in the picker-first flow below, once the interest
+          method itself has been confirmed. */}
+      <div className="mt-3">
+        <Field label="Interest paid into">
+          <InterestDestinationField value={interestDestination} onChange={setInterestDestination} locationOptions={locationOptions} />
+        </Field>
+      </div>
       <div className="flex gap-2 mt-4">
         <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}>
           Cancel
@@ -798,12 +861,78 @@ export function SavingsPotForm({
           method={method}
           onBack={() => setConfirming(false)}
           onConfirm={() => {
-            onSave(personId, buildFields())
+            // 2026-09-14 (Adam-specified) — advances to the final
+            // "where does interest get paid" step instead of saving
+            // directly; that step's own Save button is what actually
+            // commits now.
             setConfirming(false)
+            setPickingInterestDestination(true)
+          }}
+        />
+      )}
+      {pickingInterestDestination && (
+        <InterestDestinationStep
+          value={interestDestination}
+          onChange={setInterestDestination}
+          locationOptions={locationOptions}
+          onBack={() => {
+            setPickingInterestDestination(false)
+            setConfirming(true)
+          }}
+          onSave={() => {
+            onSave(personId, buildFields())
+            setPickingInterestDestination(false)
           }}
         />
       )}
     </div>
+  )
+}
+
+/**
+ * 2026-09-14 (Adam-specified) — the picker-first flow's own final step,
+ * shown after InterestExplanationModal's "Looks good, save": "where does
+ * interest get paid?", defaulting to whatever's already picked on the
+ * form itself (same state, same InterestDestinationField), with a real
+ * Save button that commits. Mirrors InterestExplanationModal's own
+ * fixed-footer-outside-the-scroll-region layout.
+ */
+function InterestDestinationStep({
+  value,
+  onChange,
+  locationOptions,
+  onBack,
+  onSave,
+}: {
+  value: TransferLocation | undefined
+  onChange: (v: TransferLocation | undefined) => void
+  locationOptions: TransferLocationOption[]
+  onBack: () => void
+  onSave: () => void
+}) {
+  return createPortal(
+    <div className="fixed inset-0 z-[600] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onBack}>
+      <div
+        className="w-full max-w-md rounded-t-3xl p-5"
+        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-2">Where does interest get paid?</h3>
+        <p className="text-xs text-[var(--color-ink-muted)] mb-4">Choose where each interest payment lands — your current account, the joint account, a pot, a savings pot, or this same savings pot.</p>
+        <Field label="Interest paid into">
+          <InterestDestinationField value={value} onChange={onChange} locationOptions={locationOptions} />
+        </Field>
+        <div className="flex gap-2 mt-4">
+          <button onClick={onBack} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-bg-elevated)' }}>
+            Back
+          </button>
+          <button onClick={onSave} className="flex-1 py-2 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
+            Save
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -1171,7 +1300,9 @@ function SavingsPotRow({
                 targetDate: pot.targetDate,
                 recurringDepositAmount: pot.recurringDepositAmount,
                 recurringDepositDayOfMonth: pot.recurringDepositDayOfMonth,
+                interestDestination: pot.interestDestination,
               }}
+              locationOptions={locationOptions}
               onCancel={onToggle}
               onSave={(personId, fields) => {
                 // A rate CHANGE goes through applyInterestMethodChange
@@ -1189,6 +1320,7 @@ function SavingsPotRow({
                   recurringDepositAmount: fields.recurringDepositAmount,
                   recurringDepositDayOfMonth: fields.recurringDepositDayOfMonth,
                   recurringDepositStartDate: fields.recurringDepositAmount ? (pot.recurringDepositStartDate ?? todayIso()) : undefined,
+                  interestDestination: fields.interestDestination,
                   ...methodPatch,
                 })
                 onToggle()
@@ -2726,6 +2858,7 @@ export function Salary() {
           <SavingsPotForm
             people={data.people}
             defaultPersonId={addingSavingsFor}
+            locationOptions={transferLocationOptions}
             onCancel={() => {
               setAddingSavingsFor(null)
               if (data.savingsPots.length === 0) setSavingsSectionOpen(false)
@@ -2742,6 +2875,7 @@ export function Salary() {
                   targetAmount: fields.targetAmount,
                   targetDate: fields.targetDate,
                   color: pickNextSharedCardColor(data),
+                  interestDestination: fields.interestDestination,
                 }),
               )
               if (fields.recurringDepositAmount) {

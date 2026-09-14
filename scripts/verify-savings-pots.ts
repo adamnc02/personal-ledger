@@ -62,7 +62,13 @@ check('3 monthly interest credits generated Feb/Mar/Apr for a pot opened 1 Jan',
 check('First credit lands 1 Feb (one month after opening)', interestRows[0].date, '2026-02-01')
 check('Second credit COMPOUNDS on top of the first, not flat repeats', interestRows[1].amount > interestRows[0].amount, true)
 check('Every generated interest row is tagged with the pot', interestRows.every((r) => r.savingsPotId === 'pot-1' && r.type === 'savings_interest'), true)
-check('Interest rows never touch the personal ledger cash side (direction is informational only, location stays personal but ownerId is the pot owner not a cash movement flag)', interestRows.every((r) => r.direction === 'in'), true)
+check('Every generated interest row is direction: in', interestRows.every((r) => r.direction === 'in'), true)
+// 2026-09-14 — basePot has no interestDestination set, which defaults to
+// "the same pot" (self): location is 'savings', NOT 'personal', so this
+// never also counts toward the pot owner's personal cash balance — see
+// scripts/verify-savings-interest-destination.ts for the full behaviour
+// this default (and every other destination choice) is verified against.
+check('Interest rows default to crediting the SAME pot, location: savings (not personal — would double-count)', interestRows.every((r) => r.location === 'savings'), true)
 
 // ---- 4. Manual interest override wins over the generated figure ----
 const overriddenPot: SavingsPot = { ...basePot, interestOverrides: [{ date: '2026-02-01', amount: 12.34 }] }

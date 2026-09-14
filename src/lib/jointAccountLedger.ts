@@ -60,6 +60,12 @@ export function jointAccountSignedAmount(t: Pick<Transaction, 'type' | 'amount' 
   // reaching this branch (bill_payment, loan_payment, expense) is still
   // always 'out'.
   if (t.type === 'income') return t.amount
+  // 2026-09-14 (savings interest destination) — a savings pot's interest
+  // can now be paid into the Joint account (SavingsPot.interestDestination),
+  // same reason 'income' got its own case above — without it, this
+  // always-'out' default would wrongly treat incoming interest as money
+  // leaving the joint account.
+  if (t.type === 'savings_interest') return t.amount
   return -t.amount
 }
 
