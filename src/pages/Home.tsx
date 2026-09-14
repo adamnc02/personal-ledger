@@ -1467,20 +1467,23 @@ function FiltersSheet({
   // 2026-09-13 (average spend forecast) — Personal/Joint only (this part
   // STAYS a hide, not a grey-out — Household/Pot/Credit Card/Savings Pot
   // don't have this feature at all, that's not a "current selection"
-  // problem the way the other two are). Within Personal/Joint, only
-  // once Cycle-end totals is genuinely ON (not just capable of being
-  // on) — the forecast row only ever renders inside CycleGroupedList —
-  // and not while grouping is Person (its per-share sections don't wire
-  // up a forecast at all) does it actually apply; otherwise greyed out.
+  // problem the way the other two are).
   const showAverageSpendForecastRow = entry.kind === 'personal' || entry.kind === 'joint'
-  // 2026-09-14 — greyed out (not just hidden) when there's no ad-hoc
-  // expense history to build a daily rate from at all, Adam-confirmed:
-  // "Only allow the ability to display a forecast if there is at least
-  // one transaction to create a history from." See hasSpendHistory.
+  // 2026-09-14 (Adam-reported) — used to also require Cycle-end totals
+  // genuinely ON, back when the forecast row only ever rendered inside
+  // CycleGroupedList — which meant it was unreachable under the "This
+  // cycle" horizon toggle entirely (canShowCycleTotals requires
+  // 'three_cycles'), even though that's most people's default/typical
+  // view. DateOrderedList now renders the same forecast row as its own
+  // last line whenever Cycle-end totals ISN'T applicable/on, so the
+  // toggle only actually needs 'list' grouping + 'date' order (same
+  // "flat, continuous running balance" requirement as
+  // groupByDirectionApplicable above) — not a specific horizon or
+  // Cycle-end totals state any more.
   const averageSpendForecastScope: SpendScope | undefined =
     entry.kind === 'personal' ? { location: 'personal', ownerId: data.primaryPersonId } : entry.kind === 'joint' ? { location: 'joint' } : undefined
   const hasForecastHistory = averageSpendForecastScope ? hasSpendHistory(data, averageSpendForecastScope, data.primaryPersonId, new Date()) : false
-  const averageSpendForecastApplicable = grouping !== 'person' && cycleTotalsApplicable && cycleTotals && hasForecastHistory
+  const averageSpendForecastApplicable = grouping === 'list' && order === 'date' && hasForecastHistory
   const isNonDefault = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection, averageSpendForecast).length > 0
 
   function resetToDefault() {
@@ -1611,7 +1614,7 @@ function FiltersSheet({
                 averageSpendForecastApplicable
                   ? 'Include a spend estimate at the end of each cycle'
                   : hasForecastHistory
-                    ? 'Requires Cycle-end totals on, List grouping'
+                    ? 'Requires List grouping, Order by date'
                     : 'No spend history yet to estimate from'
               }
               checked={averageSpendForecast}
@@ -1909,7 +1912,7 @@ type CycleRowItem = { kind: 'real'; t: Transaction; running: number } | { kind: 
  * actually did something (`realSpend > 0`) — otherwise it's just noise
  * ("Reduced from £0" says nothing true).
  */
-function ProjectedSpendRow({ forecastAmount, realSpend }: { forecastAmount: number; realSpend: number }) {
+function ProjectedSpendRow({ forecastAmount, realSpend, runningBalance }: { forecastAmount: number; realSpend: number; runningBalance?: number }) {
   const averagePerCycle = round2(forecastAmount + realSpend)
   return (
     <div className="flex items-center gap-3 py-2 px-2 my-1 rounded-xl" style={{ border: '1px dashed var(--color-ink-faint)' }}>
@@ -1926,9 +1929,18 @@ function ProjectedSpendRow({ forecastAmount, realSpend }: { forecastAmount: numb
           </p>
         )}
       </div>
-      <span className="text-sm font-mono font-semibold shrink-0" style={{ color: 'var(--color-ink-muted)' }}>
-        -£{formatCurrency(forecastAmount)}
-      </span>
+      <div className="text-right shrink-0">
+        <span className="text-sm font-mono font-semibold" style={{ color: 'var(--color-ink-muted)' }}>
+          -£{formatCurrency(forecastAmount)}
+        </span>
+        {/* 2026-09-14 (This-cycle horizon fix) — DateOrderedList's flat
+            view has no cycle-section header to surface a closing balance
+            the way CycleGroupedList's does, so this row carries its own,
+            same caption style TransactionRow already gives every real
+            row. Omitted (as before) inside CycleGroupedList, where the
+            section header already shows it. */}
+        {runningBalance !== undefined && <p className="text-[10px] text-[var(--color-ink-faint)] tabular-nums">£{formatCurrency(runningBalance)}</p>}
+      </div>
     </div>
   )
 }
@@ -2192,6 +2204,8 @@ function DateOrderedList({
   showCleared,
   amountSign,
   groupByDirection,
+  forecast,
+  forecastEndIso,
 }: {
   transactions: Transaction[]
   data: AppDataV2
@@ -2199,6 +2213,21 @@ function DateOrderedList({
   showCleared: boolean
   amountSign?: (t: Transaction) => number
   groupByDirection?: boolean
+  /**
+   * 2026-09-14 (Adam-reported, "This cycle" horizon) — the average spend
+   * forecast used to only ever appear inside CycleGroupedList, which
+   * requires Cycle-end totals to be applicable (horizon: 'three_cycles').
+   * Under the "This cycle" toggle there's exactly one cycle and this flat
+   * view renders instead — the forecast previously vanished there
+   * entirely, even though the caption above it (PersonalDetail/
+   * JointDetail's own "£X now · £Y projected") already correctly
+   * subtracted it. Optional so every other DateOrderedList caller
+   * (Household/Pot/Savings Pot/Credit Card, none of which have this
+   * feature) is unaffected.
+   */
+  forecast?: { forecastAmount: number; realSpend: number }
+  /** The forecast's own sort/group key — the current cycle's end date, same "always sorts as the last thing in the period" convention CycleGroupedList's own forecast row uses. Required whenever `forecast` is passed. */
+  forecastEndIso?: string
 }) {
   const sign = amountSign ?? signedAmount
   // Salary first within its own date (see compareByDateSalaryFirst) — the
@@ -2212,16 +2241,21 @@ function DateOrderedList({
     return { t, running }
   })
   const visible = withRunning.filter(({ t }) => showCleared || t.status !== 'cleared')
+  const hasForecast = !!forecast && forecast.forecastAmount > 0
+  const finalRunning = visible.length > 0 ? visible[visible.length - 1].running : openingRunningBalance
 
   if (groupByDirection) {
     return (
-      <DirectionGroupedRows
-        items={visible}
-        isIncoming={({ t }) => sign(t) > 0}
-        amountOf={({ t }) => Math.abs(sign(t))}
-        dateOf={({ t }) => t.date}
-        keyOf={({ t }) => t.id}
-        renderRow={({ t }) => <TransactionRow t={t} data={data} amountSign={amountSign} />}
+      <DirectionGroupedRows<CycleRowItem>
+        items={[
+          ...visible.map((r): CycleRowItem => ({ kind: 'real', t: r.t, running: r.running })),
+          ...(hasForecast ? [{ kind: 'forecast' as const, forecastAmount: forecast.forecastAmount, realSpend: forecast.realSpend, cycleEndIso: forecastEndIso! }] : []),
+        ]}
+        isIncoming={(item) => item.kind === 'real' && sign(item.t) > 0}
+        amountOf={(item) => (item.kind === 'real' ? Math.abs(sign(item.t)) : item.forecastAmount)}
+        dateOf={(item) => (item.kind === 'real' ? item.t.date : item.cycleEndIso)}
+        keyOf={(item) => (item.kind === 'real' ? item.t.id : 'forecast')}
+        renderRow={(item) => (item.kind === 'real' ? <TransactionRow t={item.t} data={data} amountSign={amountSign} /> : <ProjectedSpendRow forecastAmount={item.forecastAmount} realSpend={item.realSpend} />)}
       />
     )
   }
@@ -2231,11 +2265,14 @@ function DateOrderedList({
       {visible.map(({ t, running }) => (
         <TransactionRow key={t.id} t={t} data={data} runningBalance={running} amountSign={amountSign} />
       ))}
-      {visible.length === 0 && (
+      {visible.length === 0 && !hasForecast && (
         <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">
           {showCleared ? 'Nothing in this window.' : 'Nothing pending in this window.'}
         </p>
       )}
+      {/* Always the LAST line, regardless of date — same convention
+          CycleGroupedList's own forecast row uses. */}
+      {hasForecast && <ProjectedSpendRow forecastAmount={forecast.forecastAmount} realSpend={forecast.realSpend} runningBalance={round2(finalRunning - forecast.forecastAmount)} />}
     </div>
   )
 }
@@ -2431,7 +2468,15 @@ function PersonalDetail({
           forecastByCycle={forecastByCycle}
         />
       ) : (
-        <DateOrderedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} showCleared={showCleared} groupByDirection={groupByDirection} />
+        <DateOrderedList
+          transactions={ledgerTxns}
+          data={data}
+          openingRunningBalance={projection.openingBalance}
+          showCleared={showCleared}
+          groupByDirection={groupByDirection}
+          forecast={forecastByCycle?.get(toLocalIsoDate(cycles[0].start))}
+          forecastEndIso={toLocalIsoDate(cycles[0].end)}
+        />
       )}
 
       <LoanProgressRingsSection
@@ -2689,6 +2734,8 @@ function JointDetail({
               showCleared={showCleared}
               amountSign={jointAccountSignedAmount}
               groupByDirection={groupByDirection}
+              forecast={forecastByCycle?.get(toLocalIsoDate(cycles[0].start))}
+              forecastEndIso={toLocalIsoDate(cycles[0].end)}
             />
           )}
 
