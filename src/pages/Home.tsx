@@ -163,6 +163,26 @@ function groupingCategoryId(t: Transaction): string {
 }
 
 /**
+ * The Pot/SavingsPot a single transaction's OWN icon should come from —
+ * same gating `groupingCategoryId` already applies (pot_deposit/
+ * pot_withdrawal/transfer for a Pot; savings_deposit/savings_withdrawal/
+ * savings_interest/transfer for a Savings Pot; a pot-FUNDED bill_payment/
+ * loan_payment falls through to its own real category, not this). 2026-
+ * 09-14 (Adam-reported) — TransactionRow's own icon used to read
+ * `t.categoryId` directly, so every `transfer` (whatever pot it actually
+ * moved money into/out of) rendered the same generic "Savings" category
+ * icon instead of that specific pot's own chosen one; the grouped view
+ * (CategoryGroupedList) already got this right via `groupingCategoryId`,
+ * this reuses that exact same resolution for the single-row case.
+ */
+function iconPotOrSavingsPotFor(t: Transaction, data: AppDataV2): Pot | SavingsPot | undefined {
+  const key = groupingCategoryId(t)
+  if (key.startsWith('pot:')) return data.pots.find((p) => p.id === key.slice(4))
+  if (key.startsWith('savingspot:')) return data.savingsPots.find((p) => p.id === key.slice(11))
+  return undefined
+}
+
+/**
  * NET sum of everything still pending inside the horizon — outgoings as
  * negatives, incoming (salary, bonuses, a transfer from a family member,
  * any ad-hoc income) as positives.
@@ -1714,11 +1734,15 @@ function TransactionRow({
   amountSign?: (t: Transaction) => number
 }) {
   const category = data.categories.find((c) => c.id === t.categoryId)
+  const potOrSavingsPot = iconPotOrSavingsPotFor(t, data)
+  const potIconCategory = potOrSavingsPot
+    ? { icon: potOrSavingsPot.categoryIcon ?? DEFAULT_POT_CATEGORY_ICON, iconColor: potOrSavingsPot.categoryIconColor ?? DEFAULT_POT_CATEGORY_ICON_COLOR }
+    : undefined
   const signed = amountSign ? amountSign(t) : signedAmount(t)
   const isPositive = signed > 0
   return (
     <div className="flex items-center gap-3 py-2">
-      <CategoryIcon category={category} size={14} />
+      <CategoryIcon category={potIconCategory ?? category} size={14} />
       <div className="flex-1 min-w-0">
         <p className="text-sm text-[var(--color-ink)] truncate">{t.note || category?.name || t.type}</p>
         <p className="text-[11px] text-[var(--color-ink-muted)]">
