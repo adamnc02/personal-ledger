@@ -266,9 +266,7 @@ export function computeProjectionToDate(
       // balance. They're still folded into `realActivity` below purely
       // so generateSavingsInterestTransactions sees them and compounds
       // correctly against money that hasn't materialized into a stored
-      // Transaction yet — interest itself doesn't touch personal cash
-      // (see TransactionType's own comment), so THAT part is safe to
-      // push into `generated` unconditionally, same as before.
+      // Transaction yet.
       const legacyDeposits = generateSavingsDepositTransactions(pot, rangeStart, horizonEndDate)
       generated.push(...legacyDeposits)
       const transferDeposits = generateSavingsDepositTransactions(pot, rangeStart, horizonEndDate, data.recurringTemplates, payCycle).filter((t) => t.type === 'transfer')
@@ -279,7 +277,20 @@ export function computeProjectionToDate(
         ...transferDeposits.map((d, i) => ({ ...d, id: `generated:xfer-dep-preview:${i}` })),
         ...transferWithdrawals.map((d, i) => ({ ...d, id: `generated:xfer-wd-preview:${i}` })),
       ]
-      generated.push(...generateSavingsInterestTransactions(pot, realActivity, rangeStart, horizonEndDate))
+      // 2026-09-14 (Adam-reported, savings interest destination) — a
+      // savings pot's own generated interest can now be destined
+      // elsewhere (Joint, a Pot, a different Savings Pot), not always
+      // this person's own personal cash the way it unconditionally was
+      // before that feature existed. Filtered to `location === 'personal'`
+      // here, same as every OTHER generator this function pushes into
+      // `generated` (loans/bills/recurring templates are all pre-filtered
+      // to this person's personal-location activity before reaching this
+      // point) — without this, a not-yet-materialized interest row
+      // destined for the Joint account or a Pot would ALSO show up (and
+      // ALSO count toward the balance) on this person's Personal ledger,
+      // reintroducing the exact "same money counted twice" bug this
+      // feature was built to fix, just via a different code path.
+      generated.push(...generateSavingsInterestTransactions(pot, realActivity, rangeStart, horizonEndDate).filter((t) => t.location === 'personal'))
     }
     // Pots backlog item (2026-09-03) — a pot DEPOSIT is the one pot-
     // related thing that touches personal cash (see potLedger.ts's file

@@ -144,7 +144,21 @@ check('Daily-accrual example ledger includes the illustrative mid-month deposit'
 // ---- 12. REGRESSION (Adam-reported, 2026-09-02): recurring deposits/interest must appear in computeProjection's OWN output — not just in savingsPotLedger.ts's own helpers. This is the actual bug: the Wallet ledger modal and Home's pot cards called the generators directly and worked fine; the Home page's PERSONAL LEDGER list (computeProjection) never called them at all, so only hand-logged deposits/withdrawals (real stored Transactions) ever showed up there. ----
 const projPerson: Person = { id: 'p1', name: 'Pat', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
 const projPayCycle = { ...defaultPayCycleConfig('p1'), openingBalanceDate: '2026-01-01', openingBalance: 1000 }
-const recurringPot: SavingsPot = { ...basePot, id: 'pot-proj', personId: 'p1', recurringDepositAmount: 100, recurringDepositDayOfMonth: 15, recurringDepositStartDate: '2026-01-15' }
+// 2026-09-14 — interestDestination: personal explicitly, so this pot's
+// generated interest is genuinely destined for THIS ledger; a pot with no
+// destination set (self, the default — see the NEXT check below) must
+// NOT show up here, or it would double-count the exact same money this
+// whole feature was built to stop double-counting.
+const recurringPot: SavingsPot = {
+  ...basePot,
+  id: 'pot-proj',
+  personId: 'p1',
+  recurringDepositAmount: 100,
+  recurringDepositDayOfMonth: 15,
+  recurringDepositStartDate: '2026-01-15',
+  interestDestination: { type: 'personal' },
+}
+const selfDestinedPot: SavingsPot = { ...recurringPot, id: 'pot-proj-self', interestDestination: undefined }
 const projData: AppDataV2 = {
   people: [projPerson],
   categories: [],
@@ -152,7 +166,7 @@ const projData: AppDataV2 = {
   loans: [],
   creditCards: [],
   pensions: [],
-  savingsPots: [recurringPot],
+  savingsPots: [recurringPot, selfDestinedPot],
   transactions: [],
   payCycles: [projPayCycle],
   scenarios: [],
@@ -160,7 +174,19 @@ const projData: AppDataV2 = {
 }
 const projection = computeProjection(projData, 'p1', projPayCycle, 'three_cycles', new Date('2026-01-01'))
 check('A recurring monthly deposit shows up in the Home page ledger (computeProjection), not just in savingsPotLedger.ts\'s own helpers', projection.transactions.some((t) => t.type === 'savings_deposit' && t.savingsPotId === 'pot-proj'), true)
-check('Interest generated against that pot also shows up in the same ledger', projection.transactions.some((t) => t.type === 'savings_interest' && t.savingsPotId === 'pot-proj'), true)
+// Attributed via `sourceId` (which pot GENERATED it), not `savingsPotId`
+// (which pot it's destined FOR) — a personal-destined row correctly has
+// no savingsPotId at all (see resolveInterestDestinationFields).
+check(
+  'Interest destined for personal (interestDestination: personal) shows up in the same ledger',
+  projection.transactions.some((t) => t.type === 'savings_interest' && t.sourceId === 'pot-proj' && t.location === 'personal'),
+  true,
+)
+check(
+  "REGRESSION GUARD (2026-09-14, savings interest destination) — interest with NO destination set (self, the default) does NOT show up in the personal ledger — it lands in the pot only, or it's counted twice",
+  projection.transactions.some((t) => t.type === 'savings_interest' && t.sourceId === 'pot-proj-self'),
+  false,
+)
 check('The generated deposit reduces the projected personal balance (direction out), same as any other pending outgoing', projection.projectedBalance < 1000, true)
 
 // ---- 13. REGRESSION (Adam-reported, 2026-09-02): "saving is changing my monthly deposit rate to a number I did not select" — root cause was that autoClearDuePayments never materialized savings-pot deposits into real, permanent transactions, so every already-due deposit kept being recomputed fresh off the pot's CURRENT standing amount on every render/settle pass. Confirms a due £100 deposit gets locked in as a real £100 transaction BEFORE the rate is later changed to £200 — and that the real one stays £100 afterward, not silently repainted. ----
