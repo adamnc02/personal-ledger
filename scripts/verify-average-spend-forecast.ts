@@ -1,12 +1,22 @@
-// Verifies the "average spend forecast" feature (dev.md follow-up — see
-// PROMPT-average-spend-forecast-toggle-2026-09-13.md): the trailing
-// 3-cycle average of ad-hoc `type: 'expense'` transactions, the
-// per-cycle reduction math, and — critically — that the average is NOT
+// Verifies the "average spend forecast" feature — rewritten 2026-09-14
+// (see PROMPT-average-spend-forecast-current-cycle-2026-09-14.md) to a
+// single daily-rate methodology (totalMatchingSpend / window days, window
+// ending TODAY not the latest transaction's own date), scaled by each
+// cycle's own actual length, reaching into the current cycle as well as
+// future ones. Supersedes the 2026-09-13 "trailing 3-cycle mean of
+// non-empty cycles" version — see git history for that script's own
+// tests, several of which (specifically testing the old "only non-empty
+// cycles count" divisor behaviour) no longer apply under this method and
+// have been removed rather than forced to still pass.
+//
+// Still verifies, unchanged from 2026-09-13: the per-cycle reduction math
+// (forecastSpendForCycle), and — critically — that the window is NOT
 // bound by either ledger's own opening-balance date (Adam's own
 // rebalancing scenario).
 
+import { differenceInCalendarDays } from 'date-fns'
 import { previousCycles } from '../src/lib/projection'
-import { averageAdHocExpensePerCycle, forecastSpendForCycle, type SpendScope } from '../src/lib/averageSpendForecast'
+import { averageAdHocSpendForCycle, dailySpendRate, forecastSpendForCycle, hasSpendHistory, type SpendScope } from '../src/lib/averageSpendForecast'
 import { toLocalIsoDate as iso } from '../src/lib/date'
 import type { AppDataV2, PayCycleConfig, Transaction } from '../src/types/ledger'
 
@@ -24,12 +34,15 @@ function check(label: string, actual: unknown, expected: unknown) {
 function assert(label: string, condition: boolean) {
   check(label, condition, true)
 }
+function round2(n: number) {
+  return Math.round(n * 100) / 100
+}
 
 const payCycle: PayCycleConfig = {
   personId: 'p1',
   openingBalance: 1000,
   // 2026-09 — deliberately set well AFTER some of the fixture's ad-hoc
-  // expenses below, to prove the average genuinely ignores this bound
+  // expenses below, to prove the window genuinely ignores this bound
   // (Adam's own rebalancing scenario).
   openingBalanceDate: '2026-09-01',
   paydayDayOfMonth: 25,
@@ -69,12 +82,18 @@ function dataWith(transactions: Transaction[]): AppDataV2 {
 }
 
 const asOf = new Date(2026, 9, 10) // 10 Oct 2026 — mid-cycle, well after openingBalanceDate
+const personalScope: SpendScope = { location: 'personal', ownerId: 'p1' }
+
+// The window this whole file's asOf/payCycle combination resolves to —
+// derived from previousCycles itself (not hand-computed calendar
+// arithmetic), same boundary dailySpendRate's own implementation uses.
+const windowStart = previousCycles(dataWith([]), 'p1', 3, asOf)[2].start
+const windowDays = differenceInCalendarDays(asOf, windowStart) + 1
 
 // ── 1. previousCycles: 3 cycles immediately before "now"'s, tiling with no gaps ──
 {
   const cycles = previousCycles(dataWith([]), 'p1', 3, asOf)
   assert('previousCycles returns exactly 3 cycles', cycles.length === 3)
-  // Each should end the day before the next (later) one starts — cycles[0] is the most recent past cycle.
   for (let i = 0; i < cycles.length - 1; i++) {
     const laterEnd = iso(cycles[i].start)
     const earlierEnd = iso(cycles[i + 1].end)
@@ -83,55 +102,57 @@ const asOf = new Date(2026, 9, 10) // 10 Oct 2026 — mid-cycle, well after open
   assert('the most recent previousCycle ends before "now"\'s own cycle starts', cycles[0].end < asOf)
 }
 
-// Cycle boundaries for reference (paydayDayOfMonth 25, no weekend adjustment):
-// cycle containing 2026-10-10 runs 2026-09-25..2026-10-24 (call it "current").
-// previousCycles(asOf, 3) => [2026-08-25..2026-09-24, 2026-07-25..2026-08-24, 2026-06-25..2026-07-24]
-
-// ── 2. Basic average across 3 cycles, all non-empty ──
+// ── 2. dailySpendRate: total matching spend / inclusive window days (window start..today) ──
 {
-  const scope: SpendScope = { location: 'personal', ownerId: 'p1' }
   const data = dataWith([
-    expense('e1', '2026-09-10', 300, 'personal'), // cycle -1 (Aug25-Sep24)
-    expense('e2', '2026-08-10', 200, 'personal'), // cycle -2 (Jul25-Aug24)
-    expense('e3', '2026-07-10', 400, 'personal'), // cycle -3 (Jun25-Jul24)
+    expense('e1', iso(windowStart), 500, 'personal'), // right at the window's own start
+    expense('e2', '2026-08-10', 300, 'personal'),
   ])
-  const avg = averageAdHocExpensePerCycle(data, scope, 'p1', asOf)
-  check('average across 3 non-empty cycles = (300+200+400)/3', avg, 300)
+  const rate = dailySpendRate(data, personalScope, 'p1', asOf)
+  check('dailySpendRate = totalMatchingSpend / window days (window start..today, inclusive)', round2(rate * windowDays), 800)
 }
 
-// ── 3. Partial-history divisor: only cycles with matching transactions count ──
+// ── 3. dailySpendRate is 0 with zero matching history in the window ──
 {
-  const scope: SpendScope = { location: 'personal', ownerId: 'p1' }
+  check('dailySpendRate with no matching history is 0', dailySpendRate(dataWith([]), personalScope, 'p1', asOf), 0)
+}
+
+// ── 4. Adam's own correction: the window ends at TODAY, not the latest matching transaction's own date ──
+{
+  // A single transaction dated right at the window's start, nothing since
+  // — under the OLD "cycle start -> max transaction date" wording this
+  // would give days=1 and rate=100; the agreed correction is that every
+  // no-spend day between then and today still counts, pulling the rate
+  // DOWN towards (but never all the way to) 0.
+  const data = dataWith([expense('e1', iso(windowStart), 100, 'personal')])
+  const rate = dailySpendRate(data, personalScope, 'p1', asOf)
+  check("no-spend days since the last transaction pull the rate down — window end is TODAY, not the transaction's own date", round2(rate * windowDays), 100)
+  assert('REGRESSION GUARD — rate is nowhere near 100/day (would be, under the superseded "max transaction date" wording)', rate < 100 / windowDays + 0.01 && rate > 0)
+}
+
+// ── 5. hasSpendHistory: gates on ANY matching transaction in the window, regardless of amount ──
+{
+  assert('hasSpendHistory is false with zero matching transactions anywhere in the window', !hasSpendHistory(dataWith([]), personalScope, 'p1', asOf))
+  const data = dataWith([expense('e1', iso(windowStart), 50, 'personal')])
+  assert('hasSpendHistory is true once at least one matching transaction exists in the window', hasSpendHistory(data, personalScope, 'p1', asOf))
+}
+
+// ── 6. Rebalancing: ad-hoc expenses dated BEFORE payCycle.openingBalanceDate still count ──
+{
+  // Both predate payCycle.openingBalanceDate ('2026-09-01') —
+  // computeProjection would exclude both from a real balance calculation,
+  // but this window must NOT.
   const data = dataWith([
-    expense('e1', '2026-09-10', 300, 'personal'), // cycle -1 only — the other two cycles have nothing
+    expense('e1', '2026-08-10', 100, 'personal'), // before openingBalanceDate
+    expense('e2', '2026-07-10', 100, 'personal'), // before openingBalanceDate
   ])
-  const avg = averageAdHocExpensePerCycle(data, scope, 'p1', asOf)
-  check('average with only 1 of 3 cycles populated divides by 1, not 3', avg, 300)
-}
-{
-  const scope: SpendScope = { location: 'personal', ownerId: 'p1' }
-  const avg = averageAdHocExpensePerCycle(dataWith([]), scope, 'p1', asOf)
-  check('average with ZERO matching history anywhere is 0 (nothing to forecast)', avg, 0)
+  const rate = dailySpendRate(data, personalScope, 'p1', asOf)
+  assert('REGRESSION GUARD — ad-hoc expenses dated before payCycle.openingBalanceDate still feed the rate (not silently excluded)', rate > 0)
+  check('rate correctly built from pre-rebalance history alone', round2(rate * windowDays), 200)
 }
 
-// ── 4. Rebalancing: ad-hoc expenses dated BEFORE payCycle.openingBalanceDate still count ──
+// ── 7. What counts as "spend": only ad-hoc type:'expense', location:'personal', ownerId matches ──
 {
-  const scope: SpendScope = { location: 'personal', ownerId: 'p1' }
-  // All 3 of these predate payCycle.openingBalanceDate ('2026-09-01') —
-  // computeProjection would exclude every one of them from a real
-  // balance calculation, but this average must NOT.
-  const data = dataWith([
-    expense('e1', '2026-08-10', 100, 'personal'), // cycle -2, before openingBalanceDate
-    expense('e2', '2026-07-10', 100, 'personal'), // cycle -3, before openingBalanceDate
-  ])
-  const avg = averageAdHocExpensePerCycle(data, scope, 'p1', asOf)
-  assert('REGRESSION GUARD — ad-hoc expenses dated before payCycle.openingBalanceDate still feed the average (not silently excluded)', avg > 0)
-  check('average correctly built from pre-rebalance history alone', avg, 100)
-}
-
-// ── 5. What counts as "spend": only ad-hoc type:'expense', location:'personal', ownerId matches ──
-{
-  const scope: SpendScope = { location: 'personal', ownerId: 'p1' }
   const otherOwner: Transaction = expense('e-other', '2026-09-10', 999, 'personal', 'p2')
   const income: Transaction = { ...expense('e-income', '2026-09-10', 999, 'personal'), type: 'income', direction: 'in' }
   const billPayment: Transaction = { ...expense('e-bill', '2026-09-10', 999, 'personal'), type: 'bill_payment' }
@@ -139,54 +160,74 @@ const asOf = new Date(2026, 9, 10) // 10 Oct 2026 — mid-cycle, well after open
   const jointExpense: Transaction = expense('e-joint', '2026-09-10', 999, 'joint')
   const realOne = expense('e-real', '2026-09-10', 50, 'personal')
   const data = dataWith([otherOwner, income, billPayment, cardSpend, jointExpense, realOne])
-  const avg = averageAdHocExpensePerCycle(data, scope, 'p1', asOf)
-  check('only the genuine ad-hoc personal expense counts — other owner/income/bill/card-spend/joint all excluded', avg, 50)
+  const rate = dailySpendRate(data, personalScope, 'p1', asOf)
+  check('only the genuine ad-hoc personal expense counts — other owner/income/bill/card-spend/joint all excluded', round2(rate * windowDays), 50)
 }
 
-// ── 6. Cross-contamination guard: joint expense never feeds Personal average, and vice versa ──
+// ── 8. Cross-contamination guard: joint expense never feeds Personal rate, and vice versa ──
 {
-  const personalScope: SpendScope = { location: 'personal', ownerId: 'p1' }
   const jointScope: SpendScope = { location: 'joint' }
   const data = dataWith([expense('e1', '2026-09-10', 500, 'joint'), expense('e2', '2026-09-10', 300, 'personal')])
-  check('CROSS-CONTAMINATION GUARD — a location:joint expense never feeds the Personal average', averageAdHocExpensePerCycle(data, personalScope, 'p1', asOf), 300)
-  check('CROSS-CONTAMINATION GUARD — a location:personal expense never feeds the Joint average', averageAdHocExpensePerCycle(data, jointScope, 'p1', asOf), 500)
+  check('CROSS-CONTAMINATION GUARD — a location:joint expense never feeds the Personal rate', round2(dailySpendRate(data, personalScope, 'p1', asOf) * windowDays), 300)
+  check('CROSS-CONTAMINATION GUARD — a location:personal expense never feeds the Joint rate', round2(dailySpendRate(data, jointScope, 'p1', asOf) * windowDays), 500)
 }
 
-// ── 7. Joint scope has no ownerId filter — either person's logged joint expense counts ──
+// ── 9. Joint scope has no ownerId filter — either person's logged joint expense counts ──
 {
   const jointScope: SpendScope = { location: 'joint' }
   const data = dataWith([expense('e1', '2026-09-10', 100, 'joint', 'p1'), expense('e2', '2026-08-10', 200, 'joint', 'p2')])
-  const avg = averageAdHocExpensePerCycle(data, jointScope, 'p1', asOf)
-  check('Joint average includes ad-hoc expenses logged by EITHER owner (no ownerId filter)', avg, 150)
+  const rate = dailySpendRate(data, jointScope, 'p1', asOf)
+  check('Joint rate includes ad-hoc expenses logged by EITHER owner (no ownerId filter)', round2(rate * windowDays), 300)
 }
 
-// ── 8. Adam's own worked example: £800 average, £250 already scheduled -> £550 forecast ──
+// ── 10. averageAdHocSpendForCycle: the daily rate scaled by EACH cycle's own actual length ──
 {
-  const scope: SpendScope = { location: 'personal', ownerId: 'p1' }
+  const data = dataWith([expense('e1', iso(windowStart), windowDays, 'personal')]) // rate = 1/day exactly
+  const shortCycle = { start: new Date(2026, 10, 1), end: new Date(2026, 10, 30) } // 30 days
+  const longCycle = { start: new Date(2026, 10, 1), end: new Date(2026, 11, 1) } // 31 days
+  check('averageAdHocSpendForCycle scales a 30-day cycle by 30', averageAdHocSpendForCycle(data, personalScope, 'p1', shortCycle, asOf), 30)
+  check("averageAdHocSpendForCycle scales a 31-day cycle by ITS OWN length (31), not a fixed constant", averageAdHocSpendForCycle(data, personalScope, 'p1', longCycle, asOf), 31)
+}
+
+// ── 11. averageAdHocSpendForCycle is 0 when there's no history to build a rate from ──
+{
+  const cycle = { start: new Date(2026, 10, 1), end: new Date(2026, 10, 30) }
+  check('averageAdHocSpendForCycle with no matching history anywhere is 0', averageAdHocSpendForCycle(dataWith([]), personalScope, 'p1', cycle, asOf), 0)
+}
+
+// ── 12. Adam's own worked example: £800 average, £250 already scheduled -> £550 forecast ──
+{
   const cycle = { start: new Date(2026, 9, 25), end: new Date(2026, 10, 24) } // a future cycle
   const data = dataWith([expense('e1', '2026-11-05', 150, 'personal'), expense('e2', '2026-11-10', 100, 'personal')]) // £250 already logged this future cycle
-  const { forecastAmount, realSpend } = forecastSpendForCycle(data, scope, 800, cycle)
+  const { forecastAmount, realSpend } = forecastSpendForCycle(data, personalScope, 800, cycle)
   check("Adam's worked example — realSpend correctly totals the £250 already scheduled", realSpend, 250)
   check("Adam's worked example — forecast reduces from £800 to £550", forecastAmount, 550)
 }
 
-// ── 9. Forecast clamps to 0 when real spend meets or exceeds the average (never negative) ──
+// ── 13. Forecast clamps to 0 when real spend meets or exceeds the average (never negative) ──
 {
-  const scope: SpendScope = { location: 'personal', ownerId: 'p1' }
   const cycle = { start: new Date(2026, 9, 25), end: new Date(2026, 10, 24) }
   const data = dataWith([expense('e1', '2026-11-05', 900, 'personal')])
-  const { forecastAmount, realSpend } = forecastSpendForCycle(data, scope, 800, cycle)
+  const { forecastAmount, realSpend } = forecastSpendForCycle(data, personalScope, 800, cycle)
   check('real spend already exceeding the average clamps the forecast to 0, not negative', forecastAmount, 0)
   check('realSpend is still reported accurately even when it exceeds the average', realSpend, 900)
 }
 
-// ── 10. Forecast with zero real spend this cycle equals the average outright ──
+// ── 14. Forecast with zero real spend this cycle equals the average outright ──
 {
-  const scope: SpendScope = { location: 'personal', ownerId: 'p1' }
   const cycle = { start: new Date(2026, 9, 25), end: new Date(2026, 10, 24) }
-  const { forecastAmount, realSpend } = forecastSpendForCycle(dataWith([]), scope, 800, cycle)
+  const { forecastAmount, realSpend } = forecastSpendForCycle(dataWith([]), personalScope, 800, cycle)
   check('no real spend this cycle -> forecast equals the average unreduced', forecastAmount, 800)
   check('realSpend is 0', realSpend, 0)
+}
+
+// ── 15. Forecast now reaches the CURRENT cycle too — same reduction math applies to a cycle containing "today" ──
+{
+  const currentCycle = { start: new Date(2026, 8, 25), end: new Date(2026, 9, 24) } // Sep25..Oct24, contains asOf (10 Oct)
+  const data = dataWith([expense('e1', '2026-10-01', 200, 'personal')]) // already logged this (current) cycle
+  const { forecastAmount, realSpend } = forecastSpendForCycle(data, personalScope, 500, currentCycle)
+  check('forecastSpendForCycle applies the exact same reduction math whether the cycle is current or future', forecastAmount, 300)
+  check('realSpend for the current cycle counts only what is dated within it', realSpend, 200)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

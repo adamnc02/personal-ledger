@@ -5,7 +5,7 @@ import { toLocalIsoDate, todayIso } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, type ProjectionHorizon } from '../lib/projection'
-import { averageAdHocExpensePerCycle, forecastSpendForCycle, type SpendScope } from '../lib/averageSpendForecast'
+import { averageAdHocSpendForCycle, forecastSpendForCycle, hasSpendHistory, type SpendScope } from '../lib/averageSpendForecast'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary, buildJointPersonGroups, type JointPersonGroup } from '../lib/jointLedger'
 import { computeJointAccountProjection, jointAccountSignedAmount } from '../lib/jointAccountLedger'
@@ -264,7 +264,7 @@ export function Home() {
       <WalletStack
         items={backToFront.map((key) => {
           const entry = deck.find((e) => deckEntryKey(e) === key)!
-          return { key, node: <DeckHero entry={entry} data={data} horizon={horizon} />, label: heroLabel(entry, data) }
+          return { key, node: <DeckHero entry={entry} data={data} horizon={horizon} averageSpendForecast={averageSpendForecast} />, label: heroLabel(entry, data) }
         })}
         onSelect={onSelect}
         // Salary card only — the joint/household/credit-card faces have no
@@ -281,6 +281,7 @@ export function Home() {
       <div className="mt-6">
         <DeckControls
           entry={activeEntry}
+          data={data}
           horizon={horizon}
           setHorizon={setHorizon}
           grouping={grouping}
@@ -871,7 +872,7 @@ function heroLabel(entry: DeckEntry, data: AppDataV2): string {
 
 // ── Hero faces — compact BankCard fronts, swiped between ──────────────
 
-function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2; horizon: ProjectionHorizon }) {
+function DeckHero({ entry, data, horizon, averageSpendForecast }: { entry: DeckEntry; data: AppDataV2; horizon: ProjectionHorizon; averageSpendForecast?: boolean }) {
   const primaryPerson = data.people.find((p) => p.id === data.primaryPersonId)
 
   switch (entry.kind) {
@@ -885,12 +886,20 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
         )
       }
       const projection = computeProjection(data, data.primaryPersonId, payCycle, horizon)
+      // 2026-09-14 (average spend forecast, now reaching into the current
+      // cycle too) — the hero's own "Projected" figure has to reflect the
+      // forecast the same way CycleGroupedList's per-cycle closing balance
+      // already does, or the two would disagree once the toggle is on.
+      const forecastCycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
+      const personalForecastTotal = averageSpendForecast
+        ? [...buildForecastByCycle(data, { location: 'personal', ownerId: data.primaryPersonId }, data.primaryPersonId, forecastCycles).values()].reduce((sum, f) => sum + f.forecastAmount, 0)
+        : 0
       return (
         <BankCard variant="coral" bankLabel={primaryPerson?.name ?? 'Me'} accountLabel="Personal">
           <div className="mt-6 space-y-1.5">
             <CardRow label="Current balance" value={projection.clearedBalance} />
             <CardRow label="Pending" value={pendingNetTotal(projection.transactions)} />
-            <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={projection.projectedBalance} emphasized />
+            <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={round2(projection.projectedBalance - personalForecastTotal)} emphasized />
           </div>
         </BankCard>
       )
@@ -913,6 +922,13 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       // rendered here only once the joint account actually exists (mirrors
       // JointDetail's own "no joint account set up yet" guard).
       const jointProjection = computeJointAccountProjection(data, horizon)
+      // 2026-09-14 (average spend forecast) — same reasoning as Personal's
+      // own hero above: the forecast has to reduce this "Projected"
+      // figure (here, the total outgoings — see the comment below) or the
+      // hero and JointDetail's own CycleGroupedList would disagree.
+      const jointForecastTotal = averageSpendForecast
+        ? [...buildForecastByCycle(data, { location: 'joint' }, data.primaryPersonId, cycles).values()].reduce((sum, f) => sum + f.forecastAmount, 0)
+        : 0
       return (
         <BankCard variant="light" bankLabel={primaryPerson?.name ?? 'Me'} accountLabel="Joint">
           <div className="mt-6 space-y-1.5">
@@ -932,7 +948,7 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
             {summary.perPerson.map((p) => (
               <CardRow key={p.personId} label={p.name} value={p.amount} light small />
             ))}
-            <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={summary.totalOutgoings} emphasized light />
+            <CardRow label={`Projected · ${HORIZON_LABELS[horizon]}`} value={round2(summary.totalOutgoings + jointForecastTotal)} emphasized light />
           </div>
         </BankCard>
       )
@@ -1134,24 +1150,27 @@ function canShowCycleTotals(entry: DeckEntry, horizon: ProjectionHorizon, groupi
 }
 
 /**
- * The forecast row data for every FUTURE cycle (never the current one)
- * that needs one — see PROMPT-average-spend-forecast-toggle-2026-09-13.md.
- * Shared between PersonalDetail (`{ location: 'personal', ownerId }`) and
- * JointDetail (`{ location: 'joint' }`); `personId` is always
+ * The forecast row data for every cycle (current AND future, since the
+ * 2026-09-14 rewrite — see
+ * PROMPT-average-spend-forecast-current-cycle-2026-09-14.md) that needs
+ * one. Shared between PersonalDetail (`{ location: 'personal', ownerId }`)
+ * and JointDetail (`{ location: 'joint' }`); `personId` is always
  * `data.primaryPersonId` for BOTH — the joint account has no independent
  * "joint pay cycle" concept of its own, it borrows the primary person's.
  * Keyed by each cycle's own start date (ISO) so `CycleGroupedList` can
  * look a cycle's forecast up by its own `section.startIso`. Returns an
- * empty map (not undefined) when the average itself is 0 — simplifies
- * every caller to a single `.get(...)` with no extra null-check.
+ * empty map (not undefined) when there's no spend history to build a
+ * daily rate from at all — simplifies every caller to a single
+ * `.get(...)` with no extra null-check.
  */
 function buildForecastByCycle(data: AppDataV2, scope: SpendScope, personId: string, cycles: { start: Date; end: Date }[]): Map<string, { forecastAmount: number; realSpend: number }> {
   const map = new Map<string, { forecastAmount: number; realSpend: number }>()
-  const averagePerCycle = averageAdHocExpensePerCycle(data, scope, personId, new Date())
-  if (averagePerCycle <= 0) return map
-  // cycles[0] is always "Current cycle" (horizonCycles' own convention) — the forecast only ever fills in FUTURE cycles.
-  for (const cycle of cycles.slice(1)) {
-    const { forecastAmount, realSpend } = forecastSpendForCycle(data, scope, averagePerCycle, cycle)
+  const asOfDate = new Date()
+  if (!hasSpendHistory(data, scope, personId, asOfDate)) return map
+  for (const cycle of cycles) {
+    const averageForThisCycle = averageAdHocSpendForCycle(data, scope, personId, cycle, asOfDate)
+    if (averageForThisCycle <= 0) continue
+    const { forecastAmount, realSpend } = forecastSpendForCycle(data, scope, averageForThisCycle, cycle)
     if (forecastAmount > 0) map.set(toLocalIsoDate(cycle.start), { forecastAmount, realSpend })
   }
   return map
@@ -1214,6 +1233,7 @@ function activeFilterLabels(
 
 function DeckControls({
   entry,
+  data,
   horizon,
   setHorizon,
   grouping,
@@ -1230,6 +1250,7 @@ function DeckControls({
   setAverageSpendForecast,
 }: {
   entry: DeckEntry
+  data: AppDataV2
   horizon: ProjectionHorizon
   setHorizon: (v: ProjectionHorizon) => void
   grouping: Grouping
@@ -1310,6 +1331,7 @@ function DeckControls({
       {filtersOpen && (
         <FiltersSheet
           entry={entry}
+          data={data}
           horizon={horizon}
           grouping={grouping}
           setGrouping={setGrouping}
@@ -1344,6 +1366,7 @@ function DeckControls({
  */
 function FiltersSheet({
   entry,
+  data,
   horizon,
   grouping,
   setGrouping,
@@ -1360,6 +1383,7 @@ function FiltersSheet({
   onClose,
 }: {
   entry: DeckEntry
+  data: AppDataV2
   horizon: ProjectionHorizon
   grouping: Grouping
   setGrouping: (v: Grouping) => void
@@ -1425,7 +1449,14 @@ function FiltersSheet({
   // and not while grouping is Person (its per-share sections don't wire
   // up a forecast at all) does it actually apply; otherwise greyed out.
   const showAverageSpendForecastRow = entry.kind === 'personal' || entry.kind === 'joint'
-  const averageSpendForecastApplicable = grouping !== 'person' && cycleTotalsApplicable && cycleTotals
+  // 2026-09-14 — greyed out (not just hidden) when there's no ad-hoc
+  // expense history to build a daily rate from at all, Adam-confirmed:
+  // "Only allow the ability to display a forecast if there is at least
+  // one transaction to create a history from." See hasSpendHistory.
+  const averageSpendForecastScope: SpendScope | undefined =
+    entry.kind === 'personal' ? { location: 'personal', ownerId: data.primaryPersonId } : entry.kind === 'joint' ? { location: 'joint' } : undefined
+  const hasForecastHistory = averageSpendForecastScope ? hasSpendHistory(data, averageSpendForecastScope, data.primaryPersonId, new Date()) : false
+  const averageSpendForecastApplicable = grouping !== 'person' && cycleTotalsApplicable && cycleTotals && hasForecastHistory
   const isNonDefault = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection, averageSpendForecast).length > 0
 
   function resetToDefault() {
@@ -1531,7 +1562,7 @@ function FiltersSheet({
               have SOME notion of "hide the rows that already cleared"
               (and, for category, a total to match), so it's never gated
               on the current view the way cycle-end totals is. */}
-          <ToggleSwitch full label="Show cleared" checked={showCleared} onChange={setShowCleared} />
+          <ToggleSwitch full label="Show cleared" help="Include already-cleared transactions in the list" checked={showCleared} onChange={setShowCleared} />
           <ToggleSwitch
             full
             label="Cycle-end totals"
@@ -1552,7 +1583,13 @@ function FiltersSheet({
             <ToggleSwitch
               full
               label="Average spend forecast"
-              help={averageSpendForecastApplicable ? 'Fill empty future cycles with a spend estimate' : 'Requires Cycle-end totals on, List grouping'}
+              help={
+                averageSpendForecastApplicable
+                  ? 'Include a spend estimate at the end of each cycle'
+                  : hasForecastHistory
+                    ? 'Requires Cycle-end totals on, List grouping'
+                    : 'No spend history yet to estimate from'
+              }
               checked={averageSpendForecast}
               onChange={setAverageSpendForecast}
               disabled={!averageSpendForecastApplicable}
@@ -2332,12 +2369,17 @@ function PersonalDetail({
   // construction rather than by coincidence.
   const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
   const forecastByCycle = averageSpendForecast ? buildForecastByCycle(data, { location: 'personal', ownerId: data.primaryPersonId }, data.primaryPersonId, cycles) : undefined
+  // 2026-09-14 — the caption's "projected" figure has to match
+  // CycleGroupedList's own final closing balance below it, which already
+  // folds every cycle's forecast (including the current one) in.
+  const forecastTotal = forecastByCycle ? [...forecastByCycle.values()].reduce((sum, f) => sum + f.forecastAmount, 0) : 0
+  const displayedProjectedBalance = round2(projection.projectedBalance - forecastTotal)
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
       <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">Personal</h2>
       <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-        £{formatCurrency(projection.clearedBalance)} now · £{formatCurrency(projection.projectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
+        £{formatCurrency(projection.clearedBalance)} now · £{formatCurrency(displayedProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
       </p>
 
       {grouping === 'category' ? (
@@ -2560,6 +2602,8 @@ function JointDetail({
   // no independent "joint pay cycle" concept in this app, same anchor
   // computeJointAccountProjection's own cycles use.
   const forecastByCycle = averageSpendForecast ? buildForecastByCycle(data, { location: 'joint' }, data.primaryPersonId, cycles) : undefined
+  const forecastTotal = forecastByCycle ? [...forecastByCycle.values()].reduce((sum, f) => sum + f.forecastAmount, 0) : 0
+  const displayedProjectedBalance = jointProjection ? round2(jointProjection.projectedBalance - forecastTotal) : 0
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
@@ -2570,7 +2614,7 @@ function JointDetail({
       ) : (
         <>
           <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-            £{formatCurrency(jointProjection.clearedBalance)} now · £{formatCurrency(jointProjection.projectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
+            £{formatCurrency(jointProjection.clearedBalance)} now · £{formatCurrency(displayedProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
           </p>
           {grouping === 'person' ? (
             // 2026-09-14 (Adam-specified redesign) — cycle-outer,
