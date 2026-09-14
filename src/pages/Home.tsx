@@ -4,24 +4,35 @@ import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
-import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, type ProjectionHorizon } from '../lib/projection'
+import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
 import { averageAdHocSpendForCycle, forecastSpendForCycle, hasSpendHistory, type SpendScope } from '../lib/averageSpendForecast'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary, buildJointPersonGroups, type JointPersonGroup } from '../lib/jointLedger'
-import { computeJointAccountProjection, jointAccountSignedAmount } from '../lib/jointAccountLedger'
-import { computeHouseholdProjections, type HouseholdPersonProjection } from '../lib/householdLedger'
-import { nextMinimumChargeAmount, totalPaidForCard, withLiveBalance, creditCardCyclePeriods, buildCreditCardCycleSections, type CreditCardCycleSection } from '../lib/creditCards'
+import { computeJointAccountProjection, jointAccountSignedAmount, buildJointTrendSeries } from '../lib/jointAccountLedger'
+import { computeHouseholdProjections, buildHouseholdTrendSeries, type HouseholdPersonProjection } from '../lib/householdLedger'
+import { nextMinimumChargeAmount, totalPaidForCard, withLiveBalance, creditCardCyclePeriods, buildCreditCardCycleSections, buildCreditCardTrendSeries, type CreditCardCycleSection } from '../lib/creditCards'
 import { resolveCycleBounds } from '../lib/pensionLedger'
 import { findApplicableSnapshot } from '../lib/salaryLedger'
 import { addDays } from 'date-fns'
-import { savingsPotBalanceAsOf, projectedBalanceAt, amountNeededPerPayPeriod, buildSavingsPotScheduleRows, type SavingsPotScheduleRow } from '../lib/savingsPotLedger'
-import { computePotProjection, potSignedAmount } from '../lib/potLedger'
-import { isLedgerTransaction, signedAmount } from '../lib/runningBalance'
+import {
+  savingsPotBalanceAsOf,
+  projectedBalanceAt,
+  amountNeededPerPayPeriod,
+  buildSavingsPotScheduleRows,
+  buildSavingsPotTrendSeries,
+  type SavingsPotScheduleRow,
+  type SavingsPotPillGranularity,
+  type SavingsPotPillPoint,
+  type SavingsPotTrendSeries,
+} from '../lib/savingsPotLedger'
+import { computePotProjection, potSignedAmount, buildPotTrendSeries } from '../lib/potLedger'
+import { isLedgerTransaction, signedAmount, type BalanceSpendGranularity, type BalanceSpendTrendSeries } from '../lib/runningBalance'
 import { computeCycleSummary, compareByDateSalaryFirst } from '../lib/cycleSummary'
 import { WalletStack } from '../components/WalletStack'
 import { BankCard } from '../components/BankCard'
 import { ProgressRing } from '../components/ProgressRing'
 import { CategoryIcon } from '../components/CategoryIcon'
+import { BalanceSpendChart, SavingsPotPillChart, type BalanceSpendView } from '../components/TrendChart'
 import { SAVINGS_CATEGORY_ID, CREDIT_CARD_CATEGORY_ID } from '../types/ledger'
 import { seededCategoryIdForIcon, DEFAULT_POT_CATEGORY_ICON, DEFAULT_POT_CATEGORY_ICON_COLOR } from '../lib/categories'
 import type { AppDataV2, CreditCard, Loan, Pot, SavingsPot, Transaction } from '../types/ledger'
@@ -440,61 +451,78 @@ function SavingsPotDetail({
   const cycles = horizonCycles(data, pot.personId, horizon, new Date())
 
   return (
-    <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">{pot.name}</h2>
-      <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-        £{formatCurrency(balance)} now · £{formatCurrency(captionProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
-      </p>
-
-      {goalLabel && (
-        <p className="text-xs text-center mb-4" style={{ color: 'var(--color-coral)' }}>
-          Save £{formatCurrency(goalLabel.amountPerPeriod)} per {goalLabel.periodLabel} to hit £{formatCurrency(target)} by {pot.targetDate}
+    <div className="flex flex-col gap-4">
+      <HomeSection>
+        <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">{pot.name}</h2>
+        <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+          £{formatCurrency(balance)} now · £{formatCurrency(captionProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
         </p>
-      )}
 
-      {cycleTotals ? (
-        <SavingsPotCycleGroupedList rows={activity} openingRunningBalance={openingRunningBalance} cycles={cycles} showCleared={showCleared} groupByDirection={groupByDirection} />
-      ) : groupByDirection ? (
-        <DirectionGroupedRows
-          items={visibleActivity}
-          isIncoming={({ row }) => row.type !== 'savings_withdrawal'}
-          amountOf={({ row }) => row.amount}
-          dateOf={({ row }) => row.date}
-          keyOf={({ row }) => `${row.type}-${row.date}`}
-          renderRow={({ row }) => <SavingsPotActivityRow row={row} />}
-        />
-      ) : (
-        <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-          {visibleActivity.map(({ row, running }) => (
-            <SavingsPotActivityRow key={`${row.type}-${row.date}`} row={row} runningBalance={running} />
-          ))}
-          {visibleActivity.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] text-center py-6">Nothing in {horizon === 'current_cycle' ? 'this cycle' : 'the next 3 cycles'}.</p>}
-        </div>
-      )}
+        {goalLabel && (
+          <p className="text-xs text-center mb-4" style={{ color: 'var(--color-coral)' }}>
+            Save £{formatCurrency(goalLabel.amountPerPeriod)} per {goalLabel.periodLabel} to hit £{formatCurrency(target)} by {pot.targetDate}
+          </p>
+        )}
 
-      {/* REPOSITIONED (Adam-specified, 2026-09-03): "pie chart at the
-          bottom to match all others" — moved from just under the heading
-          to here, after the activity list, matching the established
-          rings-come-after-the-content placement (ProgressRingsSection's
-          loan/goal rings sit at the end of Personal's own card, not the
-          start). Only rendered at all once a targetAmount is set. */}
-      {target > 0 && (
-        <div className="flex flex-col items-center gap-1 pt-5 mt-5 border-t" style={{ borderColor: 'var(--color-track)' }}>
-          <ProgressRing
-            percent={percent}
-            projectedPercent={projectedPercent}
-            value={`£${formatCurrency(balance)}`}
-            label={`of £${formatCurrency(target)}`}
-            size={160}
-            strokeWidth={14}
-            icon={<CategoryIcon category={savingsCategory} size={26} />}
+        {cycleTotals ? (
+          <SavingsPotCycleGroupedList rows={activity} openingRunningBalance={openingRunningBalance} cycles={cycles} showCleared={showCleared} groupByDirection={groupByDirection} />
+        ) : groupByDirection ? (
+          <DirectionGroupedRows
+            items={visibleActivity}
+            isIncoming={({ row }) => row.type !== 'savings_withdrawal'}
+            amountOf={({ row }) => row.amount}
+            dateOf={({ row }) => row.date}
+            keyOf={({ row }) => `${row.type}-${row.date}`}
+            renderRow={({ row }) => <SavingsPotActivityRow row={row} />}
           />
-          {showProjection && projectedBalance > balance && (
-            <p className="text-[11px]" style={{ color: 'var(--color-coral)' }}>
-              projected £{formatCurrency(projectedBalance)} by {HORIZON_LABELS[horizon].toLowerCase()}
-            </p>
-          )}
-        </div>
+        ) : (
+          <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+            {visibleActivity.map(({ row, running }) => (
+              <SavingsPotActivityRow key={`${row.type}-${row.date}`} row={row} runningBalance={running} />
+            ))}
+            {visibleActivity.length === 0 && <p className="text-xs text-[var(--color-ink-faint)] text-center py-6">Nothing in {horizon === 'current_cycle' ? 'this cycle' : 'the next 3 cycles'}.</p>}
+          </div>
+        )}
+      </HomeSection>
+
+      <HomeSection>
+        <TrendPreview
+          cardName={pot.name}
+          color={pot.color}
+          headline={`£${formatCurrency(balance)}`}
+          caption="Today's balance"
+          savingsPot={{ buildSeries: (g) => buildSavingsPotTrendSeries(data, pot, g, new Date()) }}
+        />
+      </HomeSection>
+
+      {/* DOC NOTE: the 2026-09-15 prompt doc claimed Savings Pot renders no
+          ring today ("joint/pot/savings_pot currently have no such ring"),
+          used to justify excluding it from the Pie Charts section — but
+          this card DOES already render a target-progress ring below,
+          whenever a targetAmount is set (see the REPOSITIONED comment
+          this section's content is moved from, unchanged). Following the
+          doc's own GENERAL rule (relocate whatever already renders today)
+          rather than its specific enumeration, which appears to have
+          missed this one. */}
+      {target > 0 && (
+        <HomeSection>
+          <div className="flex flex-col items-center gap-1" style={{ borderColor: 'var(--color-track)' }}>
+            <ProgressRing
+              percent={percent}
+              projectedPercent={projectedPercent}
+              value={`£${formatCurrency(balance)}`}
+              label={`of £${formatCurrency(target)}`}
+              size={160}
+              strokeWidth={14}
+              icon={<CategoryIcon category={savingsCategory} size={26} />}
+            />
+            {showProjection && projectedBalance > balance && (
+              <p className="text-[11px]" style={{ color: 'var(--color-coral)' }}>
+                projected £{formatCurrency(projectedBalance)} by {HORIZON_LABELS[horizon].toLowerCase()}
+              </p>
+            )}
+          </div>
+        </HomeSection>
       )}
     </div>
   )
@@ -1633,6 +1661,212 @@ function FiltersSheet({
   )
 }
 
+// ── Trends feature (2026-09-15 build) ──────────────────────────────────
+
+/** Small pill button, reused by TrendsModal's granularity selector and Balance/Spend toggle — same visual language as CycleToggle below, generalised to N options instead of 2. */
+function SegmentedControl<T extends string>({ options, value, onChange }: { options: { value: T; label: string }[]; value: T; onChange: (v: T) => void }) {
+  return (
+    <div className="flex items-center gap-1 p-1 rounded-full" style={{ background: 'var(--color-bg)' }}>
+      {options.map((opt) => (
+        <button
+          key={opt.value}
+          onClick={() => onChange(opt.value)}
+          className="px-3 py-1.5 rounded-full text-xs font-semibold transition-colors"
+          style={{
+            background: value === opt.value ? 'var(--color-surface-raised)' : 'transparent',
+            color: value === opt.value ? 'var(--color-ink)' : 'var(--color-ink-muted)',
+          }}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+const BALANCE_SPEND_GRANULARITY_OPTIONS: { value: BalanceSpendGranularity; label: string }[] = [
+  { value: 'this_cycle', label: 'This Cycle' },
+  { value: 'next_3_cycles', label: 'Next 3 Cycles' },
+]
+const SAVINGS_POT_GRANULARITY_OPTIONS: { value: SavingsPotPillGranularity; label: string }[] = [
+  { value: 'this_cycle', label: 'This Cycle' },
+  { value: 'last_6_cycles', label: 'Last 6 Cycles' },
+  { value: 'year', label: 'Year' },
+]
+
+/**
+ * The full interactive Trends modal for one card instance — copies
+ * FiltersSheet's portal/backdrop/safe-area structure EXACTLY (per the
+ * prompt doc's own instruction, this is the fix for the bug where the
+ * bottom nav rendered above a modal that wasn't portalled to
+ * document.body). This modal's own granularity/Balance-Spend selection is
+ * entirely separate from — and ignores — whatever filter is active on the
+ * home page itself.
+ */
+function TrendsModal({
+  cardName,
+  color,
+  balanceSpend,
+  savingsPot,
+  onClose,
+}: {
+  cardName: string
+  color: string
+  onClose: () => void
+  /** Present for personal/joint/household/credit_card/pot cards. `dayIcons` — icon-only (no amounts) category icons for whatever transactions occurred that day, per the spec's tooltip requirement. */
+  balanceSpend?: { buildSeries: (granularity: BalanceSpendGranularity) => BalanceSpendTrendSeries | null; dayIcons?: (dateIso: string) => { key: string; node: ReactNode }[] }
+  /** Present for savings_pot cards only. */
+  savingsPot?: { buildSeries: (granularity: SavingsPotPillGranularity) => SavingsPotTrendSeries }
+}) {
+  const [bsGranularity, setBsGranularity] = useState<BalanceSpendGranularity>('this_cycle')
+  const [spGranularity, setSpGranularity] = useState<SavingsPotPillGranularity>('this_cycle')
+  const [view, setView] = useState<BalanceSpendView>('balance')
+  const [activePillPoint, setActivePillPoint] = useState<SavingsPotPillPoint | null>(null)
+
+  const bsSeries = balanceSpend ? balanceSpend.buildSeries(bsGranularity) : null
+  const spSeries = savingsPot ? savingsPot.buildSeries(spGranularity) : null
+
+  return createPortal(
+    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(5,7,13,0.72)' }} onClick={onClose}>
+      <div
+        className="w-full max-w-md max-h-[80vh] overflow-y-auto"
+        style={{
+          background: 'var(--color-bg-elevated)',
+          borderTop: '1px solid var(--color-track)',
+          borderRadius: '24px 24px 0 0',
+          padding: '20px',
+          paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)',
+          boxShadow: '0 -12px 32px rgba(0,0,0,0.4)',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex flex-col items-center gap-3.5">
+          <div style={{ width: 36, height: 4, borderRadius: 999, background: 'var(--color-track)' }} />
+          <div className="w-full flex items-center justify-between">
+            <span className="font-display text-base font-semibold text-[var(--color-ink)]">{cardName} trends</span>
+            <button onClick={onClose} aria-label="Close" className="p-1">
+              <X size={20} className="text-[var(--color-ink-muted)]" />
+            </button>
+          </div>
+
+          {balanceSpend && (
+            <>
+              <div className="w-full flex items-center justify-between gap-2">
+                <SegmentedControl options={BALANCE_SPEND_GRANULARITY_OPTIONS} value={bsGranularity} onChange={setBsGranularity} />
+              </div>
+              <div className="w-full flex items-center justify-between">
+                <SegmentedControl
+                  options={[
+                    { value: 'balance' as const, label: 'Balance' },
+                    { value: 'spend' as const, label: 'Spend' },
+                  ]}
+                  value={view}
+                  onChange={setView}
+                />
+                {bsSeries && (
+                  <p className="text-lg font-mono font-semibold text-[var(--color-ink)]">
+                    £{formatCurrency(view === 'balance' ? bsSeries.balance[bsSeries.balance.length - 1]?.clearedBalance ?? 0 : bsSeries.spend[bsSeries.spend.length - 1]?.spendToDate ?? 0)}
+                  </p>
+                )}
+              </div>
+              <div className="w-full">
+                {bsSeries ? (
+                  <BalanceSpendChart series={bsSeries} view={view} color={color} interactive height={220} dayIcons={balanceSpend.dayIcons} />
+                ) : (
+                  <p className="text-sm text-[var(--color-ink-muted)] text-center py-10">No data for this account yet.</p>
+                )}
+              </div>
+            </>
+          )}
+
+          {savingsPot && spSeries && (
+            <>
+              <div className="w-full flex items-center justify-between gap-2">
+                <SegmentedControl options={SAVINGS_POT_GRANULARITY_OPTIONS} value={spGranularity} onChange={setSpGranularity} />
+              </div>
+              <div className="w-full rounded-2xl p-3" style={{ background: 'var(--color-bg)' }}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-semibold text-[var(--color-ink)]">{activePillPoint ? activePillPoint.tooltipLabel : cardName}</span>
+                  <span className="text-lg font-mono font-semibold text-[var(--color-ink)]">
+                    £{formatCurrency(activePillPoint ? activePillPoint.endBalance : spSeries.points[spSeries.points.length - 1]?.endBalance ?? 0)}
+                  </span>
+                </div>
+                {activePillPoint && (
+                  <p className="text-xs" style={{ color: activePillPoint.netChange < 0 ? 'var(--color-coral)' : 'var(--color-positive)' }}>
+                    {activePillPoint.netChange < 0 ? `£${formatCurrency(Math.abs(activePillPoint.netChange))} withdrawn` : `£${formatCurrency(activePillPoint.netChange)} saved`} this period
+                  </p>
+                )}
+              </div>
+              <div className="w-full">
+                <SavingsPotPillChart series={spSeries} color={color} interactive height={160} onActivePointChange={setActivePillPoint} />
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+/**
+ * The Trends section's inline, non-interactive preview — small chart +
+ * headline figure + a "View trends" affordance. Tapping anywhere in the
+ * section (or the button) opens the full TrendsModal for this card.
+ */
+/** Icon-only (no amounts) category icons for whatever ledger-eligible transactions landed on `dateIso` — the Balance/Spend chart tooltip's own requirement, per the prompt doc ("tooltips show category icons... for transactions that occurred that day"). */
+function categoryIconsForDay(transactions: Transaction[], categories: AppDataV2['categories'], dateIso: string): { key: string; node: ReactNode }[] {
+  return transactions
+    .filter((t) => t.date === dateIso && isLedgerTransaction(t))
+    .map((t) => {
+      const category = categories.find((c) => c.id === t.categoryId)
+      return { key: t.id, node: <CategoryIcon category={category} size={16} /> }
+    })
+}
+
+function TrendPreview({
+  cardName,
+  color,
+  headline,
+  caption,
+  balanceSpend,
+  savingsPot,
+}: {
+  cardName: string
+  color: string
+  headline: string
+  caption: string
+  balanceSpend?: { buildSeries: (granularity: BalanceSpendGranularity) => BalanceSpendTrendSeries | null; dayIcons?: (dateIso: string) => { key: string; node: ReactNode }[] }
+  savingsPot?: { buildSeries: (granularity: SavingsPotPillGranularity) => SavingsPotTrendSeries }
+}) {
+  const [open, setOpen] = useState(false)
+  const previewSeries = balanceSpend ? balanceSpend.buildSeries('this_cycle') : null
+  const previewPillSeries = savingsPot ? savingsPot.buildSeries('this_cycle') : null
+
+  return (
+    <>
+      <button onClick={() => setOpen(true)} className="w-full text-left">
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-body text-sm font-semibold text-[var(--color-ink)]">Trends</h3>
+          <span className="text-xs font-semibold flex items-center gap-1" style={{ color: 'var(--color-coral)' }}>
+            View trends <TrendingUp size={13} />
+          </span>
+        </div>
+        <p className="text-lg font-mono font-semibold text-[var(--color-ink)]">{headline}</p>
+        <p className="text-xs text-[var(--color-ink-faint)] mb-2">{caption}</p>
+        <div className="pointer-events-none">
+          {previewSeries ? (
+            <BalanceSpendChart series={previewSeries} view="balance" color={color} height={64} />
+          ) : previewPillSeries ? (
+            <SavingsPotPillChart series={previewPillSeries} color={color} height={48} />
+          ) : null}
+        </div>
+      </button>
+      {open && <TrendsModal cardName={cardName} color={color} balanceSpend={balanceSpend} savingsPot={savingsPot} onClose={() => setOpen(false)} />}
+    </>
+  )
+}
+
 function ToggleSwitch({
   label,
   checked,
@@ -2447,44 +2681,79 @@ function PersonalDetail({
   const displayedProjectedBalance = round2(projection.projectedBalance - forecastTotal)
 
   return (
-    <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">Personal</h2>
-      <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-        £{formatCurrency(projection.clearedBalance)} now · £{formatCurrency(displayedProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
-      </p>
+    <div className="flex flex-col gap-4">
+      <HomeSection>
+        <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">Personal</h2>
+        <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+          £{formatCurrency(projection.clearedBalance)} now · £{formatCurrency(displayedProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
+        </p>
 
-      {grouping === 'category' ? (
-        <CategoryGroupedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
-      ) : order === 'amount' ? (
-        <AmountOrderedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
-      ) : cycleTotals ? (
-        <CycleGroupedList
-          transactions={ledgerTxns}
-          data={data}
-          openingRunningBalance={projection.openingBalance}
-          cycles={cycles}
-          showCleared={showCleared}
-          groupByDirection={groupByDirection}
-          forecastByCycle={forecastByCycle}
+        {grouping === 'category' ? (
+          <CategoryGroupedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
+        ) : order === 'amount' ? (
+          <AmountOrderedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
+        ) : cycleTotals ? (
+          <CycleGroupedList
+            transactions={ledgerTxns}
+            data={data}
+            openingRunningBalance={projection.openingBalance}
+            cycles={cycles}
+            showCleared={showCleared}
+            groupByDirection={groupByDirection}
+            forecastByCycle={forecastByCycle}
+          />
+        ) : (
+          <DateOrderedList
+            transactions={ledgerTxns}
+            data={data}
+            openingRunningBalance={projection.openingBalance}
+            showCleared={showCleared}
+            groupByDirection={groupByDirection}
+            forecast={forecastByCycle?.get(toLocalIsoDate(cycles[0].start))}
+            forecastEndIso={toLocalIsoDate(cycles[0].end)}
+          />
+        )}
+      </HomeSection>
+
+      <HomeSection>
+        <TrendPreview
+          cardName="Personal"
+          color="var(--color-coral)"
+          headline={`£${formatCurrency(projection.clearedBalance)}`}
+          caption="Today's balance"
+          balanceSpend={{
+            buildSeries: (g) => buildPersonalTrendSeries(data, data.primaryPersonId, payCycle, g, new Date()),
+            dayIcons: (d) => categoryIconsForDay(projection.transactions, data.categories, d),
+          }}
         />
-      ) : (
-        <DateOrderedList
-          transactions={ledgerTxns}
-          data={data}
-          openingRunningBalance={projection.openingBalance}
-          showCleared={showCleared}
-          groupByDirection={groupByDirection}
-          forecast={forecastByCycle?.get(toLocalIsoDate(cycles[0].start))}
-          forecastEndIso={toLocalIsoDate(cycles[0].end)}
-        />
+      </HomeSection>
+
+      {data.loans.some((l) => l.location === 'personal' && l.ownerId === data.primaryPersonId && l.active) && (
+        <HomeSection>
+          <LoanProgressRingsSection
+            data={data}
+            horizon={horizon}
+            loans={data.loans.filter((l) => l.location === 'personal' && l.ownerId === data.primaryPersonId && l.active)}
+            horizonEndDate={new Date(projection.horizonEnd)}
+          />
+        </HomeSection>
       )}
+    </div>
+  )
+}
 
-      <LoanProgressRingsSection
-        data={data}
-        horizon={horizon}
-        loans={data.loans.filter((l) => l.location === 'personal' && l.ownerId === data.primaryPersonId && l.active)}
-        horizonEndDate={new Date(projection.horizonEnd)}
-      />
+// ── Trends feature (2026-09-15 build) ──────────────────────────────────
+// Extracted per the build plan: every `*Detail` function used to wrap its
+// ENTIRE output (heading, balance caption, ledger list, AND the ring
+// breakdown where applicable) in one shared `rounded-3xl p-5` div,
+// duplicated inline across all 6 call sites. Splitting the combined card
+// into three independently-backgrounded sections (Ledger, Trends, Pie
+// Charts) needs that wrapper three times per card instead of once, so
+// it's pulled out here rather than tripling the duplication.
+function HomeSection({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={`rounded-3xl p-5 ${className}`} style={{ background: 'var(--color-surface)' }}>
+      {children}
     </div>
   )
 }
@@ -2555,7 +2824,13 @@ function LoanProgressRingsSection({
   const totalLoansProjectedCapitalRemaining = projectedLoanProgress?.reduce((sum, p) => sum + p.capitalRemaining, 0) ?? totalLoansCapitalRemaining
 
   return (
-    <div className="mt-5 pt-5 border-t flex flex-col gap-5" style={{ borderColor: 'var(--color-track)' }}>
+    // Trends feature (2026-09-15 build) — this used to open with `mt-5
+    // pt-5 border-t`, a separator from whatever ledger content sat above
+    // it in the same combined card. Now it's always the sole content of
+    // its own Pie Charts HomeSection (see every *Detail caller), so that
+    // top border/margin would just leave a stray line at the top of an
+    // otherwise-empty card — dropped.
+    <div className="flex flex-col gap-5">
       {loans.length > 0 && (
         <div>
           <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-3">Loans</h3>
@@ -2684,14 +2959,17 @@ function JointDetail({
   const forecastTotal = forecastByCycle ? [...forecastByCycle.values()].reduce((sum, f) => sum + f.forecastAmount, 0) : 0
   const displayedProjectedBalance = jointProjection ? round2(jointProjection.projectedBalance - forecastTotal) : 0
 
-  return (
-    <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">Joint</h2>
+  const jointLoans = data.loans.filter((l) => l.location === 'joint' && l.active)
 
-      {!jointProjection ? (
-        <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">No joint account set up yet.</p>
-      ) : (
-        <>
+  return (
+    <div className="flex flex-col gap-4">
+      <HomeSection>
+        <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">Joint</h2>
+
+        {!jointProjection ? (
+          <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">No joint account set up yet.</p>
+        ) : (
+          <>
           <p className="text-xs text-[var(--color-ink-faint)] mb-4">
             £{formatCurrency(jointProjection.clearedBalance)} now · £{formatCurrency(displayedProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
           </p>
@@ -2738,17 +3016,44 @@ function JointDetail({
               forecastEndIso={toLocalIsoDate(cycles[0].end)}
             />
           )}
+          </>
+        )}
+      </HomeSection>
 
-          {/* "Joint account pie charts are joint account loans only" (Adam,
-              2026-09-03) — joint-location loans, regardless of who's the
-              nominal payee. */}
-          <LoanProgressRingsSection
-            data={data}
-            horizon={horizon}
-            loans={data.loans.filter((l) => l.location === 'joint' && l.active)}
-            horizonEndDate={new Date(jointProjection.horizonEnd)}
+      {jointProjection && (
+        <HomeSection>
+          <TrendPreview
+            cardName="Joint"
+            /* JUDGMENT CALL: --color-joint (#fdfdfd, near-white) is this
+               app's existing BankCard BACKGROUND tint for Joint, not a
+               usable chart-line colour — it would be invisible on the
+               dark chart surface. --color-positive (existing accent,
+               otherwise used for "money in"/gains) is used instead so
+               Joint's trend reads as visually distinct from Personal's
+               coral, without inventing a brand-new colour token. */
+            color="var(--color-positive)"
+            headline={`£${formatCurrency(jointProjection.clearedBalance)}`}
+            caption="Today's balance"
+            balanceSpend={{
+              buildSeries: (g) => buildJointTrendSeries(data, g, new Date()),
+              dayIcons: (d) => categoryIconsForDay(jointProjection.transactions, data.categories, d),
+            }}
           />
-        </>
+        </HomeSection>
+      )}
+
+      {/* "Joint account pie charts are joint account loans only" (Adam,
+          2026-09-03) — joint-location loans, regardless of who's the
+          nominal payee. Doc note: the 2026-09-15 prompt doc's own research
+          missed that Joint already renders this ring today (it only listed
+          Personal/Household as LoanProgressRingsSection's callers) — this
+          Pie Charts section is included here because the doc's own GENERAL
+          rule ("only render where a ring already renders today") says so,
+          even though its specific enumeration list omitted Joint. */}
+      {jointProjection && jointLoans.length > 0 && (
+        <HomeSection>
+          <LoanProgressRingsSection data={data} horizon={horizon} loans={jointLoans} horizonEndDate={new Date(jointProjection.horizonEnd)} />
+        </HomeSection>
       )}
     </div>
   )
@@ -2792,36 +3097,55 @@ function PotDetail({
   const cycles = horizonCycles(data, pot.personId, horizon, new Date())
 
   return (
-    <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">{pot.name}</h2>
-      <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-        £{formatCurrency(projection.clearedBalance)} now · £{formatCurrency(projection.projectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
-      </p>
+    <div className="flex flex-col gap-4">
+      <HomeSection>
+        <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">{pot.name}</h2>
+        <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+          £{formatCurrency(projection.clearedBalance)} now · £{formatCurrency(projection.projectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
+        </p>
 
-      {grouping === 'category' ? (
-        <CategoryGroupedList transactions={projection.transactions} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
-      ) : order === 'amount' ? (
-        <AmountOrderedList transactions={projection.transactions} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
-      ) : cycleTotals ? (
-        <CycleGroupedList
-          transactions={projection.transactions}
-          data={data}
-          openingRunningBalance={projection.openingBalance}
-          cycles={cycles}
-          showCleared={showCleared}
-          amountSign={potSignedAmount}
-          groupByDirection={groupByDirection}
+        {grouping === 'category' ? (
+          <CategoryGroupedList transactions={projection.transactions} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
+        ) : order === 'amount' ? (
+          <AmountOrderedList transactions={projection.transactions} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
+        ) : cycleTotals ? (
+          <CycleGroupedList
+            transactions={projection.transactions}
+            data={data}
+            openingRunningBalance={projection.openingBalance}
+            cycles={cycles}
+            showCleared={showCleared}
+            amountSign={potSignedAmount}
+            groupByDirection={groupByDirection}
+          />
+        ) : (
+          <DateOrderedList
+            transactions={projection.transactions}
+            data={data}
+            openingRunningBalance={projection.openingBalance}
+            showCleared={showCleared}
+            amountSign={potSignedAmount}
+            groupByDirection={groupByDirection}
+          />
+        )}
+      </HomeSection>
+
+      <HomeSection>
+        <TrendPreview
+          cardName={pot.name}
+          color={pot.color}
+          headline={`£${formatCurrency(projection.clearedBalance)}`}
+          caption="Today's balance"
+          balanceSpend={{
+            buildSeries: (g) => buildPotTrendSeries(data, pot, g, new Date()),
+            dayIcons: (d) => categoryIconsForDay(projection.transactions, data.categories, d),
+          }}
         />
-      ) : (
-        <DateOrderedList
-          transactions={projection.transactions}
-          data={data}
-          openingRunningBalance={projection.openingBalance}
-          showCleared={showCleared}
-          amountSign={potSignedAmount}
-          groupByDirection={groupByDirection}
-        />
-      )}
+      </HomeSection>
+
+      {/* No Pie Charts section for Pot (bills pot) — Adam-specified,
+          verbatim in this card's own header comment above: "There should
+          be no pie chart." Unchanged by the Trends split. */}
     </div>
   )
 }
@@ -2944,46 +3268,65 @@ function HouseholdDetail({
   const householdHorizonEnd = combinedCycles[combinedCycles.length - 1].end
 
   return (
-    <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">Household</h2>
-      <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-        £{formatCurrency(combinedClearedBalance)} now · £{formatCurrency(combinedProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
-      </p>
-      <div className="flex flex-col gap-1.5 mb-1">
-        {personProjections.map((pp) => (
-          <div key={pp.personId} className="flex items-center justify-between text-sm py-1">
-            <span className="text-[var(--color-ink-muted)]">{pp.personName}</span>
-            <span className="font-mono text-[var(--color-ink)]">£{formatCurrency(pp.clearedBalance)}</span>
-          </div>
-        ))}
-      </div>
-      {missingCount > 0 && (
-        <p className="text-xs text-[var(--color-ink-faint)] mt-2">
-          {missingCount} {missingCount === 1 ? "person doesn't" : "people don't"} have a pay cycle set up yet, so they're left out of this total.
+    <div className="flex flex-col gap-4">
+      <HomeSection>
+        <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">Household</h2>
+        <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+          £{formatCurrency(combinedClearedBalance)} now · £{formatCurrency(combinedProjectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
         </p>
-      )}
-      <p className="text-xs text-[var(--color-ink-faint)] mt-2 mb-4">Each person's own personal bills and transactions — no joint bills here; see the Joint card for those.</p>
+        <div className="flex flex-col gap-1.5 mb-1">
+          {personProjections.map((pp) => (
+            <div key={pp.personId} className="flex items-center justify-between text-sm py-1">
+              <span className="text-[var(--color-ink-muted)]">{pp.personName}</span>
+              <span className="font-mono text-[var(--color-ink)]">£{formatCurrency(pp.clearedBalance)}</span>
+            </div>
+          ))}
+        </div>
+        {missingCount > 0 && (
+          <p className="text-xs text-[var(--color-ink-faint)] mt-2">
+            {missingCount} {missingCount === 1 ? "person doesn't" : "people don't"} have a pay cycle set up yet, so they're left out of this total.
+          </p>
+        )}
+        <p className="text-xs text-[var(--color-ink-faint)] mt-2 mb-4">Each person's own personal bills and transactions — no joint bills here; see the Joint card for those.</p>
 
-      {grouping === 'person' ? (
-        <PersonGroupedList personProjections={personProjections} data={data} order={order} cycleTotals={cycleTotals} showCleared={showCleared} />
-      ) : grouping === 'category' ? (
-        <CategoryGroupedList transactions={combinedTransactions} data={data} showCleared={showCleared} />
-      ) : order === 'amount' ? (
-        <AmountOrderedList transactions={combinedTransactions} data={data} showCleared={showCleared} />
-      ) : cycleTotals ? (
-        <CycleGroupedList
-          transactions={combinedTransactions}
-          data={data}
-          openingRunningBalance={combinedOpeningBalance}
-          cycles={combinedCycles}
-          showCleared={showCleared}
-          groupByDirection={groupByDirection}
+        {grouping === 'person' ? (
+          <PersonGroupedList personProjections={personProjections} data={data} order={order} cycleTotals={cycleTotals} showCleared={showCleared} />
+        ) : grouping === 'category' ? (
+          <CategoryGroupedList transactions={combinedTransactions} data={data} showCleared={showCleared} />
+        ) : order === 'amount' ? (
+          <AmountOrderedList transactions={combinedTransactions} data={data} showCleared={showCleared} />
+        ) : cycleTotals ? (
+          <CycleGroupedList
+            transactions={combinedTransactions}
+            data={data}
+            openingRunningBalance={combinedOpeningBalance}
+            cycles={combinedCycles}
+            showCleared={showCleared}
+            groupByDirection={groupByDirection}
+          />
+        ) : (
+          <DateOrderedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} showCleared={showCleared} groupByDirection={groupByDirection} />
+        )}
+      </HomeSection>
+
+      <HomeSection>
+        <TrendPreview
+          cardName="Household"
+          color="var(--color-coral)"
+          headline={`£${formatCurrency(combinedClearedBalance)}`}
+          caption="Combined balance today"
+          balanceSpend={{
+            buildSeries: (g) => buildHouseholdTrendSeries(data, g, new Date()),
+            dayIcons: (d) => categoryIconsForDay(combinedTransactions, data.categories, d),
+          }}
         />
-      ) : (
-        <DateOrderedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} showCleared={showCleared} groupByDirection={groupByDirection} />
-      )}
+      </HomeSection>
 
-      <LoanProgressRingsSection data={data} horizon={horizon} loans={householdLoans} horizonEndDate={householdHorizonEnd} />
+      {householdLoans.length > 0 && (
+        <HomeSection>
+          <LoanProgressRingsSection data={data} horizon={horizon} loans={householdLoans} horizonEndDate={householdHorizonEnd} />
+        </HomeSection>
+      )}
     </div>
   )
 }
@@ -3205,50 +3548,64 @@ function CreditCardDetail({
   const cardCycleSections = cycleTotals ? buildCreditCardCycleSections(storedCard, data.transactions, cardCycles) : []
 
   return (
-    <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
-      <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">{card.name}</h2>
-      <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-        £{formatCurrency(nowOwed)} owed · £{formatCurrency(card.currentBalance)} projected · due on the {card.paymentDayOfMonth}
-        {ordinalSuffix(card.paymentDayOfMonth)}
-      </p>
+    <div className="flex flex-col gap-4">
+      <HomeSection>
+        <h2 className="font-display text-lg font-semibold text-[var(--color-ink)] mb-1">{card.name}</h2>
+        <p className="text-xs text-[var(--color-ink-faint)] mb-4">
+          £{formatCurrency(nowOwed)} owed · £{formatCurrency(card.currentBalance)} projected · due on the {card.paymentDayOfMonth}
+          {ordinalSuffix(card.paymentDayOfMonth)}
+        </p>
 
-      {cycleTotals ? (
-        <CreditCardCycleGroupedList sections={cardCycleSections} showCleared={showCleared} groupByDirection={groupByDirection} />
-      ) : groupByDirection ? (
-        <DirectionGroupedRows
-          items={activity}
-          isIncoming={(t) => t.type !== 'credit_card_spend'}
-          amountOf={(t) => t.amount}
-          dateOf={(t) => t.date}
-          keyOf={(t) => t.id}
-          renderRow={(t) => <CardActivityRow t={t} />}
-          incomingLabel="Payments"
-          outgoingLabel="Spend"
-        />
-      ) : (
-        <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-          {activity.map((t) => (
-            <CardActivityRow key={t.id} t={t} />
-          ))}
-          {activity.length === 0 && <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">No activity yet.</p>}
-        </div>
-      )}
+        {cycleTotals ? (
+          <CreditCardCycleGroupedList sections={cardCycleSections} showCleared={showCleared} groupByDirection={groupByDirection} />
+        ) : groupByDirection ? (
+          <DirectionGroupedRows
+            items={activity}
+            isIncoming={(t) => t.type !== 'credit_card_spend'}
+            amountOf={(t) => t.amount}
+            dateOf={(t) => t.date}
+            keyOf={(t) => t.id}
+            renderRow={(t) => <CardActivityRow t={t} />}
+            incomingLabel="Payments"
+            outgoingLabel="Spend"
+          />
+        ) : (
+          <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+            {activity.map((t) => (
+              <CardActivityRow key={t.id} t={t} />
+            ))}
+            {activity.length === 0 && <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">No activity yet.</p>}
+          </div>
+        )}
+      </HomeSection>
 
-      {/* Rings always come AFTER the transaction list on every swipe-deck
-          card (Adam, 2026-09 session) — this card and CreditCardsCombinedDetail
-          below were the two exceptions, previously showing the ring first. */}
-      <div className="flex justify-center my-4">
-        <ProgressRing
-          percent={percentPaid}
-          value={`£${formatCurrency(card.currentBalance)}`}
-          label="Outstanding"
-          size={160}
-          strokeWidth={14}
+      <HomeSection>
+        <TrendPreview
+          cardName={card.name}
           color={card.color}
-          icon={<CategoryIcon category={category ? { ...category, iconColor: card.color } : undefined} size={26} />}
+          headline={`£${formatCurrency(nowOwed)}`}
+          caption="Owed today"
+          balanceSpend={{
+            buildSeries: (g) => buildCreditCardTrendSeries(data, storedCard, g, new Date()),
+            dayIcons: (d) => categoryIconsForDay(data.transactions.filter((t) => t.creditCardId === card.id), data.categories, d),
+          }}
         />
-      </div>
-      <p className="text-xs text-[var(--color-ink-muted)] text-center">£{formatCurrency(paid)} paid to date</p>
+      </HomeSection>
+
+      <HomeSection>
+        <div className="flex justify-center my-4">
+          <ProgressRing
+            percent={percentPaid}
+            value={`£${formatCurrency(card.currentBalance)}`}
+            label="Outstanding"
+            size={160}
+            strokeWidth={14}
+            color={card.color}
+            icon={<CategoryIcon category={category ? { ...category, iconColor: card.color } : undefined} size={26} />}
+          />
+        </div>
+        <p className="text-xs text-[var(--color-ink-muted)] text-center">£{formatCurrency(paid)} paid to date</p>
+      </HomeSection>
     </div>
   )
 }
