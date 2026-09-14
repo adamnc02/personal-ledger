@@ -13,6 +13,12 @@
 // (forecastSpendForCycle), and — critically — that the window is NOT
 // bound by either ledger's own opening-balance date (Adam's own
 // rebalancing scenario).
+//
+// 2026-09-14 follow-up (Adam-reported, a real new-account backup) — also
+// verifies the window-start clamp (a new account's rate is built only
+// from days it actually has real history for, never diluted by days
+// before it existed) and the first-logged-cycle guard (a cycle never
+// forecasts against its own partial data reflected back onto itself).
 
 import { differenceInCalendarDays } from 'date-fns'
 import { previousCycles } from '../src/lib/projection'
@@ -137,12 +143,25 @@ const windowDays = differenceInCalendarDays(asOf, windowStart) + 1
   assert('hasSpendHistory is true once at least one matching transaction exists in the window', hasSpendHistory(data, personalScope, 'p1', asOf))
 }
 
+// Every test below that isn't ITSELF about window-clamping (section 16)
+// pins the window's start with a zero-amount anchor expense dated
+// exactly at the natural windowStart — matching scope, so it doesn't
+// trip the NEW earliest-transaction clamp (section 16), and £0 so it
+// never changes any of these tests' own total-spend expectations. Without
+// it, these tests' own earliest transaction (often well after
+// windowStart) would clamp the window itself, making the fixed global
+// `windowDays` constant used in each `check` below silently wrong.
+function anchor(location: 'personal' | 'joint', ownerId = 'p1'): Transaction {
+  return expense('e-anchor', iso(windowStart), 0, location, ownerId)
+}
+
 // ── 6. Rebalancing: ad-hoc expenses dated BEFORE payCycle.openingBalanceDate still count ──
 {
   // Both predate payCycle.openingBalanceDate ('2026-09-01') —
   // computeProjection would exclude both from a real balance calculation,
   // but this window must NOT.
   const data = dataWith([
+    anchor('personal'),
     expense('e1', '2026-08-10', 100, 'personal'), // before openingBalanceDate
     expense('e2', '2026-07-10', 100, 'personal'), // before openingBalanceDate
   ])
@@ -159,7 +178,7 @@ const windowDays = differenceInCalendarDays(asOf, windowStart) + 1
   const cardSpend: Transaction = { ...expense('e-card', '2026-09-10', 999, 'personal'), type: 'credit_card_spend' }
   const jointExpense: Transaction = expense('e-joint', '2026-09-10', 999, 'joint')
   const realOne = expense('e-real', '2026-09-10', 50, 'personal')
-  const data = dataWith([otherOwner, income, billPayment, cardSpend, jointExpense, realOne])
+  const data = dataWith([anchor('personal'), otherOwner, income, billPayment, cardSpend, jointExpense, realOne])
   const rate = dailySpendRate(data, personalScope, 'p1', asOf)
   check('only the genuine ad-hoc personal expense counts — other owner/income/bill/card-spend/joint all excluded', round2(rate * windowDays), 50)
 }
@@ -167,7 +186,7 @@ const windowDays = differenceInCalendarDays(asOf, windowStart) + 1
 // ── 8. Cross-contamination guard: joint expense never feeds Personal rate, and vice versa ──
 {
   const jointScope: SpendScope = { location: 'joint' }
-  const data = dataWith([expense('e1', '2026-09-10', 500, 'joint'), expense('e2', '2026-09-10', 300, 'personal')])
+  const data = dataWith([anchor('personal'), anchor('joint'), expense('e1', '2026-09-10', 500, 'joint'), expense('e2', '2026-09-10', 300, 'personal')])
   check('CROSS-CONTAMINATION GUARD — a location:joint expense never feeds the Personal rate', round2(dailySpendRate(data, personalScope, 'p1', asOf) * windowDays), 300)
   check('CROSS-CONTAMINATION GUARD — a location:personal expense never feeds the Joint rate', round2(dailySpendRate(data, jointScope, 'p1', asOf) * windowDays), 500)
 }
@@ -175,7 +194,7 @@ const windowDays = differenceInCalendarDays(asOf, windowStart) + 1
 // ── 9. Joint scope has no ownerId filter — either person's logged joint expense counts ──
 {
   const jointScope: SpendScope = { location: 'joint' }
-  const data = dataWith([expense('e1', '2026-09-10', 100, 'joint', 'p1'), expense('e2', '2026-08-10', 200, 'joint', 'p2')])
+  const data = dataWith([anchor('joint'), expense('e1', '2026-09-10', 100, 'joint', 'p1'), expense('e2', '2026-08-10', 200, 'joint', 'p2')])
   const rate = dailySpendRate(data, jointScope, 'p1', asOf)
   check('Joint rate includes ad-hoc expenses logged by EITHER owner (no ownerId filter)', round2(rate * windowDays), 300)
 }
@@ -228,6 +247,55 @@ const windowDays = differenceInCalendarDays(asOf, windowStart) + 1
   const { forecastAmount, realSpend } = forecastSpendForCycle(data, personalScope, 500, currentCycle)
   check('forecastSpendForCycle applies the exact same reduction math whether the cycle is current or future', forecastAmount, 300)
   check('realSpend for the current cycle counts only what is dated within it', realSpend, 200)
+}
+
+// ── 16. WINDOW CLAMP (Adam-reported, a real new-account backup): the window's start clamps to the earliest matching transaction when that's LATER than the natural 3-cycles-back start ──
+{
+  // Only 3 days of real history, well after the natural windowStart —
+  // simulates a genuinely new account. Under the old unclamped window,
+  // this same £300 would have been diluted across the FULL windowDays
+  // (mostly empty days that predate any real history), producing an
+  // artificially tiny rate.
+  const recentStart = new Date(2026, 9, 8) // 8 Oct — 3 days before asOf (10 Oct)
+  const data = dataWith([expense('e1', iso(recentStart), 300, 'personal')])
+  const rate = dailySpendRate(data, personalScope, 'p1', asOf)
+  const clampedWindowDays = differenceInCalendarDays(asOf, recentStart) + 1 // 3
+  check("WINDOW CLAMP — rate is built only from the earliest matching transaction's own date forward", round2(rate * clampedWindowDays), 300)
+  assert('WINDOW CLAMP REGRESSION GUARD — rate is meaningfully higher than the old (unclamped) full-window dilution would have given', rate > 300 / windowDays)
+}
+
+// ── 17. FIRST-LOGGED-CYCLE GUARD (Adam-specified): a cycle whose own window is the very first with any matching history gets NO forecast at all — averaging that cycle's own partial data back onto its own remaining days would be circular ──
+{
+  const currentCycle = { start: new Date(2026, 8, 25), end: new Date(2026, 9, 24) } // Sep25..Oct24, contains asOf
+  const data = dataWith([expense('e1', '2026-10-01', 300, 'personal')]) // the ONLY matching history, dated inside currentCycle itself
+  assert('dailySpendRate is nonzero — real history genuinely exists', dailySpendRate(data, personalScope, 'p1', asOf) > 0)
+  check(
+    'FIRST-LOGGED-CYCLE GUARD — averageAdHocSpendForCycle is 0 for the cycle that IS the first one with any history, even though the daily rate itself is not',
+    averageAdHocSpendForCycle(data, personalScope, 'p1', currentCycle, asOf),
+    0,
+  )
+}
+
+// ── 18. Once a COMPLETED prior cycle has real history, the guard stops applying — including to the current cycle ──
+{
+  const currentCycle = { start: new Date(2026, 8, 25), end: new Date(2026, 9, 24) }
+  const data = dataWith([
+    expense('e1', '2026-08-01', 300, 'personal'), // a PRIOR, already-completed cycle
+    expense('e2', '2026-10-01', 100, 'personal'), // the current cycle
+  ])
+  assert(
+    'the current cycle is no longer the first-ever logged one, so it gets a real forecast again',
+    averageAdHocSpendForCycle(data, personalScope, 'p1', currentCycle, asOf) > 0,
+  )
+}
+
+// ── 19. The guard is per-cycle, not a blanket disable — a FUTURE cycle is still forecastable even while the CURRENT cycle is the first-ever logged one ──
+{
+  const currentCycle = { start: new Date(2026, 8, 25), end: new Date(2026, 9, 24) }
+  const futureCycle = { start: new Date(2026, 9, 25), end: new Date(2026, 10, 24) }
+  const data = dataWith([expense('e1', '2026-10-01', 300, 'personal')]) // only within currentCycle
+  check('the current cycle (the first-ever one) is blocked', averageAdHocSpendForCycle(data, personalScope, 'p1', currentCycle, asOf), 0)
+  assert('a FUTURE cycle still gets a real, nonzero forecast', averageAdHocSpendForCycle(data, personalScope, 'p1', futureCycle, asOf) > 0)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)
