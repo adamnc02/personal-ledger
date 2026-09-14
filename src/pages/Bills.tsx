@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { formatCurrency } from '../lib/format'
+import { formatCurrency, formatFullDate } from '../lib/format'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Plus, ChevronDown, ChevronUp, X } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
@@ -22,6 +22,7 @@ import {
   recentAndUpcomingOccurrences,
   applyTemplateAmountChange,
   applyTemplateSingleOccurrenceAmountChange,
+  applyTemplateSingleOccurrenceDateChange,
   scheduledTemplateDates,
   setPausedTemplateOccurrences,
   resolveOccurrenceAmount,
@@ -568,7 +569,7 @@ function BillEditPanel({
   // EffectiveDatedChangeFlow — which field(s) triggered the "which payment
   // does this apply from" flow, so the flow's buildChanges/onCommit know
   // what to diff/write without re-deriving it.
-  const [changeKind, setChangeKind] = useState<'amount' | 'location' | null>(null)
+  const [changeKind, setChangeKind] = useState<'amount' | 'location' | 'date' | null>(null)
   // Same 2-months-back/12-months-forward window Salary.tsx's pause
   // pickers use — see PausedOccurrencesControl's own comment.
   const pauseWindowStart = addMonths(new Date(), -2)
@@ -597,6 +598,11 @@ function BillEditPanel({
   }
 
   const locationChanged = draft.location !== template.location || (draft.location === 'pot' && draft.potId !== template.potId)
+  // 2026-09-14 (Adam-reported, joint account bill date change) — the "Due
+  // date" field (FrequencyEditor's `anchorDate`) used to save immediately
+  // with no confirmation at all, unlike amount/location. Routed through
+  // the exact same "which payment does this apply to / from" flow now.
+  const dateChanged = draft.anchorDate !== template.anchorDate
   // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
   // when nothing's actually changed, matching the same rule the new
   // Transfer wizards already follow — same "compare against the mount-
@@ -626,6 +632,15 @@ function BillEditPanel({
       setChangeKind('amount')
       return
     }
+    // Checked before Location, same reasoning as Amount above: a date
+    // change (like amount) HAS a genuine single-occurrence write of its
+    // own, so it gets first crack at the scope question; Location rides
+    // along inside whichever flow actually opens (see buildChanges/
+    // onCommit below), same as it already rides along Amount.
+    if (dateChanged && recentAndUpcomingOccurrences(template, new Date()).length > 0) {
+      setChangeKind('date')
+      return
+    }
     if (locationChanged && recentAndUpcomingOccurrences(template, new Date()).length > 0) {
       setChangeKind('location')
       return
@@ -650,23 +665,32 @@ function BillEditPanel({
         ? scope === 'single'
           ? `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)} for one payment only. Which payment is this?`
           : `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
-        : `${template.name} is moving ${draft.location === 'pot' ? `to ${pots.find((p) => p.id === draft.potId)?.name ?? 'a pot'}` : draft.location === 'joint' ? 'to Joint' : 'to Personal'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
+        : changeKind === 'date'
+          ? scope === 'single'
+            ? `${template.name}'s due date is changing from ${formatFullDate(template.anchorDate)} to ${formatFullDate(draft.anchorDate)} for one payment only. Which payment is this?`
+            : `${template.name}'s due date is changing from ${formatFullDate(template.anchorDate)} to ${formatFullDate(draft.anchorDate)}. Which payment should the new date start from? Everything before it keeps the old date.`
+          : `${template.name} is moving ${draft.location === 'pot' ? `to ${pots.find((p) => p.id === draft.potId)?.name ?? 'a pot'}` : draft.location === 'joint' ? 'to Joint' : 'to Personal'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
     return (
       <EffectiveDatedChangeFlow
         // UAT follow-up (2026-09-09, Adam-reported) — the "just a single
         // payment / all future" step is the first thing shown for any
         // AMOUNT change, per Adam's original spec ("the step 1 is just
         // this payment or all future payments" for bills/transfers/
-        // recurring payments/loans/credit cards). A location-only change
-        // has no single-occurrence write to honour (see onCommit below),
-        // so it goes straight to the date picker, same as before —
-        // matching the same "don't offer a choice that can't actually be
-        // delivered" principle Loan.monthlyPayment's own scope step
-        // (deliberately absent) follows.
+        // recurring payments/loans/credit cards). 2026-09-14: a DATE
+        // change (the "Due date" field) gets the exact same scope step,
+        // same reasoning — it has a genuine single-occurrence write of
+        // its own (applyTemplateSingleOccurrenceDateChange), unlike
+        // Location, which has no single-occurrence write to honour (see
+        // onCommit below) and so goes straight to the date picker.
         scopeStep={
           changeKind === 'amount'
             ? { description: `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Just a single payment, or every payment from then on?`, singleLabel: 'Just a single payment' }
-            : undefined
+            : changeKind === 'date'
+              ? {
+                  description: `${template.name}'s due date is changing from ${formatFullDate(template.anchorDate)} to ${formatFullDate(draft.anchorDate)}. Just a single payment, or every payment from then on?`,
+                  singleLabel: 'Just a single payment',
+                }
+              : undefined
         }
         occurrences={recentAndUpcomingOccurrences(template, new Date())}
         dateStepDescription={dateStepDescription}
@@ -674,6 +698,13 @@ function BillEditPanel({
           const changes: RecurringChangeField[] = []
           if (changeKind === 'amount') {
             changes.push({ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(draft.amount)}` })
+          }
+          // 2026-09-14 — rides along whichever flow actually opened (same
+          // as Location already does alongside Amount below), since Date
+          // and Amount can change in the same edit and share one
+          // effective-date pick rather than asking twice.
+          if (dateChanged) {
+            changes.push({ label: 'Due date', from: formatFullDate(template.anchorDate), to: formatFullDate(draft.anchorDate) })
           }
           if (locationChanged) {
             changes.push({
@@ -692,23 +723,39 @@ function BillEditPanel({
         affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
         onCancelAll={cancelEverything}
         onCommit={(effectiveFrom, scope) => {
+          // Amount and Date each have their own genuine single-occurrence
+          // write (occurrenceOverrides), composed onto the SAME working
+          // template in sequence so neither clobbers the other's
+          // override entry for this slot when both change together.
+          let workingTemplate = template
+          let patch: Partial<Omit<RecurringTemplate, 'id'>> = {}
           if (changeKind === 'amount') {
             const amountPatch =
-              scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(template, draft.amount, effectiveFrom) : applyTemplateAmountChange(template, draft.amount, effectiveFrom)
-            if (locationChanged) {
-              // Both changed — apply the amount patch immediately, then
-              // the location reassignment separately (it carries its own
-              // retroactive transaction rewrite, which a plain onSave
-              // patch can't do — see this component's own comment above).
-              // The location change always applies from this date forward
-              // regardless of the amount's single/all-future choice — it
-              // has no single-occurrence mechanism of its own.
-              onSave({ ...draft, amount: scope === 'single' ? template.amount : draft.amount, ...amountPatch })
-              onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
-            } else {
-              onSave({ ...draft, amount: scope === 'single' ? template.amount : draft.amount, ...amountPatch })
-            }
-          } else {
+              scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(workingTemplate, draft.amount, effectiveFrom) : applyTemplateAmountChange(workingTemplate, draft.amount, effectiveFrom)
+            workingTemplate = { ...workingTemplate, ...amountPatch }
+            patch = { ...patch, amount: scope === 'single' ? template.amount : draft.amount, ...amountPatch }
+          }
+          if (dateChanged) {
+            // 2026-09-14 — "all future" pragmatically just moves the
+            // template's own schedule anchor forward (same as an
+            // unconfirmed date edit always did); it does NOT get amount's
+            // full amountHistory-style precision for regenerating past
+            // occurrences at a remembered prior anchor — that's a much
+            // larger feature this fix doesn't attempt. "Just a single
+            // payment" IS fully precise, via the same occurrenceOverrides
+            // mechanism Transfers already use.
+            const datePatch = scope === 'single' ? applyTemplateSingleOccurrenceDateChange(workingTemplate, draft.anchorDate, effectiveFrom) : { anchorDate: draft.anchorDate }
+            workingTemplate = { ...workingTemplate, ...datePatch }
+            patch = { ...patch, anchorDate: scope === 'single' ? template.anchorDate : draft.anchorDate, ...datePatch }
+          }
+          if (Object.keys(patch).length > 0) onSave({ ...draft, ...patch })
+          if (locationChanged) {
+            // Carries its own retroactive transaction rewrite (cleared
+            // rows included), which a plain onSave patch can't do — see
+            // this component's own comment above. Always applies from
+            // this date forward regardless of Amount/Date's single/
+            // all-future choice — it has no single-occurrence mechanism
+            // of its own.
             onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
           }
           setChangeKind(null)
@@ -754,6 +801,15 @@ function BillEditPanel({
           }}
           onSave={(pausedDates) => onSave(setPausedTemplateOccurrences(template, [...pauseWindowOriginalDates], pausedDates))}
           onSaveAmount={(originalDate, newAmount) => onSave(applyTemplateSingleOccurrenceAmountChange(template, newAmount, originalDate))}
+          // 2026-09-14 (Adam-specified) — mirrors TransferRecurringRow's
+          // own onSaveDate wiring exactly (Expenses.tsx): Bills only, not
+          // Loans/Pension/Credit Card/Pot/Savings Pot recurring deposits,
+          // which stay opted out of PausedOccurrencesControl's date-edit
+          // affordance same as before. Same builder, same "Move this
+          // payment?" confirm modal, same occurrenceOverrides mechanism —
+          // walkOccurrences/generateTransactionsForTemplate already pick
+          // it up identically regardless of which template kind wrote it.
+          onSaveDate={(originalDate, newDate) => onSave(applyTemplateSingleOccurrenceDateChange(template, newDate, originalDate))}
         />
       </div>
 

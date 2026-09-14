@@ -130,9 +130,8 @@ function reconcilePensionTransactions(data: AppDataV2): AppDataV2 {
  * there is no UI path anywhere in the app to hand-edit a materialized
  * Transaction's amount when its sourceType is 'recurring_template' — only
  * the owning template itself is ever editable, so there's no hand-entered
- * figure here to trample. Matches by the occurrence's DISPLAY date (an
- * override's own `date` if moved, else `originalDate`), same as
- * walkOccurrences itself.
+ * figure here to trample. 2026-09-14: reconciles `date` the same way, for
+ * the same reason — see this function's own comment on the date fix.
  */
 function reconcileRecurringTemplateTransactions(data: AppDataV2): AppDataV2 {
   let changed = false
@@ -140,16 +139,36 @@ function reconcileRecurringTemplateTransactions(data: AppDataV2): AppDataV2 {
     if (t.sourceType !== 'recurring_template' || !t.sourceId) return t
     const template = data.recurringTemplates.find((tpl) => tpl.id === t.sourceId)
     if (!template) return t
-    const override = template.occurrenceOverrides?.find((o) => (o.date ?? o.originalDate) === t.date)
-    // A deleted occurrence has no live amount to reconcile against — that
-    // already-materialized row is a separate, pre-existing gap (deleting
-    // a future occurrence doesn't retroactively un-clear a past one),
-    // not this fix's concern.
+    // Matched by EITHER the occurrence's natural originalDate (a
+    // materialized row that predates the override, or whose date has
+    // never been moved) OR its current resolved date (a row already
+    // reconciled onto a moved date on some earlier pass) — checking both
+    // makes the match idempotent regardless of which side of a date move
+    // this runs on.
+    const override = template.occurrenceOverrides?.find((o) => o.originalDate === t.date || o.date === t.date)
+    // A deleted occurrence has no live amount/date to reconcile against —
+    // that already-materialized row is a separate, pre-existing gap
+    // (deleting a future occurrence doesn't retroactively un-clear a past
+    // one), not this fix's concern.
     if (override?.deleted) return t
     const amount = override?.amount !== undefined ? override.amount : resolveOccurrenceAmount(template, override?.originalDate ?? t.date)
-    if (amount <= 0 || amount === t.amount) return t
+    // 2026-09-14 (Adam-reported, joint account bill date change) — this
+    // used to only reconcile amount, never date. A per-occurrence date
+    // move (applyTemplateSingleOccurrenceDateChange) correctly redirected
+    // every NOT-YET-materialized occurrence (walkOccurrences reads the
+    // override directly), but an occurrence already materialized into a
+    // real, stored Transaction (pending OR cleared) kept its stale .date
+    // forever — so it never moved on the Home page ledger list, and Step
+    // 1's `t.date > asOfIso` cleared-status check kept comparing against
+    // the old date, silently never clearing a bill whose payment date had
+    // actually moved to today-or-earlier. Now reconciles both fields in
+    // one pass, same "materialized rows are never hand-edited, so this is
+    // always safe" reasoning the amount fix already relied on.
+    const date = override?.date ?? t.date
+    if (amount <= 0) return t
+    if (amount === t.amount && date === t.date) return t
     changed = true
-    return { ...t, amount }
+    return { ...t, amount, date }
   })
   return changed ? { ...data, transactions } : data
 }
