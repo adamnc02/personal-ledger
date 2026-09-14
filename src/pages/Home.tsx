@@ -562,10 +562,14 @@ function SavingsPotCycleGroupedList({
   const sections = cycles.map((cycle, i) => {
     const startIso = toLocalIsoDate(cycle.start)
     const endIso = toLocalIsoDate(cycle.end)
-    // Same "first section absorbs everything up to its own end, no lower
-    // bound" reasoning as CycleGroupedList — see that component's comment.
-    const sectionRows = withRunning.filter(({ row }) => (i === 0 || row.date >= startIso) && row.date <= endIso)
-    const closing = sectionRows.length > 0 ? sectionRows[sectionRows.length - 1].running : carried
+    // 2026-09-14 — bounded on both ends for every section, including the
+    // current one (see CycleGroupedList's own comment on the identical
+    // fix, same reported bug). `closing` still reflects older history
+    // that landed before this cycle's own start via `upToEnd`, which
+    // isn't lower-bounded — only the rendered row list is.
+    const sectionRows = withRunning.filter(({ row }) => row.date >= startIso && row.date <= endIso)
+    const upToEnd = withRunning.filter(({ row }) => row.date <= endIso)
+    const closing = upToEnd.length > 0 ? upToEnd[upToEnd.length - 1].running : carried
     carried = closing
     const visibleRows = sectionRows.filter(({ row }) => showCleared || row.status !== 'cleared')
     return { key: startIso, isCurrent: i === 0, startIso, endIso, visibleRows, closing }
@@ -2034,20 +2038,26 @@ function CycleGroupedList({
   const sections = cycles.map((cycle, i) => {
     const startIso = toLocalIsoDate(cycle.start)
     const endIso = toLocalIsoDate(cycle.end)
-    // The FIRST section has no lower bound. A stored transaction can sit
-    // between the opening balance date and the current cycle's start —
-    // it's inside the projection (which bounds only the top end) and its
-    // value is already inside the fold, so bounding this section at
-    // cycle.start would drop the ROW while keeping its effect on every
-    // later running figure: money moving with nothing on screen to
-    // explain it. Absorbing it into the current cycle keeps the sections
-    // a complete partition of everything the projection returned, which
-    // is what makes the final section's closing figure equal
-    // projectedBalance rather than merely resemble it.
-    const rows = withRunning.filter(({ t }) => (i === 0 || t.date >= startIso) && t.date <= endIso)
-    // Balance carried OUT of this cycle — the last row's running figure,
-    // or, for an empty cycle, whatever came in from the one before.
-    const realClosing = rows.length > 0 ? rows[rows.length - 1].running : carried
+    // Every section, INCLUDING the first/current one, is bounded on both
+    // ends by its own cycle window for DISPLAY purposes — a stored
+    // transaction dated before the current cycle's start (but after the
+    // opening balance date) is real ledger history, but it isn't part of
+    // "this cycle" and showing it there was a reported bug (2026-09-14,
+    // Adam: "extends beyond the bounds of the cycle... shows transactions
+    // and payments from before the cycle's window", worse the longer it's
+    // been since the account was last rebalanced). Its effect on the
+    // BALANCE is still fully accounted for below via `upToEnd`, which
+    // isn't lower-bounded — only the rendered row list is.
+    const rows = withRunning.filter(({ t }) => t.date >= startIso && t.date <= endIso)
+    // Balance carried OUT of this cycle — the running figure of the LAST
+    // transaction dated on/before this cycle's end, cumulative across the
+    // whole window regardless of this section's own display bound (so an
+    // empty-looking current cycle still correctly reflects older history
+    // that landed between the opening balance date and its own start),
+    // or, if there's no transaction at all yet, whatever came in from the
+    // cycle before.
+    const upToEnd = withRunning.filter(({ t }) => t.date <= endIso)
+    const realClosing = upToEnd.length > 0 ? upToEnd[upToEnd.length - 1].running : carried
     // 2026-09-13 (average spend forecast) — a forecast row for this
     // cycle (if any) reduces its closing balance by its own forecast
     // amount, same as a real expense would — and that ADJUSTED figure
