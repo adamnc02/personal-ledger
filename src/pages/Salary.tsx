@@ -566,10 +566,9 @@ interface SavingsPotFields {
 }
 
 /**
- * Shared by the inline form field (above Save/Cancel) AND the new
- * picker-first wizard step below — one `<select>` so both stay in sync
- * by construction rather than risking two independently-maintained
- * copies drifting apart. "Same savings pot" is a synthetic option
+ * The inline "Interest paid into" field on the form itself, above Save/
+ * Cancel — a dropdown, matching every other field on this form (Interest
+ * method, Credited, etc.). "Same savings pot" is a synthetic option
  * representing `undefined`, not one of `locationOptions` (a NEW pot has
  * no id yet to reference itself with — see interestDestination's own
  * comment) — selecting an existing pot's own name from the list below it
@@ -598,6 +597,40 @@ function InterestDestinationField({ value, onChange, locationOptions }: { value:
         </option>
       ))}
     </select>
+  )
+}
+
+/**
+ * The SAME choice, for the picker-first "Where does interest get paid?"
+ * wizard step only (InterestDestinationStep, below) — matches every other
+ * picker-first step's pill shape (LocationStep, TransferSteps.tsx) rather
+ * than the form's own dropdown, each location its own full-width pill,
+ * the current pick highlighted coral. Deliberately a persistent-selection
+ * pill list rather than LocationStep's own "tap to advance" one-shot
+ * picker (this step still has its own separate Back/Save below it, not a
+ * pick-and-close interaction).
+ */
+function InterestDestinationPills({ value, onChange, locationOptions }: { value: TransferLocation | undefined; onChange: (v: TransferLocation | undefined) => void; locationOptions: TransferLocationOption[] }) {
+  const selectedKey = value ? transferLocationKey(value) : 'self'
+  function Pill({ pillKey, label, onPick }: { pillKey: string; label: string; onPick: () => void }) {
+    const selected = selectedKey === pillKey
+    return (
+      <button
+        onClick={onPick}
+        className="w-full text-left px-3 py-2 rounded-xl text-sm"
+        style={{ background: selected ? 'var(--color-coral)' : 'var(--color-surface)', color: selected ? '#fff' : 'var(--color-ink)', fontWeight: selected ? 600 : 400 }}
+      >
+        {label}
+      </button>
+    )
+  }
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Pill pillKey="self" label="Same savings pot" onPick={() => onChange(undefined)} />
+      {locationOptions.map((o) => (
+        <Pill key={o.key} pillKey={o.key} label={o.label} onPick={() => onChange(o.location)} />
+      ))}
+    </div>
   )
 }
 
@@ -893,8 +926,10 @@ export function SavingsPotForm({
  * 2026-09-14 (Adam-specified) — the picker-first flow's own final step,
  * shown after InterestExplanationModal's "Looks good, save": "where does
  * interest get paid?", defaulting to whatever's already picked on the
- * form itself (same state, same InterestDestinationField), with a real
- * Save button that commits. Mirrors InterestExplanationModal's own
+ * form itself (same state), with a real Save button that commits. Uses
+ * InterestDestinationPills (not the form's own dropdown) — Adam-specified:
+ * this picker-first step should match every other picker-first step's
+ * pill shape. Mirrors InterestExplanationModal's own
  * fixed-footer-outside-the-scroll-region layout.
  */
 function InterestDestinationStep({
@@ -920,7 +955,7 @@ function InterestDestinationStep({
         <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-2">Where does interest get paid?</h3>
         <p className="text-xs text-[var(--color-ink-muted)] mb-4">Choose where each interest payment lands — your current account, the joint account, a pot, a savings pot, or this same savings pot.</p>
         <Field label="Interest paid into">
-          <InterestDestinationField value={value} onChange={onChange} locationOptions={locationOptions} />
+          <InterestDestinationPills value={value} onChange={onChange} locationOptions={locationOptions} />
         </Field>
         <div className="flex gap-2 mt-4">
           <button onClick={onBack} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-bg-elevated)' }}>
