@@ -506,8 +506,26 @@ export function generateMinimumPaymentTransactions(
   // Same "already-anchored vs still-to-simulate" cut as lump payments
   // above; spend already inside `workingBalance`/`rangeStart` needs no
   // separate handling here.
+  // BUGFIX (2026-09-16, Adam-reported) — this used to filter ONLY on
+  // `t.date > rangeStartIso`, unlike `cardBalanceAsOf`'s own activity
+  // filter (`t.date >= card.balanceAsOfDate`) that `workingBalance`
+  // above is seeded from. Whenever a caller's `rangeStart` lands BEFORE
+  // the card's own opening/anchor date (routine — autoClear.ts passes
+  // the PERSON's pay-cycle start, unrelated to any one card's own
+  // anchor), a transaction dated between rangeStart and the card's real
+  // anchor (e.g. a spend logged before the card even "opened") satisfied
+  // `t.date > rangeStartIso` and got folded into workingBalance/
+  // statementBalance mid-simulation as if it were real debt — even
+  // though `cardBalanceAsOf` had correctly excluded that exact same
+  // transaction from the OPENING figure a few lines above. The result:
+  // a phantom minimum charge kept regenerating for a period that had
+  // already been manually cleared, driven entirely by this leaked
+  // pre-anchor transaction. Same `>= card.balanceAsOfDate` floor as
+  // cardBalanceAsOf now applies here too, so pre-anchor activity can
+  // never leak into the forward simulation regardless of what
+  // `rangeStart` a caller passes in.
   const pendingSpend = transactions
-    .filter((t) => t.creditCardId === card.id && t.type === 'credit_card_spend' && t.date > rangeStartIso)
+    .filter((t) => t.creditCardId === card.id && t.type === 'credit_card_spend' && t.date >= card.balanceAsOfDate && t.date > rangeStartIso)
     .sort((a, b) => a.date.localeCompare(b.date))
   // The statement-side fold uses a WIDER list than `pendingSpend` above
   // whenever `statementOpeningCloseIso` reaches further back than
@@ -520,7 +538,7 @@ export function generateMinimumPaymentTransactions(
   const pendingSpendForStatement =
     statementOpeningCloseIso != null && statementOpeningCloseIso < rangeStartIso
       ? transactions
-          .filter((t) => t.creditCardId === card.id && t.type === 'credit_card_spend' && t.date > statementOpeningCloseIso)
+          .filter((t) => t.creditCardId === card.id && t.type === 'credit_card_spend' && t.date >= card.balanceAsOfDate && t.date > statementOpeningCloseIso)
           .sort((a, b) => a.date.localeCompare(b.date))
       : pendingSpend
   // Two INDEPENDENT pointers into two lists that may start from different
@@ -902,14 +920,31 @@ export function simulateCardPayoffMonths(card: CreditCard, extraPerMonth = 0, ma
 }
 
 /**
- * Round-robins through SHARED_CARD_COLORS by however many credit
- * cards/pots/savings pots already exist COMBINED — same auto-assignment
- * idea as pickColorForIndex in categories.ts, but on the separate palette
- * described in types/ledger.ts, now shared across all three "card" kinds
- * (2026-09-11) rather than credit cards alone, so none of them repeat a
- * colour as far as the palette's own size allows.
+ * Picks the first SHARED_CARD_COLORS entry not currently held by any
+ * credit card/pot/savings pot, so none of them ever repeat a colour as
+ * far as the palette's own size allows.
+ *
+ * BUGFIX (2026-09-16, Adam-reported — a brand-new card landed on the
+ * exact colour an existing, untouched Bills Pot already had). This used
+ * to key off `data.creditCards.length + data.pots.length +
+ * data.savingsPots.length` — the current LIVE count, not a stable,
+ * ever-increasing counter. Deleting any card/pot/savings pot permanently
+ * decrements that count, so a later-created entity could be re-assigned
+ * an index a still-existing entity already held (e.g.: Bills Pot created
+ * first at index 0; some other card created after it, then deleted;
+ * the next new card's count falls back to a value that recomputes to
+ * index 0 again — landing it on Bills Pot's own colour, even though
+ * Bills Pot itself was never touched). Scanning actual colours-in-use
+ * instead is immune to deletions entirely, at the small cost of no
+ * longer being a pure function of count alone. Falls back to the old
+ * round-robin-by-count behaviour only once every palette colour is
+ * genuinely taken (more of these entities exist than the palette has
+ * colours) — collisions at that point are unavoidable, not a bug.
  */
 export function pickNextSharedCardColor(data: Pick<AppDataV2, 'creditCards' | 'pots' | 'savingsPots'>): string {
+  const usedColors = new Set([...data.creditCards.map((c) => c.color), ...data.pots.map((p) => p.color), ...data.savingsPots.map((p) => p.color)])
+  const firstUnused = SHARED_CARD_COLORS.find((color) => !usedColors.has(color))
+  if (firstUnused) return firstUnused
   const existingCount = data.creditCards.length + data.pots.length + data.savingsPots.length
   return SHARED_CARD_COLORS[existingCount % SHARED_CARD_COLORS.length]
 }
