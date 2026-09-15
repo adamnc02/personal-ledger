@@ -1792,7 +1792,7 @@ function TrendsModal({
                           <>
                             {details.netAmount !== 0 && (
                               <span className="text-xs text-[var(--color-ink-muted)] shrink-0">
-                                £{Math.round(Math.abs(details.netAmount))} {details.netAmount > 0 ? 'IN' : 'OUT'}:
+                                £{Math.round(Math.abs(details.netAmount)).toLocaleString('en-GB')} {details.netAmount > 0 ? 'IN' : 'OUT'}:
                               </span>
                             )}
                             {details.icons.map((ic) => (
@@ -1904,7 +1904,7 @@ function TrendPreview({
     if (current != null && previous != null) {
       const delta = Math.round(current - previous)
       if (delta !== 0) {
-        displayCaption = `Tracking £${Math.abs(delta)} ${delta > 0 ? 'more' : 'less'} than last cycle`
+        displayCaption = `Tracking £${Math.abs(delta).toLocaleString('en-GB')} ${delta > 0 ? 'more' : 'less'} than last cycle`
       }
     }
   }
@@ -1918,7 +1918,7 @@ function TrendPreview({
             View trends <TrendingUp size={13} />
           </span>
         </div>
-        <p className="text-sm font-semibold text-[var(--color-ink)] mb-2">{displayCaption}</p>
+        <p className="text-xs text-[var(--color-ink-faint)] mb-2">{displayCaption}</p>
         <div className="pointer-events-none">
           {previewSeries ? (
             <BalanceSpendChart series={previewSeries} view="balance" color={color} height={64} />
