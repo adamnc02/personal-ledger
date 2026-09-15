@@ -1779,7 +1779,13 @@ function TrendsModal({
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-[var(--color-ink)]">{activeBsPoint ? shortDayLabel(activeBsPoint.date) : cardName}</p>
                   {activeBsPoint && (
-                    <div className="flex items-center gap-1.5 mt-0.5" style={{ minHeight: 20 }}>
+                    // Fixed height, not a min-height: CategoryIcon renders each icon inside a
+                    // `size + 16` chip (32px at the size={16} this row uses), which is TALLER
+                    // than a 20px min-height, so the row still grew whenever a day actually had
+                    // icons — a min-height only binds when content is smaller than it, never
+                    // caps content that's larger. Height 32 + overflow hidden makes this row's
+                    // height constant regardless of whether today has 0 icons or several.
+                    <div className="flex items-center gap-1.5 mt-0.5" style={{ height: 32, overflow: 'hidden' }}>
                       {(() => {
                         const details = balanceSpend.dayDetails?.(activeBsPoint.date)
                         if (!details) return null
