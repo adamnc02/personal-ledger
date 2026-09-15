@@ -680,7 +680,22 @@ function CreditCardRow({
         </div>
 
         {ledgerOpen && (
-          <CreditCardLedgerModal card={card} transactions={transactions} onUpdateMinimumCharge={onUpdateMinimumCharge} onClose={() => setLedgerOpen(false)} />
+          // BUGFIX (2026-09-16, Adam-reported — "Clear" on an EXISTING
+          // card with real transaction history logged double the true
+          // balance due). `card` here is the LIVE variant (see this
+          // component's own prop comment: "currentBalance is the DERIVED
+          // figure, for display") — its `currentBalance` is already the
+          // result of replaying every real transaction onto the stored
+          // anchor, but `balanceAsOfDate` stays at the ORIGINAL anchor
+          // date. Feeding that back into buildCreditCardMinimumChargeRows
+          // (which itself calls cardBalanceAsOf/generateMinimumPaymentTransactions,
+          // both of which start from `card.currentBalance` and then
+          // REPLAY the same real activity from `card.balanceAsOfDate`
+          // onward on top of it) double-counts every transaction between
+          // the anchor and today. `storedCard` is exactly what these
+          // functions expect: currentBalance genuinely AS OF
+          // balanceAsOfDate, nothing replayed into it yet.
+          <CreditCardLedgerModal card={storedCard} transactions={transactions} onUpdateMinimumCharge={onUpdateMinimumCharge} onClose={() => setLedgerOpen(false)} />
         )}
 
         {/* UAT 2026-09-08 (6-bug4-cards): always mounted now — see
@@ -1183,7 +1198,16 @@ function CreditCardEditPanel({
 
       {isOpen && (
         <>
-      <CreditCardDueSection card={card} transactions={transactions} onClearBalance={onClearBalance} />
+      {/* BUGFIX (2026-09-16, Adam-reported): same live-vs-stored confusion as
+          CreditCardLedgerModal above — `card` here is the LIVE variant (see this
+          component's own prop comment: "used for the derived-balance caption
+          only"), and buildCreditCardDueOverviewRows internally re-derives the
+          balance from real activity the same way buildCreditCardMinimumChargeRows
+          does, so it needs `storedCard` too or it double-counts every
+          transaction between the anchor and today — exactly what made "Clear"
+          log double the true balance due on an existing card with real
+          history. */}
+      <CreditCardDueSection card={storedCard} transactions={transactions} onClearBalance={onClearBalance} />
 
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
