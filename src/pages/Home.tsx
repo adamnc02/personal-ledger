@@ -1664,14 +1664,14 @@ function FiltersSheet({
 // ── Trends feature (2026-09-15 build) ──────────────────────────────────
 
 /** Small pill button, reused by TrendsModal's granularity selector and Balance/Spend toggle — same visual language as CycleToggle below, generalised to N options instead of 2. */
-function SegmentedControl<T extends string>({ options, value, onChange }: { options: { value: T; label: string }[]; value: T; onChange: (v: T) => void }) {
+function SegmentedControl<T extends string>({ options, value, onChange, fullWidth }: { options: { value: T; label: string }[]; value: T; onChange: (v: T) => void; fullWidth?: boolean }) {
   return (
-    <div className="flex items-center gap-1 p-1 rounded-full" style={{ background: 'var(--color-bg)' }}>
+    <div className={`flex items-center gap-1 p-1 rounded-full ${fullWidth ? 'w-full' : ''}`} style={{ background: 'var(--color-bg)' }}>
       {options.map((opt) => (
         <button
           key={opt.value}
           onClick={() => onChange(opt.value)}
-          className="px-3 py-1.5 rounded-full text-xs font-semibold transition-colors"
+          className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${fullWidth ? 'flex-1' : ''}`}
           style={{
             background: value === opt.value ? 'var(--color-surface-raised)' : 'transparent',
             color: value === opt.value ? 'var(--color-ink)' : 'var(--color-ink-muted)',
@@ -1714,7 +1714,7 @@ function TrendsModal({
   color: string
   onClose: () => void
   /** Present for personal/joint/household/credit_card/pot cards. `dayIcons` — icon-only (no amounts) category icons for whatever transactions occurred that day, per the spec's tooltip requirement. */
-  balanceSpend?: { buildSeries: (granularity: BalanceSpendGranularity) => BalanceSpendTrendSeries | null; dayIcons?: (dateIso: string) => { key: string; node: ReactNode }[] }
+  balanceSpend?: { buildSeries: (granularity: BalanceSpendGranularity) => BalanceSpendTrendSeries | null; dayDetails?: (dateIso: string) => { icons: { key: string; node: ReactNode }[]; netAmount: number } }
   /** Present for savings_pot cards only. */
   savingsPot?: { buildSeries: (granularity: SavingsPotPillGranularity) => SavingsPotTrendSeries }
 }) {
@@ -1766,15 +1766,36 @@ function TrendsModal({
                 />
               </div>
 
-              {/* Callout: card headline by default, swaps to the tap-and-hold point's own date/value/icons — kept off the chart itself so nothing clashes with the plotted area. */}
-              <div className="w-full rounded-2xl p-3 flex items-center justify-between gap-2" style={{ background: 'var(--color-bg)' }} data-testid="trend-tooltip">
+              {/* Callout: card headline by default (no background — only a real tap-and-hold
+                  tooltip gets one), swaps to the held point's own date + net £IN/OUT + icons on
+                  the left once active. The left column reserves a fixed-height second row
+                  whenever a point is active, so hovering a day with no transactions doesn't
+                  shrink the box relative to one with several category icons. */}
+              <div
+                className="w-full rounded-2xl p-3 flex items-center justify-between gap-2"
+                style={activeBsPoint ? { background: 'var(--color-bg)' } : undefined}
+                data-testid="trend-tooltip"
+              >
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-[var(--color-ink)]">{activeBsPoint ? shortDayLabel(activeBsPoint.date) : cardName}</p>
-                  {activeBsPoint && balanceSpend.dayIcons && balanceSpend.dayIcons(activeBsPoint.date).length > 0 && (
-                    <div className="flex items-center gap-1 mt-0.5">
-                      {balanceSpend.dayIcons(activeBsPoint.date).map((ic) => (
-                        <span key={ic.key}>{ic.node}</span>
-                      ))}
+                  {activeBsPoint && (
+                    <div className="flex items-center gap-1.5 mt-0.5" style={{ minHeight: 20 }}>
+                      {(() => {
+                        const details = balanceSpend.dayDetails?.(activeBsPoint.date)
+                        if (!details) return null
+                        return (
+                          <>
+                            {details.netAmount !== 0 && (
+                              <span className="text-xs text-[var(--color-ink-muted)] shrink-0">
+                                £{Math.round(Math.abs(details.netAmount))} {details.netAmount > 0 ? 'IN' : 'OUT'}:
+                              </span>
+                            )}
+                            {details.icons.map((ic) => (
+                              <span key={ic.key}>{ic.node}</span>
+                            ))}
+                          </>
+                        )
+                      })()}
                     </div>
                   )}
                 </div>
@@ -1792,14 +1813,14 @@ function TrendsModal({
               </div>
 
               <div className="w-full flex items-center justify-between gap-2">
-                <SegmentedControl options={BALANCE_SPEND_GRANULARITY_OPTIONS} value={bsGranularity} onChange={(g) => { setBsGranularity(g); setActiveBsPoint(null) }} />
+                <SegmentedControl fullWidth options={BALANCE_SPEND_GRANULARITY_OPTIONS} value={bsGranularity} onChange={(g) => { setBsGranularity(g); setActiveBsPoint(null) }} />
               </div>
             </>
           )}
 
           {savingsPot && spSeries && (
             <>
-              <div className="w-full rounded-2xl p-3" style={{ background: 'var(--color-bg)' }} data-testid="trend-tooltip">
+              <div className="w-full rounded-2xl p-3" style={activePillPoint ? { background: 'var(--color-bg)' } : undefined} data-testid="trend-tooltip">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-semibold text-[var(--color-ink)]">{activePillPoint ? activePillPoint.tooltipLabel : cardName}</span>
                   <span className="text-lg font-mono font-semibold text-[var(--color-ink)]">
@@ -1818,7 +1839,7 @@ function TrendsModal({
               </div>
 
               <div className="w-full flex items-center justify-between gap-2">
-                <SegmentedControl options={SAVINGS_POT_GRANULARITY_OPTIONS} value={spGranularity} onChange={(g) => { setSpGranularity(g); setActivePillPoint(null) }} />
+                <SegmentedControl fullWidth options={SAVINGS_POT_GRANULARITY_OPTIONS} value={spGranularity} onChange={(g) => { setSpGranularity(g); setActivePillPoint(null) }} />
               </div>
             </>
           )}
@@ -1834,14 +1855,15 @@ function TrendsModal({
  * headline figure + a "View trends" affordance. Tapping anywhere in the
  * section (or the button) opens the full TrendsModal for this card.
  */
-/** Icon-only (no amounts) category icons for whatever ledger-eligible transactions landed on `dateIso` — the Balance/Spend chart tooltip's own requirement, per the prompt doc ("tooltips show category icons... for transactions that occurred that day"). */
-function categoryIconsForDay(transactions: Transaction[], categories: AppDataV2['categories'], dateIso: string): { key: string; node: ReactNode }[] {
-  return transactions
-    .filter((t) => t.date === dateIso && isLedgerTransaction(t))
-    .map((t) => {
-      const category = categories.find((c) => c.id === t.categoryId)
-      return { key: t.id, node: <CategoryIcon category={category} size={16} /> }
-    })
+/** Category icons + net signed movement for whatever ledger-eligible transactions landed on `dateIso` — the Balance/Spend chart tooltip's requirement (icons per the prompt doc; the net "£X IN/OUT" figure per the reference screenshots, shown left of the icons). */
+function dayDetailsForDay(transactions: Transaction[], categories: AppDataV2['categories'], dateIso: string): { icons: { key: string; node: ReactNode }[]; netAmount: number } {
+  const dayTx = transactions.filter((t) => t.date === dateIso && isLedgerTransaction(t))
+  const icons = dayTx.map((t) => {
+    const category = categories.find((c) => c.id === t.categoryId)
+    return { key: t.id, node: <CategoryIcon category={category} size={16} /> }
+  })
+  const netAmount = dayTx.reduce((sum, t) => sum + signedAmount(t), 0)
+  return { icons, netAmount }
 }
 
 function TrendPreview({
@@ -1856,12 +1878,33 @@ function TrendPreview({
   color: string
   headline: string
   caption: string
-  balanceSpend?: { buildSeries: (granularity: BalanceSpendGranularity) => BalanceSpendTrendSeries | null; dayIcons?: (dateIso: string) => { key: string; node: ReactNode }[] }
+  balanceSpend?: { buildSeries: (granularity: BalanceSpendGranularity) => BalanceSpendTrendSeries | null; dayDetails?: (dateIso: string) => { icons: { key: string; node: ReactNode }[]; netAmount: number } }
   savingsPot?: { buildSeries: (granularity: SavingsPotPillGranularity) => SavingsPotTrendSeries }
 }) {
   const [open, setOpen] = useState(false)
   const previewSeries = balanceSpend ? balanceSpend.buildSeries('this_cycle') : null
   const previewPillSeries = savingsPot ? savingsPot.buildSeries('this_cycle') : null
+
+  // Trend-indicator caption: compares this cycle's spend-to-date against the
+  // same relative day last cycle (the one comparison the data layer already
+  // computes, via `previousPeriodSpend` — there's no previous-period BALANCE
+  // series today, so this reads spend trajectory rather than balance
+  // trajectory even on a card whose headline above is a balance figure).
+  // Falls back to the caller's own static caption when there's no prior
+  // cycle to compare against yet (new account, or a card with no
+  // balanceSpend comparison data at all, e.g. Savings Pot).
+  let displayCaption = caption
+  if (previewSeries && previewSeries.previousPeriodSpend.length > 0) {
+    const idx = previewSeries.days.indexOf(previewSeries.todayIso)
+    const current = previewSeries.spend[idx]?.spendToDate
+    const previous = previewSeries.previousPeriodSpend[idx]?.spendToDate
+    if (current != null && previous != null) {
+      const delta = Math.round(current - previous)
+      if (delta !== 0) {
+        displayCaption = `Tracking £${Math.abs(delta)} ${delta > 0 ? 'more' : 'less'} than last cycle`
+      }
+    }
+  }
 
   return (
     <>
@@ -1873,7 +1916,7 @@ function TrendPreview({
           </span>
         </div>
         <p className="text-lg font-mono font-semibold text-[var(--color-ink)]">{headline}</p>
-        <p className="text-xs text-[var(--color-ink-faint)] mb-2">{caption}</p>
+        <p className="text-xs text-[var(--color-ink-faint)] mb-2">{displayCaption}</p>
         <div className="pointer-events-none">
           {previewSeries ? (
             <BalanceSpendChart series={previewSeries} view="balance" color={color} height={64} />
@@ -2743,7 +2786,7 @@ function PersonalDetail({
           caption="Today's balance"
           balanceSpend={{
             buildSeries: (g) => buildPersonalTrendSeries(data, data.primaryPersonId, payCycle, g, new Date()),
-            dayIcons: (d) => categoryIconsForDay(projection.transactions, data.categories, d),
+            dayDetails: (d) => dayDetailsForDay(projection.transactions, data.categories, d),
           }}
         />
       </HomeSection>
@@ -3056,7 +3099,7 @@ function JointDetail({
             caption="Today's balance"
             balanceSpend={{
               buildSeries: (g) => buildJointTrendSeries(data, g, new Date()),
-              dayIcons: (d) => categoryIconsForDay(jointProjection.transactions, data.categories, d),
+              dayDetails: (d) => dayDetailsForDay(jointProjection.transactions, data.categories, d),
             }}
           />
         </HomeSection>
@@ -3158,7 +3201,7 @@ function PotDetail({
           caption="Today's balance"
           balanceSpend={{
             buildSeries: (g) => buildPotTrendSeries(data, pot, g, new Date()),
-            dayIcons: (d) => categoryIconsForDay(projection.transactions, data.categories, d),
+            dayDetails: (d) => dayDetailsForDay(projection.transactions, data.categories, d),
           }}
         />
       </HomeSection>
@@ -3337,7 +3380,7 @@ function HouseholdDetail({
           caption="Combined balance today"
           balanceSpend={{
             buildSeries: (g) => buildHouseholdTrendSeries(data, g, new Date()),
-            dayIcons: (d) => categoryIconsForDay(combinedTransactions, data.categories, d),
+            dayDetails: (d) => dayDetailsForDay(combinedTransactions, data.categories, d),
           }}
         />
       </HomeSection>
@@ -3607,7 +3650,7 @@ function CreditCardDetail({
           caption="Owed today"
           balanceSpend={{
             buildSeries: (g) => buildCreditCardTrendSeries(data, storedCard, g, new Date()),
-            dayIcons: (d) => categoryIconsForDay(data.transactions.filter((t) => t.creditCardId === card.id), data.categories, d),
+            dayDetails: (d) => dayDetailsForDay(data.transactions.filter((t) => t.creditCardId === card.id), data.categories, d),
           }}
         />
       </HomeSection>

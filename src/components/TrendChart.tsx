@@ -18,7 +18,7 @@
 // build self-contained without an extra install/lockfile step.
 
 import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import type { BalanceSpendTrendSeries, DailyBalancePoint } from '../lib/runningBalance'
+import type { BalanceSpendTrendSeries } from '../lib/runningBalance'
 import type { SavingsPotPillPoint, SavingsPotTrendSeries } from '../lib/savingsPotLedger'
 
 // ── Shared formatting ───────────────────────────────────────────────────
@@ -95,30 +95,41 @@ export function BalanceSpendChart({ series, view, color, interactive = false, he
   let dottedPoints: { x: number; y: number; date: string; value: number }[] = []
   let comparePoints: { x: number; y: number }[] = []
   let allValues: number[] = []
+  let yScale: (v: number) => number
 
   if (view === 'balance') {
     allValues = series.balance.flatMap((b) => [b.clearedBalance, b.projectedBalance])
-    const yScale = makeYScale(allValues, height, padTop, padBottom)
-    const toPoint = (b: DailyBalancePoint, i: number, useProjected: boolean) => ({
-      x: scaleX(i, days.length),
-      y: yScale(useProjected ? b.projectedBalance : b.clearedBalance),
-      date: b.date,
-      value: useProjected ? b.projectedBalance : b.clearedBalance,
+    yScale = makeYScale(allValues, height, padTop, padBottom)
+    solidPoints = series.balance.slice(0, splitIdx + 1).map((b, i) => ({ x: scaleX(i, days.length), y: yScale(b.clearedBalance), date: b.date, value: b.clearedBalance }))
+    // The dotted continuation starts exactly where the solid line ends (today's real
+    // clearedBalance), then tracks the SAME shape/deltas the projected series takes from
+    // there on — rather than jumping straight to today's own projectedBalance, which can
+    // already differ from clearedBalance (e.g. a bill pending today) and made the two
+    // segments visibly disconnect at the join.
+    const baseCleared = series.balance[splitIdx].clearedBalance
+    const baseProjected = series.balance[splitIdx].projectedBalance
+    dottedPoints = series.balance.slice(splitIdx).map((b, i) => {
+      const value = baseCleared + (b.projectedBalance - baseProjected)
+      return { x: scaleX(i + splitIdx, days.length), y: yScale(value), date: b.date, value }
     })
-    solidPoints = series.balance.slice(0, splitIdx + 1).map((b, i) => toPoint(b, i, false))
-    dottedPoints = series.balance.slice(splitIdx).map((b, i) => toPoint(b, i + splitIdx, true))
   } else {
     allValues = [...series.spend.map((s) => s.spendToDate), ...series.previousPeriodSpend.map((s) => s.spendToDate)]
-    const yScale = makeYScale(allValues, height, padTop, padBottom)
+    yScale = makeYScale(allValues, height, padTop, padBottom)
     solidPoints = series.spend.slice(0, splitIdx + 1).map((s, i) => ({ x: scaleX(i, days.length), y: yScale(s.spendToDate), date: s.date, value: s.spendToDate }))
     dottedPoints = series.spend.slice(splitIdx).map((s, i) => ({ x: scaleX(i + splitIdx, days.length), y: yScale(s.spendToDate), date: s.date, value: s.spendToDate }))
     comparePoints = series.previousPeriodSpend.map((s, i) => ({ x: scaleX(i, days.length), y: yScale(s.spendToDate) }))
   }
 
-  const baselineY = makeYScale(allValues, height, padTop, padBottom)(Math.min(0, ...allValues))
+  const zeroY = yScale(0)
+  // Area fill baseline sits at zero, not the axis minimum — so shading always reads as
+  // "distance above/below zero" and doesn't bleed into the below-zero band the balance
+  // view shades separately (see the zero-line rect below).
+  const baselineY = zeroY
 
   function valueAt(i: number): number {
-    return view === 'balance' ? (i <= splitIdx ? series.balance[i].clearedBalance : series.balance[i].projectedBalance) : (series.spend[i]?.spendToDate ?? 0)
+    if (view !== 'balance') return series.spend[i]?.spendToDate ?? 0
+    if (i <= splitIdx) return series.balance[i].clearedBalance
+    return series.balance[splitIdx].clearedBalance + (series.balance[i].projectedBalance - series.balance[splitIdx].projectedBalance)
   }
 
   function hitTest(clientX: number) {
@@ -181,7 +192,14 @@ export function BalanceSpendChart({ series, view, color, interactive = false, he
           </>
         )}
 
-        {view === 'spend' && (
+        {view === 'balance' && (
+          <rect x={0} y={zeroY} width={WIDTH} height={Math.max(0, height - padBottom - zeroY)} fill="rgba(255,255,255,0.035)" />
+        )}
+        {view === 'balance' && (
+          <line x1={0} y1={zeroY} x2={WIDTH} y2={zeroY} stroke="var(--color-track)" strokeWidth={1} />
+        )}
+
+        {(view === 'spend' || view === 'balance') && (
           <path d={areaPath(solidPoints, baselineY)} fill={color} opacity={activeIndex !== null ? 0.08 : 0.16} />
         )}
         {view === 'spend' && comparePoints.length > 1 && (
