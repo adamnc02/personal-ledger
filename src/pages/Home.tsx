@@ -2517,6 +2517,7 @@ function DateOrderedList({
   groupByDirection,
   forecast,
   forecastEndIso,
+  cycleStartIso,
 }: {
   transactions: Transaction[]
   data: AppDataV2
@@ -2524,6 +2525,20 @@ function DateOrderedList({
   showCleared: boolean
   amountSign?: (t: Transaction) => number
   groupByDirection?: boolean
+  /**
+   * 2026-09-16 (Adam-reported — same bug as 758aeed's CycleGroupedList/
+   * SavingsPotCycleGroupedList fix, just never applied here): this is the
+   * "This cycle" horizon's own flat list (CycleGroupedList renders instead
+   * once "Next 3 cycles"/Cycle-end totals is active) — `transactions` isn't
+   * lower-bounded by the caller (a stored row between the account's
+   * opening-balance date and this cycle's own start is still needed for the
+   * RUNNING BALANCE fold below), so with Show cleared on, every cleared
+   * transaction since the account's last rebalance rendered here, not just
+   * this cycle's own. Optional purely so a caller with no real cycle concept
+   * to bound by (none currently) doesn't have to invent one; every real
+   * caller now passes it.
+   */
+  cycleStartIso?: string
   /**
    * 2026-09-14 (Adam-reported, "This cycle" horizon) — the average spend
    * forecast used to only ever appear inside CycleGroupedList, which
@@ -2551,7 +2566,7 @@ function DateOrderedList({
     running += sign(t)
     return { t, running }
   })
-  const visible = withRunning.filter(({ t }) => showCleared || t.status !== 'cleared')
+  const visible = withRunning.filter(({ t }) => (showCleared || t.status !== 'cleared') && (!cycleStartIso || t.date >= cycleStartIso))
   const hasForecast = !!forecast && forecast.forecastAmount > 0
   const finalRunning = visible.length > 0 ? visible[visible.length - 1].running : openingRunningBalance
 
@@ -2786,6 +2801,7 @@ function PersonalDetail({
             openingRunningBalance={projection.openingBalance}
             showCleared={showCleared}
             groupByDirection={groupByDirection}
+            cycleStartIso={toLocalIsoDate(cycles[0].start)}
             forecast={forecastByCycle?.get(toLocalIsoDate(cycles[0].start))}
             forecastEndIso={toLocalIsoDate(cycles[0].end)}
           />
@@ -3088,6 +3104,7 @@ function JointDetail({
               showCleared={showCleared}
               amountSign={jointAccountSignedAmount}
               groupByDirection={groupByDirection}
+              cycleStartIso={toLocalIsoDate(cycles[0].start)}
               forecast={forecastByCycle?.get(toLocalIsoDate(cycles[0].start))}
               forecastEndIso={toLocalIsoDate(cycles[0].end)}
             />
@@ -3201,6 +3218,7 @@ function PotDetail({
             showCleared={showCleared}
             amountSign={potSignedAmount}
             groupByDirection={groupByDirection}
+            cycleStartIso={toLocalIsoDate(cycles[0].start)}
           />
         )}
       </HomeSection>
@@ -3281,7 +3299,7 @@ function PersonGroupedList({
                   showCleared={showCleared}
                 />
               ) : (
-                <DateOrderedList transactions={pp.transactions} data={data} openingRunningBalance={pp.openingBalance} showCleared={showCleared} />
+                <DateOrderedList transactions={pp.transactions} data={data} openingRunningBalance={pp.openingBalance} showCleared={showCleared} cycleStartIso={toLocalIsoDate(pp.cycles[0].start)} />
               ))}
           </div>
         )
@@ -3379,7 +3397,7 @@ function HouseholdDetail({
             groupByDirection={groupByDirection}
           />
         ) : (
-          <DateOrderedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} showCleared={showCleared} groupByDirection={groupByDirection} />
+          <DateOrderedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} showCleared={showCleared} groupByDirection={groupByDirection} cycleStartIso={toLocalIsoDate(combinedCycles[0].start)} />
         )}
       </HomeSection>
 
