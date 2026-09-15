@@ -9,7 +9,10 @@
 
 import { addMonths, addQuarters, addWeeks, addYears } from 'date-fns'
 import { nanoid } from 'nanoid'
-import type { RecurringTemplate, Transaction } from '../types/ledger'
+import type { PayCycleConfig, RecurringOccurrenceOverride, RecurringTemplate, Transaction } from '../types/ledger'
+import { upcomingPaydays } from './salaryLedger'
+import { nextCycleStartAfter } from './payCycle'
+import { categoryForTransfer } from './transferLedger'
 
 function daysInMonth(year: number, monthIndex0: number): number {
   return new Date(year, monthIndex0 + 1, 0).getDate()
@@ -90,10 +93,70 @@ export function resolveTemplateAmount(template: RecurringTemplate, dateIso: stri
   return applicable[0]?.amount ?? template.amount
 }
 
+/**
+ * What a SPECIFIC occurrence resolves to, checking `occurrenceOverrides`
+ * (a "just a single payment" edit, or any other per-occurrence override)
+ * before falling back to `resolveTemplateAmount`'s standing-history walk —
+ * the same order walkOccurrences already applies when generating real
+ * transactions. UAT 2026-09-09 (ed-bills-just-single) — display-only call
+ * sites (the "manage paused payments" preview) were calling
+ * resolveTemplateAmount directly, which has no awareness of
+ * occurrenceOverrides at all, so a single-occurrence amount change
+ * correctly updated the real ledger but silently never showed up there —
+ * this is the shared, correct resolver every such display should use
+ * instead. `originalDate` is the occurrence's UN-overridden scheduled
+ * date (the key occurrenceOverrides itself uses), not a possibly-moved
+ * display date.
+ */
+export function resolveOccurrenceAmount(template: RecurringTemplate, originalDate: string): number {
+  const override = template.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
+  if (override?.amount !== undefined) return override.amount
+  return resolveTemplateAmount(template, originalDate)
+}
+
 export interface RawOccurrence {
-  originalDate: string // the naturally-scheduled date, before any per-occurrence override
-  date: string // the displayed/effective date — same as originalDate unless overridden
+  originalDate: string // the naturally-scheduled date, before any per-occurrence override AND before any payday/cycle-start resolution
+  date: string // the displayed/effective date — resolved against payday/cycle-start (for a follows-payday/follows-cycle-start transfer) and/or overridden
   amount: number
+}
+
+/**
+ * What a `kind: 'transfer'` template's occurrence date resolves to once
+ * `followsPayday`/`followsCycleStart` is taken into account — a
+ * follows-payday transfer resolves its date against the actual payday
+ * on/after `rawDate`, rather than using that date directly, so a
+ * transfer can "land on payday" even when payday itself drifts
+ * (weekends/bank holidays, non-monthly pay frequencies); a
+ * follows-cycle-start transfer does the same against the person's
+ * budgeting-cycle boundary instead (Salary Sorter session, 2026-09) —
+ * for someone whose cycle doesn't track payday (PayCycleConfig.
+ * cycleStartFollowsPayday can differ from payday entirely). Falls back
+ * to `rawDate` untouched if no payCycle was supplied, or the template
+ * isn't a transfer, or neither flag is set. followsPayday takes
+ * precedence if both are somehow set (the two are meant to be mutually
+ * exclusive, enforced by the UI — this is just a defined tie-break
+ * rather than an unreachable branch).
+ *
+ * UAT 2026-09-10 (recurring-payday-date-editing) — this used to live
+ * ONLY inside generateTransactionsForTemplate, applied AFTER
+ * walkOccurrences returned, so every other consumer of walkOccurrences
+ * (templateOccurrencePreviews, and anything built on top of it) saw the
+ * raw, unresolved, naturally-walked date instead — the real generated
+ * transaction landed correctly, but "Manage upcoming payments" and any
+ * other preview surface showed the wrong date for a follows-payday/
+ * follows-cycle-start transfer. Extracted here so every caller of
+ * walkOccurrences (and scheduledTemplateDates, which does its own
+ * separate walk) applies the exact same resolution.
+ */
+export function resolveTemplateOccurrenceDate(rawDate: string, template: RecurringTemplate, payCycle?: PayCycleConfig): string {
+  const isTransferKind = template.kind === 'transfer'
+  if (isTransferKind && template.followsPayday && payCycle) {
+    return toIso(upcomingPaydays(payCycle, new Date(rawDate), 1)[0] ?? new Date(rawDate))
+  }
+  if (isTransferKind && template.followsCycleStart && payCycle) {
+    return toIso(nextCycleStartAfter(new Date(rawDate), payCycle))
+  }
+  return rawDate
 }
 
 /**
@@ -108,8 +171,18 @@ export interface RawOccurrence {
  * entirely, an edited one carries its overridden date/amount. Templates
  * with kind 'bill' (or absent) never carry occurrenceOverrides, so this
  * is a no-op for them.
+ *
+ * `payCycle`, when supplied, is threaded into resolveTemplateOccurrenceDate
+ * so a follows-payday/follows-cycle-start TRANSFER's displayed `date` is
+ * resolved the same way here as generateTransactionsForTemplate always
+ * did — `originalDate` (the override-matching key) is deliberately left
+ * as the natural, UNRESOLVED date; only `date` (what's actually shown or
+ * written to a real Transaction) is resolved. Note this resolves
+ * whatever the "natural or overridden" date already is — i.e. even a
+ * per-occurrence-moved date gets payday-resolved, matching
+ * generateTransactionsForTemplate's pre-existing behaviour exactly.
  */
-function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd: Date): RawOccurrence[] {
+function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd: Date, payCycle?: PayCycleConfig): RawOccurrence[] {
   if (!template.active) return []
   if (rangeEnd < rangeStart) return []
 
@@ -130,9 +203,10 @@ function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd
     const originalDate = toIso(cursor)
     const override = template.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
     if (!override?.deleted) {
+      const rawDate = override?.date ?? originalDate
       results.push({
         originalDate,
-        date: override?.date ?? originalDate,
+        date: resolveTemplateOccurrenceDate(rawDate, template, payCycle),
         amount: override?.amount ?? resolveTemplateAmount(template, originalDate),
       })
     }
@@ -143,37 +217,66 @@ function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd
   return results
 }
 
+/**
+ * `payCycle` is only used for a `kind: 'transfer'` template with
+ * `followsPayday: true` OR `followsCycleStart: true` — every other kind
+ * ignores it entirely, so existing callers that don't have one to hand
+ * (or are generating for a pot/joint account rather than the primary
+ * person) can keep omitting it. See TransferLocation/RecurringTemplate.
+ * followsPayday/followsCycleStart in types/ledger.ts for the full
+ * reasoning. If a template somehow has both set, followsPayday wins —
+ * the two are meant to be mutually exclusive (enforced by the UI), this
+ * is just a defined tie-break rather than an unreachable branch.
+ */
 export function generateTransactionsForTemplate(
   template: RecurringTemplate,
   rangeStart: Date,
   rangeEnd: Date,
+  payCycle?: PayCycleConfig,
 ): Omit<Transaction, 'id'>[] {
   const isTransactionKind = template.kind === 'transaction'
+  const isTransferKind = template.kind === 'transfer'
   const isIncome = isTransactionKind && template.recurringTransactionType === 'income'
+  const fromLoc = isTransferKind ? template.transferFrom : undefined
+  const toLoc = isTransferKind ? template.transferTo : undefined
 
-  return walkOccurrences(template, rangeStart, rangeEnd).map((occ) => ({
-    date: occ.date,
-    amount: occ.amount,
-    direction: isTransactionKind ? (isIncome ? 'in' : 'out') : 'out',
-    categoryId: template.categoryId,
-    paymentMethod: template.paymentMethod,
-    status: 'pending',
-    type: isTransactionKind ? template.recurringTransactionType! : 'bill_payment',
-    location: template.location,
-    ownerId: template.ownerId,
-    payee: template.payee,
-    payeeSharePercent: template.payeeSharePercent,
-    sourceType: 'recurring_template',
-    sourceId: template.id,
-    // The specific bill's/recurring transaction's own name — without
-    // this, a row falls back to its category's name for display, which
-    // duplicates the category group header when viewed grouped by
-    // category (e.g. a "TV" category group whose own rows also just say
-    // "TV" instead of "TV License").
-    note: template.name,
-    personId: isIncome ? template.personId : undefined,
-  }))
+  return walkOccurrences(template, rangeStart, rangeEnd, payCycle).map((occ) => {
+    return {
+      date: occ.date,
+      amount: occ.amount,
+      direction: isTransferKind ? (fromLoc?.type === 'personal' ? 'out' : 'in') : isTransactionKind ? (isIncome ? 'in' : 'out') : 'out',
+      categoryId: isTransferKind ? categoryForTransfer(fromLoc, toLoc) : template.categoryId,
+      paymentMethod: template.paymentMethod,
+      status: 'pending',
+      type: isTransferKind ? 'transfer' : isTransactionKind ? template.recurringTransactionType! : 'bill_payment',
+      location: template.location,
+      ownerId: template.ownerId,
+      payee: template.payee,
+      payeeSharePercent: template.payeeSharePercent,
+      // Pots backlog item (2026-09-03) — carried straight through only
+      // when this template is actually pot-located (a pot-funded bill),
+      // OR (2026-09-04) when this is a transfer with a pot on either
+      // end — same convention as creditCardId/savingsPotId being set
+      // only on the transaction types that need them.
+      potId: isTransferKind ? (fromLoc?.type === 'pot' ? fromLoc.potId : toLoc?.type === 'pot' ? toLoc.potId : undefined) : template.location === 'pot' ? template.potId : undefined,
+      savingsPotId: isTransferKind ? (fromLoc?.type === 'savings' ? fromLoc.savingsPotId : toLoc?.type === 'savings' ? toLoc.savingsPotId : undefined) : undefined,
+      fromLocation: fromLoc,
+      toLocation: toLoc,
+      followsPayday: isTransferKind ? template.followsPayday : undefined,
+      followsCycleStart: isTransferKind ? template.followsCycleStart : undefined,
+      sourceType: 'recurring_template',
+      sourceId: template.id,
+      // The specific bill's/recurring transaction's/transfer's own name —
+      // without this, a row falls back to its category's name for
+      // display, which duplicates the category group header when viewed
+      // grouped by category (e.g. a "TV" category group whose own rows
+      // also just say "TV" instead of "TV License").
+      note: template.name,
+      personId: isIncome ? template.personId : undefined,
+    }
+  })
 }
+
 
 /**
  * Every upcoming occurrence for a 'transaction'-kind template, WITH its
@@ -185,8 +288,108 @@ export function generateTransactionsForTemplate(
  * occurrence currently displays. 15 years covers even an annual
  * frequency's `count` occurrences comfortably.
  */
-export function templateOccurrencePreviews(template: RecurringTemplate, asOfDate: Date, count: number): RawOccurrence[] {
-  return walkOccurrences(template, asOfDate, addYears(asOfDate, 15)).slice(0, count)
+export function templateOccurrencePreviews(template: RecurringTemplate, asOfDate: Date, count: number, payCycle?: PayCycleConfig): RawOccurrence[] {
+  return walkOccurrences(template, asOfDate, addYears(asOfDate, 15), payCycle).slice(0, count)
+}
+
+/**
+ * Every calendar date the template's frequency would land on in
+ * [rangeStart, rangeEnd] — deliberately IGNORING occurrenceOverrides
+ * entirely, unlike walkOccurrences/generateTransactionsForTemplate. This
+ * is what the pause picker itself needs to show as candidates: a
+ * currently-paused date has to appear in the list so it can be unchecked,
+ * which the normal (pause-aware) walk would never surface — a paused
+ * date isn't a real occurrence any more, generator-side. Same shape and
+ * purpose as savingsPotLedger.ts's scheduledDepositDates (Phase 4 —
+ * generalizing the SavingsPot-only pause picker to Bills/Pensions too).
+ *
+ * `payCycle`, when supplied, resolves each natural date the same way
+ * walkOccurrences does for a follows-payday/follows-cycle-start
+ * TRANSFER template (UAT 2026-09-10) — this function has its own
+ * independent anchor-stepping loop rather than calling walkOccurrences
+ * (deliberately, to keep ignoring occurrenceOverrides per the comment
+ * above), so it needs the same resolution applied explicitly here too,
+ * or the pause picker's candidate dates would disagree with what
+ * "Manage upcoming payments" actually shows/generates.
+ *
+ * UAT 2026-09-11 (manage-upcoming-payments-override-key-bug) — this used
+ * to return only the resolved `string[]`, discarding the natural
+ * anchor-walked date entirely. Every caller then wrongly used that
+ * RESOLVED date as if it were the `originalDate` key that
+ * occurrenceOverrides actually store and walkOccurrences actually looks
+ * up by, so pausing/amount-editing a follows-payday transfer's next
+ * occurrence via "Manage upcoming payments" silently failed to apply
+ * (Adam's exact repro). Now returns the same `{ originalDate, date }`
+ * pair shape as RawOccurrence — `originalDate` is the natural,
+ * unresolved key for override matching, `date` is what should be
+ * displayed/sorted by. Callers must key all identity/override
+ * operations off `.originalDate` and only use `.date` for display.
+ */
+export function scheduledTemplateDates(
+  template: RecurringTemplate,
+  rangeStart: Date,
+  rangeEnd: Date,
+  payCycle?: PayCycleConfig,
+): { originalDate: string; date: string }[] {
+  if (rangeEnd < rangeStart) return []
+  const anchor = new Date(template.anchorDate)
+  const anchorDay = anchor.getDate()
+  let cursor = anchor
+  let iterations = 0
+  while (cursor < rangeStart && iterations < MAX_OCCURRENCES) {
+    cursor = nextOccurrence(cursor, template, anchorDay)
+    iterations++
+  }
+  const results: { originalDate: string; date: string }[] = []
+  while (cursor <= rangeEnd && iterations < MAX_OCCURRENCES) {
+    const originalDate = toIso(cursor)
+    results.push({ originalDate, date: resolveTemplateOccurrenceDate(originalDate, template, payCycle) })
+    cursor = nextOccurrence(cursor, template, anchorDay)
+    iterations++
+  }
+  return results
+}
+
+/**
+ * Given the FULL set of dates the person now wants paused (from a
+ * multi-select checklist drawn from scheduledTemplateDates), reconciles
+ * occurrenceOverrides to match — a newly-checked date gets `deleted: true`
+ * merged onto its existing override entry (if any), an unchecked one has
+ * `deleted` cleared from its entry, anything already correct is left
+ * alone. Overrides outside the shown window are untouched.
+ *
+ * UAT 2026-09-11 (bill-pause-after-amount-override) — this used to keep
+ * any date/amount-carrying entry as a separate "untouched" record and
+ * then unconditionally APPEND a brand-new `{originalDate, deleted: true}`
+ * entry alongside it for any date being paused — so an occurrence that
+ * already had a single-occurrence amount override ended up with TWO
+ * entries sharing the same originalDate. `walkOccurrences`'s `.find()`
+ * always matches the FIRST one (the untouched amount-only entry, since it
+ * was spread before the new pause entry), so the `deleted: true` entry
+ * was silently unreachable and pausing an already-amount-overridden
+ * occurrence did nothing. Now MERGES `deleted` onto the SAME entry a
+ * prior amount/date override lives on, instead of ever creating a second
+ * entry for one date — same merge-in-place pattern
+ * applyTemplateSingleOccurrenceAmountChange already uses for the amount
+ * side.
+ */
+export function setPausedTemplateOccurrences(template: RecurringTemplate, windowDates: string[], pausedDates: string[]): Pick<RecurringTemplate, 'occurrenceOverrides'> {
+  const windowSet = new Set(windowDates)
+  const pausedSet = new Set(pausedDates)
+  const outside = (template.occurrenceOverrides ?? []).filter((o) => !windowSet.has(o.originalDate))
+  const priorByDate = new Map((template.occurrenceOverrides ?? []).filter((o) => windowSet.has(o.originalDate)).map((o) => [o.originalDate, o]))
+  const merged: RecurringOccurrenceOverride[] = []
+  for (const originalDate of windowSet) {
+    const prior = priorByDate.get(originalDate)
+    const isPaused = pausedSet.has(originalDate)
+    if (!isPaused && prior?.date === undefined && prior?.amount === undefined) continue
+    const entry: RecurringOccurrenceOverride = { originalDate }
+    if (prior?.date !== undefined) entry.date = prior.date
+    if (prior?.amount !== undefined) entry.amount = prior.amount
+    if (isPaused) entry.deleted = true
+    merged.push(entry)
+  }
+  return { occurrenceOverrides: [...outside, ...merged] }
 }
 
 /**
@@ -195,18 +398,89 @@ export function templateOccurrencePreviews(template: RecurringTemplate, asOfDate
  * follow-up picker) — preserves the OLD amount as a history entry so
  * anything before `effectiveFrom` keeps resolving to it, exactly as
  * salaryLedger.ts's snapshot list does for a pay rise.
+ *
+ * UAT 2026-09-09 (retest2-bills-single-before-allfuture-untouched) — a
+ * PERMANENT change now DROPS every existing candidate (every
+ * amountHistory entry, and the current amount/amountEffectiveFrom pair)
+ * whose OWN effectiveFrom is on/after the new `effectiveFrom`, instead of
+ * just appending one more entry on top of whatever's already there.
+ * Confirmed as a real, serious bug otherwise, via Adam's own repro: edit
+ * a bill to £39 effective 1 Sept, then again to £40 effective 1 Nov, then
+ * try to set it back to £37 effective 1 Sept (i.e. an effective date
+ * EARLIER than a change that's already recorded further in the future).
+ * The naive "always append" version kept the old {effectiveFrom: 1 Nov,
+ * amount: £40} entry sitting in history — resolveTemplateAmount always
+ * picks the single LATEST effectiveFrom <= the query date, so for any
+ * date on/after 1 Nov, that stale, later-dated entry kept OUTRANKING the
+ * new 1-Sept change and resurrected the £40 the person had just tried to
+ * overwrite. The fix: an entry whose effectiveFrom >= the new
+ * effectiveFrom was only ever relevant for dates >= its own
+ * effectiveFrom — exactly the range the new change now fully owns — so
+ * it can be dropped outright rather than kept around to wrongly compete.
+ * Entries with effectiveFrom < the new effectiveFrom are genuinely
+ * unaffected (dates before the new change still need them) and are kept
+ * as-is. Same "supersede everything from this date forward" fix applied
+ * to `occurrenceOverrides`' amount half, for the identical reason.
  */
 export function applyTemplateAmountChange(
   template: RecurringTemplate,
   newAmount: number,
   effectiveFrom: string,
-): Pick<RecurringTemplate, 'amount' | 'amountEffectiveFrom' | 'amountHistory'> {
-  const priorEntry = { effectiveFrom: template.amountEffectiveFrom ?? template.anchorDate, amount: template.amount }
+): Pick<RecurringTemplate, 'amount' | 'amountEffectiveFrom' | 'amountHistory' | 'occurrenceOverrides'> {
+  const priorCandidates = [...(template.amountHistory ?? []), { effectiveFrom: template.amountEffectiveFrom ?? template.anchorDate, amount: template.amount }]
+  const amountHistory = priorCandidates.filter((c) => c.effectiveFrom < effectiveFrom)
+  const occurrenceOverrides = (template.occurrenceOverrides ?? [])
+    .map((o) => (o.originalDate >= effectiveFrom && o.amount !== undefined ? { ...o, amount: undefined } : o))
+    .filter((o) => o.date !== undefined || o.amount !== undefined || o.deleted !== undefined)
   return {
     amount: newAmount,
     amountEffectiveFrom: effectiveFrom,
-    amountHistory: [...(template.amountHistory ?? []), priorEntry],
+    amountHistory,
+    occurrenceOverrides,
   }
+}
+
+/**
+ * Builds the patch for a SINGLE-occurrence ("just a single payment")
+ * amount change — reuses the existing occurrenceOverrides mechanism
+ * (already used for pausing/moving one occurrence) rather than inventing
+ * a new field, since it already carries exactly this per-occurrence
+ * "amount overridden, nothing else about this template touched" shape.
+ * Merges onto any existing override for the same slot (e.g. one that was
+ * previously moved to a different date) rather than clobbering it.
+ */
+export function applyTemplateSingleOccurrenceAmountChange(
+  template: RecurringTemplate,
+  newAmount: number,
+  originalDate: string,
+): Pick<RecurringTemplate, 'occurrenceOverrides'> {
+  const existing = template.occurrenceOverrides ?? []
+  const priorEntry = existing.find((o) => o.originalDate === originalDate)
+  const withoutThis = existing.filter((o) => o.originalDate !== originalDate)
+  return { occurrenceOverrides: [...withoutThis, { ...priorEntry, originalDate, amount: newAmount }] }
+}
+
+/**
+ * Builds the patch for a SINGLE-occurrence date change — mirrors
+ * `applyTemplateSingleOccurrenceAmountChange` exactly, same reasoning:
+ * reuses `occurrenceOverrides`'s existing `date` field (already read
+ * generically by `walkOccurrences`, see its own comment) rather than a
+ * new mechanism. Merges onto any existing override for the same slot
+ * (e.g. one that already has an amount override) instead of clobbering
+ * it. `newDate` is the natural (pre-payday-resolution) date the caller
+ * wants this occurrence to fall on instead — `walkOccurrences` still
+ * runs it through the same payday/cycle-start resolution as every other
+ * date, exactly like the natural, un-overridden date would be.
+ */
+export function applyTemplateSingleOccurrenceDateChange(
+  template: RecurringTemplate,
+  newDate: string,
+  originalDate: string,
+): Pick<RecurringTemplate, 'occurrenceOverrides'> {
+  const existing = template.occurrenceOverrides ?? []
+  const priorEntry = existing.find((o) => o.originalDate === originalDate)
+  const withoutThis = existing.filter((o) => o.originalDate !== originalDate)
+  return { occurrenceOverrides: [...withoutThis, { ...priorEntry, originalDate, date: newDate }] }
 }
 
 /**

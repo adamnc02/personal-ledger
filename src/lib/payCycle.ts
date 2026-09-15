@@ -152,6 +152,24 @@ export function nominalPayday(year: number, monthIndex0: number, dayOfMonth: num
 }
 
 /**
+ * Walks backward from `date` until it lands on a working day — the core
+ * step resolvePayday already did inline for a nominal day-of-month
+ * payday. Pulled out as its own function so pensionLedger.ts can apply
+ * the identical UK weekend/bank-holiday adjustment to a pension's own
+ * (non-day-of-month, potentially weekly) schedule, rather than
+ * duplicating this logic. Behaviour-preserving for resolvePayday itself
+ * — same 10-day sanity guard, same backward-only direction.
+ */
+export function adjustToWorkingDay(date: Date): Date {
+  if (isWorkingDay(date)) return date
+  let candidate = date
+  for (let i = 0; i < 10 && !isWorkingDay(candidate); i++) {
+    candidate = addDays(candidate, -1)
+  }
+  return candidate
+}
+
+/**
  * Resolves the actual payday for a given month: the nominal day, or — if
  * adjustForNonWorkingDay is true and that day is a weekend/bank holiday —
  * the last working day on or before it.
@@ -163,16 +181,7 @@ export function resolvePayday(
   adjustForNonWorkingDay: boolean,
 ): Date {
   const nominal = nominalPayday(year, monthIndex0, dayOfMonth)
-  if (!adjustForNonWorkingDay || isWorkingDay(nominal)) return nominal
-
-  let candidate = nominal
-  // Walk backward until we land on a working day. Bounded to 10 days as a
-  // sanity guard — no real UK payday config should ever need more than a
-  // long weekend + one bank holiday's worth of stepping back.
-  for (let i = 0; i < 10 && !isWorkingDay(candidate); i++) {
-    candidate = addDays(candidate, -1)
-  }
-  return candidate
+  return adjustForNonWorkingDay ? adjustToWorkingDay(nominal) : nominal
 }
 
 // ── Cycle boundary ──────────────────────────────────────────────────────
@@ -293,6 +302,22 @@ export function cycleBoundsForDate(referenceDate: Date, cycle: number | CycleBou
   const end = addDays(nextCycleStart, -1)
 
   return { start, end }
+}
+
+/**
+ * The start date of the NEXT cycle strictly after the one containing
+ * `date` — the cycle-boundary equivalent of salaryLedger.ts's
+ * upcomingPaydays (which also only ever returns dates strictly after its
+ * `fromDate`, never `fromDate` itself). Used by schedule.ts to resolve a
+ * `followsCycleStart` transfer occurrence (Salary Sorter session,
+ * 2026-09) the same way a `followsPayday` one resolves against
+ * upcomingPaydays — see Transaction.followsCycleStart's own comment in
+ * types/ledger.ts for why this exists as a sibling to followsPayday
+ * rather than reusing it.
+ */
+export function nextCycleStartAfter(date: Date, cycle: number | CycleBoundarySpec): Date {
+  const bounds = cycleBoundsForDate(date, cycle)
+  return cycleBoundsForDate(addDays(bounds.end, 1), cycle).start
 }
 
 /** Convenience: which numbered cycle (relative to `start`) `date` falls into, 0 = the cycle containing start. */

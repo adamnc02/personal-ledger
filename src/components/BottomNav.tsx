@@ -3,7 +3,7 @@ import { Home, Wallet, Landmark, Receipt, Banknote, FlaskConical } from 'lucide-
 
 const TABS = [
   { to: '/', label: 'Home', icon: Home, end: true },
-  { to: '/salary', label: 'Salary', icon: Wallet },
+  { to: '/salary', label: 'Wallet', icon: Wallet },
   { to: '/loans', label: 'Borrowing', icon: Landmark },
   { to: '/bills', label: 'Bills', icon: Receipt },
   { to: '/expenses', label: 'Transactions', icon: Banknote },

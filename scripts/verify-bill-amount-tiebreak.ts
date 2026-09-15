@@ -62,10 +62,20 @@ const baseTemplate: RecurringTemplate = {
   const afterEdit1: RecurringTemplate = { ...baseTemplate, ...applyTemplateAmountChange(baseTemplate, 40, '2026-08-29') }
   const afterEdit2: RecurringTemplate = { ...afterEdit1, ...applyTemplateAmountChange(afterEdit1, 150, '2026-09-05') }
 
-  check('amountHistory records both prior values, even though they share a date', afterEdit2.amountHistory, [
-    { effectiveFrom: '2026-08-29', amount: 150 },
-    { effectiveFrom: '2026-08-29', amount: 40 },
-  ])
+  // UAT 2026-09-09 (retest2-bills-single-before-allfuture-untouched) —
+  // applyTemplateAmountChange now DROPS any candidate whose own
+  // effectiveFrom is on/after the NEW effectiveFrom being set (a separate
+  // fix for a separate real bug: an out-of-order edit, effective earlier
+  // than an already-recorded later change, used to leave that later
+  // change sitting in history to wrongly outrank the new one). One
+  // consequence: the very first edit's anchorDate-same-day fallback entry
+  // (effectiveFrom === anchorDate === the chosen effectiveFrom here) no
+  // longer gets recorded at all — there's nothing before the anchor date
+  // for it to ever have described anyway. So this sequence now produces
+  // a single, clean entry rather than two duplicate-dated ones; the
+  // still-messier literal shape below ("Pre-existing corrupted data
+  // self-heals") is tested separately and remains fully self-healing.
+  check('amountHistory records a single clean entry for the £40 week (no more duplicate-dated entries need to be produced going forward)', afterEdit2.amountHistory, [{ effectiveFrom: '2026-08-29', amount: 40 }])
   check('The one genuine week at £40 is visible on its own date', resolveTemplateAmount(afterEdit2, '2026-08-29'), 40)
   check('A date between the two changes still resolves to £40', resolveTemplateAmount(afterEdit2, '2026-09-01'), 40)
   check('From the second effective date onward, back to £150', resolveTemplateAmount(afterEdit2, '2026-09-05'), 150)

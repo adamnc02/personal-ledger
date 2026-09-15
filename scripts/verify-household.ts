@@ -75,6 +75,7 @@ function baseData(overrides: Partial<AppDataV2>): AppDataV2 {
     creditCards: [],
     transactions: [],
     payCycles: [],
+    pensions: [],
     scenarios: [],
     primaryPersonId: 'me',
     ...overrides,
@@ -151,6 +152,25 @@ const untouched = reconcilePersonReferences(
   }),
 )
 check('A healthy single-person setup is left exactly as-is', untouched.recurringTemplates[0], bill({ ownerId: 'adam' }))
+
+// ---- 6. Pensions and savings pots are ALSO reassigned, not just left dangling —
+// this was a real gap found in the UI consistency review: everything above already
+// worked, these two didn't. ----
+const pensionAndPotReassigned = reconcilePersonReferences({
+  ...baseData({ people: [person('adam', 'Adam')], primaryPersonId: 'adam' }),
+  pensions: [{ id: 'p1', personId: 'me', name: 'State Pension', amount: 500, frequency: 'monthly', anchorDate: '2026-01-01', active: true, adjustForNonWorkingDay: false, cycleStartFollowsPayday: false }],
+  savingsPots: [{ id: 'sp1', personId: 'me', name: 'Rainy day', openingBalance: 0, openingDate: '2026-01-01', active: true, interestMethod: { type: 'aer_credited', aer: 4, creditingFrequency: 'monthly' } }],
+})
+check('A pension owned by a removed person is reassigned to the fallback', pensionAndPotReassigned.pensions[0].personId, 'adam')
+check('A savings pot owned by a removed person is reassigned to the fallback', pensionAndPotReassigned.savingsPots[0].personId, 'adam')
+
+// ---- 7. A fixture that omits pensions/savingsPots entirely (the shape every fixture
+// above already uses) must not crash — this is the exact regression a first pass at
+// fix #6 introduced (data.pensions.map on undefined) before adding the `?? []` guard. ----
+const missingArraysFixture = reconcilePersonReferences(
+  baseData({ people: [person('adam', 'Adam')], primaryPersonId: 'adam' }),
+)
+check('Reconciling data with no pensions/savingsPots arrays at all does not throw', Array.isArray(missingArraysFixture.pensions), true)
 
 if (failures > 0) {
   console.log(`\n${failures} check(s) FAILED.`)

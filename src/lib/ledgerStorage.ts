@@ -5,7 +5,7 @@
 // new application, not an in-place schema migration (Section 4).
 
 import { nanoid } from 'nanoid'
-import type { AppDataV2, CreditCard, PayCycleConfig, Person, Transaction } from '../types/ledger'
+import { SHARED_CARD_COLORS, type AppDataV2, type CreditCard, type PayCycleConfig, type Person, type Transaction } from '../types/ledger'
 import { defaultCategories } from './categories'
 import { reconcilePersonReferences } from './household'
 import { monthlyInterestRate } from './creditCards'
@@ -88,9 +88,34 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
     // runs exactly once per card and re-running migration on
     // already-migrated data is a no-op.
     creditCards: (data.creditCards ?? []).map((card) => (card.balanceAsOfDate ? card : anchorLegacyCardBalance(card, data.transactions ?? []))),
+    pensions: data.pensions ?? [],
+    // `color` is a NEW REQUIRED field (2026-09-11, shared-palette work —
+    // see SHARED_CARD_COLORS's own comment in types/ledger.ts). Every
+    // savings pot/pot persisted before it existed shared ONE fixed colour
+    // per kind (Home.tsx's old SAVINGS_POT_HERO_COLOR/POT_HERO_COLOR
+    // constants) — indistinguishable from each other, and POT_HERO_COLOR
+    // happened to collide with Personal's own coral. Backfilled here in
+    // array order, continuing the round-robin from wherever the already-
+    // coloured credit cards leave off, so an existing pot/savings pot
+    // gets a real, stable, non-repeating identity the first time this
+    // runs rather than staying on the old collapsed-to-one-colour default.
+    savingsPots: backfillSharedCardColors(data.savingsPots ?? [], data.creditCards?.length ?? 0),
+    pots: backfillSharedCardColors(data.pots ?? [], (data.creditCards?.length ?? 0) + (data.savingsPots?.length ?? 0)),
     transactions: data.transactions ?? [],
     payCycles: data.payCycles ?? [],
+    // Absent on any backup persisted before the Salary Sorter session
+    // (2026-09) — defaults to no sorts ever having been done, same as a
+    // brand-new household. See SalarySort's own comment in
+    // types/ledger.ts.
+    salarySorts: data.salarySorts ?? [],
     scenarios: data.scenarios ?? [],
+    // Absent on any backup persisted before the joint-account feature —
+    // defaults to null (not yet set up), same as a brand-new household.
+    // If a joint-location bill/loan already exists in this data,
+    // needsJointAccountSetup (lib/jointAccountLedger.ts) picks that up on
+    // next render and prompts for it, same as it would for a newly
+    // created one — nothing here guesses an opening balance/date.
+    jointAccount: data.jointAccount ?? null,
   }
 
   // Self-heals any bill/loan/card left pointing at a person who no longer
@@ -106,14 +131,40 @@ export function saveLedgerData(data: AppDataV2): void {
   }
 }
 
-export function downloadLedgerBackup(data: AppDataV2): void {
+/**
+ * A plain `<a download>` click is what iOS Safari renders as its Quick
+ * Look preview screen (file icon, "Open in X" / "More..." only) rather
+ * than the native Share Sheet — reported 2026-09-15 (Adam: "I'd rather it
+ * take me straight to [the Share Sheet]"). `navigator.share` with a real
+ * `File` goes straight to the Share Sheet (AirDrop, Messages, Mail, Save
+ * to Files, etc.) on platforms that support file sharing. Falls back to
+ * the original Blob+anchor download wherever that isn't available
+ * (desktop browsers, older iOS/Android) — same resulting file either way.
+ */
+export async function downloadLedgerBackup(data: AppDataV2): Promise<void> {
   const json = JSON.stringify(data, null, 2)
   const date = toLocalIsoDate(new Date())
+  const filename = `finance-ledger-backup-${date}.json`
   const blob = new Blob([json], { type: 'application/json' })
+  const file = new File([blob], filename, { type: 'application/json' })
+
+  const nav = navigator as Navigator & { canShare?: (data?: ShareData) => boolean }
+  if (nav.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: filename })
+      return
+    } catch (err) {
+      // AbortError = the user dismissed the Share Sheet themselves — that's
+      // a normal cancel, not a failure, so don't also pop a download prompt.
+      if (err instanceof Error && err.name === 'AbortError') return
+      // Any other failure: fall through to the plain download below.
+    }
+  }
+
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `finance-ledger-backup-${date}.json`
+  a.download = filename
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -158,9 +209,14 @@ export function defaultLedgerData(): AppDataV2 {
     recurringTemplates: [],
     loans: [],
     creditCards: [],
+    pensions: [],
+    savingsPots: [],
+    pots: [],
     transactions: [],
     payCycles: [defaultPayCycleConfig(meId)],
+    salarySorts: [],
     scenarios: [],
+    jointAccount: null,
   }
 }
 
@@ -196,4 +252,22 @@ function anchorLegacyCardBalance(card: CreditCard, transactions: Transaction[]):
   }
 
   return { ...card, currentBalance: Math.max(0, balance), balanceAsOfDate: today }
+}
+
+/**
+ * Backfills a missing `color` on a pre-shared-palette Pot/SavingsPot,
+ * continuing SHARED_CARD_COLORS' round-robin from `startIndex` (the count
+ * of "card" entities already coloured ahead of this collection — see the
+ * call site in migrateLedgerData). Already-coloured entries are left
+ * alone; only ones actually missing the field advance the counter, so two
+ * runs of migration never reshuffle an already-backfilled colour.
+ */
+function backfillSharedCardColors<T extends { color?: string }>(items: T[], startIndex: number): (T & { color: string })[] {
+  let next = startIndex
+  return items.map((item) => {
+    if (item.color) return item as T & { color: string }
+    const color = SHARED_CARD_COLORS[next % SHARED_CARD_COLORS.length]
+    next += 1
+    return { ...item, color }
+  })
 }

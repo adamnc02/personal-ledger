@@ -27,7 +27,7 @@
 // wrong), and this file adds the dated view on top.
 
 import { computeProjectionToDate } from './projection'
-import { cycleBoundsForDate } from './payCycle'
+import { resolveCycleBounds } from './pensionLedger'
 import { isLedgerTransaction, signedAmount } from './runningBalance'
 import { toLocalIsoDate } from './date'
 import type { AppDataV2, PayCycleConfig } from '../types/ledger'
@@ -96,7 +96,7 @@ export function computePurchaseImpacts(
   // arbitrarily far in the future and a horizon that stopped short would
   // silently omit every bill and payday between the horizon and the
   // purchase date — reporting an inflated balance rather than an error.
-  const cycleFor = (iso: string) => cycleBoundsForDate(parseIsoDate(iso), payCycle)
+  const cycleFor = (iso: string) => resolveCycleBounds(data, personId, parseIsoDate(iso))
   const lastCycleEnd = purchases.reduce((latest, p) => {
     const end = cycleFor(p.purchaseDate!).end
     return end > latest ? end : latest

@@ -227,6 +227,7 @@ const staleData = {
   creditCards: [],
   transactions: [],
   payCycles: [],
+  pensions: [],
   scenarios: [],
   primaryPersonId: '',
 } as unknown as AppDataV2

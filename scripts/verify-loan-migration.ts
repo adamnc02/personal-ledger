@@ -41,6 +41,7 @@ const rawData = {
   creditCards: [],
   transactions: [],
   payCycles: [],
+  pensions: [],
   scenarios: [],
 } as unknown as AppDataV2
 

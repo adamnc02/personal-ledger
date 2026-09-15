@@ -29,7 +29,18 @@ export interface Person {
   savingsEntries: SavingsEntry[]
 }
 
-export type BillLocation = 'personal' | 'joint'
+// 'pot' added 2026-09-03 (App Dev.md "Pots" backlog item) — a bill/loan's
+// regular payment can now be funded from a Pot instead of the current
+// account, as a genuine third location alongside personal/joint (NOT an
+// additive field layered on top of 'personal' — confirmed with Adam,
+// since a pot is a real destination the same way 'joint' already is, and
+// every place that already branches on location gets the third case for
+// free rather than needing a second, parallel "paidFrom" concept). Pots
+// are only ever linked to a single person, never joint — see Pot in
+// ledger.ts. A 'pot'-location RecurringTemplate/Loan carries `potId`
+// (ledger.ts) identifying which one; `ownerId` still identifies whose
+// personal account it nominally belongs to, unchanged in meaning.
+export type BillLocation = 'personal' | 'joint' | 'pot'
 
 export interface Bill {
   id: string
@@ -141,6 +152,21 @@ export interface Scenario {
     // whole point is to see the balance ON that day, so the date is part
     // of the action rather than something the summary infers.
     purchaseDate?: string // ISO date
+    // Used by 'pay_off_loan' and 'loan_overpayment' when at least one
+    // target is a loan (not a credit card — see item d's scope) — when
+    // the lump sum lands, or when the recurring extra payment starts.
+    // Undefined on scenarios saved before this field existed, which keeps
+    // resolving to "today" (calculateScenarioImpact's prior, only
+    // behaviour); the form itself requires an explicit pick for anything
+    // saved from now on, deliberately with no default.
+    date?: string // ISO date
+    // 'pay_off_loan' only, and only meaningful for loan targets — reduce
+    // the term (default, keep the payment, finish sooner) or reduce the
+    // monthly payment (keep the term, pay less each month). A recurring
+    // 'loan_overpayment' never gets this choice — reducing ITS payment
+    // would normally mean actually calling the lender, unlike a lump sum
+    // — so it's always treated as reduce_term regardless of this field.
+    recastMode?: 'reduce_term' | 'reduce_payment'
     personId?: string // for 'salary_change' and 'savings_lump_sum' — whose salary/goal this applies to (defaults to the viewer)
     savingsEntryId?: string // for 'savings_lump_sum' — which of that person's savings goals it targets
     // Used by 'new_bill' and 'new_finance_agreement' — where the new cost sits and how it's split

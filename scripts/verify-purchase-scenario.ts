@@ -78,6 +78,7 @@ const data: AppDataV2 = {
   creditCards: [],
   transactions: [tx('bill-a', '2026-09-10', 200, 'pending'), tx('bill-b', '2026-09-25', 300, 'pending')],
   payCycles: [payCycle],
+  pensions: [],
   scenarios: [],
 } as unknown as AppDataV2
 
@@ -231,6 +232,7 @@ const legacyData: AppData = {
   bills: [],
   loans: [],
   creditCards: [],
+  pensions: [],
   scenarios: [],
   primaryPersonId: 'p1',
 }

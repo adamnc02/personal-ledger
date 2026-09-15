@@ -18,10 +18,31 @@
 // the bug this replaced.
 
 import { nanoid } from 'nanoid'
-import { CREDIT_CARD_CATEGORY_ID, CREDIT_CARD_COLORS, type CreditCard, type CreditCardLumpPayment, type Transaction } from '../types/ledger'
+import { addDays } from 'date-fns'
+import { CREDIT_CARD_CATEGORY_ID, SHARED_CARD_COLORS, type AppDataV2, type CreditCard, type CreditCardLumpPayment, type Transaction } from '../types/ledger'
+import { daysBetweenInclusive, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries, type DailyBalancePoint } from './runningBalance'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 import { toLocalIsoDate as toIso } from './date'
+
+// BUGFIX (Batch 8, 2026-09-07, Bug 9.2, Adam-reported): a percent_of_balance
+// minimum payment is mathematically a fraction of whatever's left, so a
+// balance approaching zero shrinks GEOMETRICALLY (£0.79 -> £0.75 -> £0.71
+// -> ...) rather than ever landing on exactly zero — round2 alone doesn't
+// help, since each of those figures rounds to a perfectly normal-looking
+// non-zero penny amount in its own right. Concretely: Adam logged a
+// payment for the FULL balance due on the card's own payment day, which
+// correctly zeroed the balance for that cycle — but the interest accrual
+// due the NEXT cycle (a fraction of a still-technically-positive
+// leftover) kept reintroducing a few pence, and a percent-of-balance
+// minimum kept charging a few pence of THAT, forever, despite the card
+// being genuinely "cleared" from a real person's point of view. Once a
+// balance is this negligible, treat it as paid off outright — no further
+// interest compounds on it, and no further minimum charge gets generated
+// for it — rather than let the two rules perpetuate a shrinking-but-
+// never-quite-zero trail indefinitely. Matches Adam's own "below £0.02"
+// description of the residue exactly.
+const NEGLIGIBLE_BALANCE = 0.02
 
 /**
  * The monthly rate that compounds to the given APR over a year — NOT a
@@ -38,7 +59,7 @@ export function monthlyInterestRate(interestRatePercent: number): number {
 
 /** One cycle's interest, applied to a balance. Deliberately simplified — no daily accrual, no interest-free grace period on new purchases, interest just compounds monthly against whatever the balance is at each billing cycle. Same "clearly-scoped approximation" philosophy as the tax engine's own documented simplifications elsewhere in this app. */
 export function applyMonthlyInterest(balance: number, interestRatePercent: number): number {
-  if (balance <= 0) return balance
+  if (balance <= NEGLIGIBLE_BALANCE) return 0
   return round2(balance * (1 + monthlyInterestRate(interestRatePercent)))
 }
 
@@ -49,7 +70,7 @@ export function applyMonthlyInterest(balance: number, interestRatePercent: numbe
  * the What-if page's card payoff/overpayment simulation).
  */
 export function minimumPaymentForBalance(minimumPayment: CreditCard['minimumPayment'], balance: number): number {
-  if (balance <= 0) return 0
+  if (balance <= NEGLIGIBLE_BALANCE) return 0
   if (minimumPayment.type === 'fixed') return round2(Math.min(minimumPayment.amount, balance))
   return round2((balance * minimumPayment.percent) / 100)
 }
@@ -71,7 +92,22 @@ export function minimumPaymentForBalance(minimumPayment: CreditCard['minimumPaym
  */
 export function computeMinimumPaymentAmount(card: CreditCard): number {
   const balanceWithInterest = applyMonthlyInterest(card.currentBalance, card.interestRatePercent)
-  return minimumPaymentForBalance(card.minimumPayment, balanceWithInterest)
+  const computedMinimum = minimumPaymentForBalance(card.minimumPayment, balanceWithInterest)
+  // UAT 2026-09-08 (8-bug9.2-minimum-charges-stop) — same amortisation-
+  // deadlock guard as generateMinimumPaymentTransactions: if the computed
+  // minimum wouldn't leave the balance any lower than it stood before
+  // this cycle's interest, it's not keeping pace with interest — the
+  // whole remaining balance is due instead of perpetuating a residue.
+  // Restricted the same way, and for the same reason, as that function's
+  // own guard: only when a percent_of_balance minimum's UNROUNDED
+  // theoretical amount would have exceeded this cycle's interest — i.e.
+  // rounding, not the policy itself, is what erased the progress. A
+  // fixed minimum (or a percent genuinely too small for the rate) is a
+  // real debt trap, not a bug — the balance is meant to grow.
+  const interestThisCycle = balanceWithInterest - card.currentBalance
+  const roundingCouldExplainDeadlock = card.minimumPayment.type === 'percent_of_balance' && (balanceWithInterest * card.minimumPayment.percent) / 100 > interestThisCycle
+  if (computedMinimum > 0 && roundingCouldExplainDeadlock && round2(balanceWithInterest - computedMinimum) >= card.currentBalance) return balanceWithInterest
+  return computedMinimum
 }
 
 /**
@@ -137,6 +173,7 @@ export function nextMinimumChargeAmount(card: CreditCard, transactions: Transact
 export function cardBalanceAsOf(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): number {
   const asOfIso = toIso(asOfDate)
   const anchorIso = card.balanceAsOfDate
+  const hasStatementWindow = card.statementStartDay != null && card.statementEndDay != null
 
   const activity = transactions
     .filter(
@@ -153,13 +190,103 @@ export function cardBalanceAsOf(card: CreditCard, transactions: Transaction[], a
   // kinds of event correctly interleaved when they land in the same
   // cycle, without iterating day by day over what could be years.
   const billingDates = billingDatesBetween(card.paymentDayOfMonth, anchorIso, asOfIso)
-  const allDates = [...new Set([...billingDates, ...activity.map((t) => t.date)])].sort()
+  // BUGFIX (2026-09-09, statement-window grace-timing) — each billing
+  // date's own statement-window close, so the walk below can tell WHEN a
+  // window genuinely closed, not just which calendar day is due. See
+  // `previousCloseSnapshot` below for why this matters. Only meaningful
+  // once a window is configured; empty otherwise, leaving non-window
+  // cards on the exact `balanceEnteringCycle` mechanism they always used.
+  const closeDates = hasStatementWindow
+    ? billingDates.map((d) => toIso(statementCloseDateForPaymentDate(card, new Date(d)))).filter((d) => d > anchorIso && d <= asOfIso)
+    : []
+  const allDates = [...new Set([...billingDates, ...closeDates, ...activity.map((t) => t.date)])].sort()
 
   let balance = card.currentBalance
+  // UAT 2026-09-08 (8-bug9.2, Adam-requested grace period) — a real card
+  // charges no interest on new spend at all if the account entered the
+  // billing cycle already fully paid off; interest only starts (and, in
+  // real cards, applies retroactively) once a balance is actually being
+  // carried/revolved. `balanceEnteringCycle` is frozen at the value the
+  // balance held right after the PREVIOUS billing date's own interest +
+  // same-day activity — i.e. what carries INTO this cycle, before this
+  // cycle's own new spend gets added — so it survives however much new
+  // spend accumulates before this cycle's own billing date is reached.
+  // Used directly for non-window cards; a statement-window card uses
+  // `windowBalance`/`windowEnteringSnapshot` instead — see below.
+  let balanceEnteringCycle = card.currentBalance
+  // BUGFIX (2026-09-09, statement-window grace-timing, root cause
+  // confirmed against Adam's £20/14th-Oct repro; real-UK-T&Cs grace
+  // policy per Adam, same date) — `balanceEnteringCycle` above answers
+  // "what carried into the last calendar billing date," which is the
+  // wrong question once a statement window is involved: a purchase
+  // posted after its own window's close doesn't even belong to the next
+  // calendar due date at all — it rolls into the ONE AFTER that, per the
+  // same statement-window rule `generateMinimumPaymentTransactions`
+  // already uses for minimum-charge dates. `windowBalance` mirrors that
+  // function's own `workingBalance`/`statementBalance` split: it tracks
+  // the same real activity as `balance`, except new SPEND only folds in
+  // once its own window has closed (via `spendQueue` below) — payments
+  // still apply immediately on their own date, same as `balance`, since
+  // real payments are never window-gated. `windowEnteringSnapshot` is
+  // `windowBalance` as it stood right after the PREVIOUS billing date's
+  // own full processing (interest + same-day activity) — i.e. genuinely
+  // "was the previous statement's balance paid off by its own due date,"
+  // which correctly sees a payoff dated between a window's close and its
+  // due date (an earlier version of this fix, keyed off the close date
+  // alone, couldn't see such a payment and wrongly kept charging interest
+  // after a genuine full payoff — caught by the "re-earn grace" check in
+  // verify-credit-card-amortization-deadlock.ts).
+  let windowBalance = card.currentBalance
+  let windowEnteringSnapshot = card.currentBalance
+  const spendQueue = activity.filter((t) => t.type === 'credit_card_spend')
+  let spendQueueIndex = 0
   for (const date of allDates) {
-    if (billingDates.includes(date)) balance = applyMonthlyInterest(balance, card.interestRatePercent)
+    if (billingDates.includes(date)) {
+      const entering = hasStatementWindow ? windowEnteringSnapshot : balanceEnteringCycle
+      if (entering > NEGLIGIBLE_BALANCE) {
+        balance = applyMonthlyInterest(balance, card.interestRatePercent)
+        if (hasStatementWindow) windowBalance = applyMonthlyInterest(windowBalance, card.interestRatePercent)
+      } else {
+        // Grace applies (nothing carried into this cycle) AND there's no
+        // new spend to charge interest-free either — still snap a
+        // lingering negligible-dust residual to exactly zero, same as
+        // applyMonthlyInterest's own guard would have done had it run.
+        // Skipping this call entirely (for the grace case) must not also
+        // resurrect the pre-Batch-8 stuck-forever-at-a-penny bug. Checked
+        // independently for each balance — they can genuinely differ
+        // (`windowBalance` lags `balance` until a window closes). Uses
+        // Math.abs — see the BUGFIX comment on `windowBalance`'s payment
+        // application just below for why a genuinely negative value must
+        // survive this snap, not just a tiny positive one.
+        if (balance <= NEGLIGIBLE_BALANCE) balance = 0
+        if (hasStatementWindow && Math.abs(windowBalance) <= NEGLIGIBLE_BALANCE) windowBalance = 0
+      }
+    }
     for (const t of activity.filter((a) => a.date === date)) {
       balance = t.type === 'credit_card_spend' ? round2(balance + t.amount) : round2(Math.max(0, balance - t.amount))
+      // BUGFIX (2026-09-09, UAT-reported: clearing an early due date
+      // wrongly zeroed a later, genuinely separate one) — deliberately
+      // NOT clamped to 0 like `balance` just above. A payment sized off
+      // `balance` (the true running total, e.g. via buildCreditCardDueOverviewRows'
+      // Clear button) can be MORE than `windowBalance` currently reflects,
+      // because `windowBalance` only picks up a purchase once its own
+      // window closes — `balance` already includes it the moment it's
+      // spent. Clamping here would silently discard that difference;
+      // letting it go negative instead means it nets cleanly to zero once
+      // the delayed purchase's window finally closes and folds it in
+      // (see the spend-queue fold below), rather than that purchase
+      // resurrecting a bogus "still owed" figure once it arrives.
+      if (hasStatementWindow && t.type === 'credit_card_payment') windowBalance = round2(windowBalance - t.amount)
+    }
+    if (hasStatementWindow && closeDates.includes(date)) {
+      while (spendQueueIndex < spendQueue.length && spendQueue[spendQueueIndex].date <= date) {
+        windowBalance = round2(windowBalance + spendQueue[spendQueueIndex].amount)
+        spendQueueIndex++
+      }
+    }
+    if (billingDates.includes(date)) {
+      balanceEnteringCycle = balance
+      if (hasStatementWindow) windowEnteringSnapshot = windowBalance
     }
   }
   return round2(Math.max(0, balance))
@@ -181,6 +308,60 @@ function billingDatesBetween(paymentDayOfMonth: number, afterIso: string, throug
     guard++
   }
   return results
+}
+
+/**
+ * Which statement window's close a given payment date belongs to (item
+ * e) — the most recent occurrence of `statementEndDay` before
+ * `paymentDate`. Both days recur once a month, and Adam confirmed
+ * exactly one close happens between a window's close and its own due
+ * date, so this is a plain day-number comparison rather than a real walk:
+ * if the close day is numerically EARLIER in the month than the payment
+ * day, the relevant close already happened THIS month; otherwise (equal
+ * or later) it happened the month before — matches the worked example
+ * (close 18th, due 14th: 18 >= 14, so the close is the 18th of the
+ * PRECEDING month). Only called once `card.statementEndDay` is set.
+ */
+function statementCloseDateForPaymentDate(card: CreditCard, paymentDate: Date): Date {
+  const endDay = card.statementEndDay!
+  const year = paymentDate.getFullYear()
+  const month = paymentDate.getMonth()
+  if (endDay < card.paymentDayOfMonth) {
+    const daysInMonth = new Date(year, month + 1, 0).getDate()
+    return new Date(year, month, Math.min(endDay, daysInMonth))
+  }
+  const daysInPrevMonth = new Date(year, month, 0).getDate()
+  return new Date(year, month - 1, Math.min(endDay, daysInPrevMonth))
+}
+
+/**
+ * The most recent statement-window close on or before `dateIso` — used to
+ * find where a fresh simulation's OPENING statement balance should be cut
+ * off from (see `generateMinimumPaymentTransactions`'s `statementBalance`
+ * initialisation). BUGFIX (2026-09-09, statement-window grace-timing,
+ * same root cause family as the interest-timing fix): a fresh card with
+ * no stored minimum-charge history yet always starts its simulation
+ * range AT `asOfDate` (today) — so a purchase posted only days ago, whose
+ * window genuinely hasn't closed, was being folded straight into the
+ * OPENING statementBalance uninspected, since that init line used to just
+ * copy `workingBalance` wholesale. Checks a small window of candidate
+ * due-date months around `dateIso` (paymentDayOfMonth only shifts a
+ * close's month, never which day of the month it recurs on, so a handful
+ * of months either side is always enough to find the nearest one).
+ */
+function mostRecentStatementCloseOnOrBefore(card: CreditCard, dateIso: string): string | null {
+  if (card.statementEndDay == null) return null
+  const d = new Date(dateIso)
+  let best: string | null = null
+  for (let offset = -2; offset <= 2; offset++) {
+    const year = d.getFullYear()
+    const month = d.getMonth() + offset
+    const daysInMonth = new Date(year, month + 1, 0).getDate()
+    const candidateDue = new Date(year, month, Math.min(card.paymentDayOfMonth, daysInMonth))
+    const closeIso = toIso(statementCloseDateForPaymentDate(card, candidateDue))
+    if (closeIso <= dateIso && (best == null || closeIso > best)) best = closeIso
+  }
+  return best
 }
 
 /**
@@ -216,12 +397,38 @@ export function withLiveBalance(card: CreditCard, transactions: Transaction[], a
  * simulation — anything already cleared is already reflected in
  * card.currentBalance, the simulation's starting point, and re-applying
  * it here would double-count it.
+ *
+ * ITEM E — statement windows: once `card.statementEndDay` is set, each
+ * due date's minimum is computed off a SEPARATE `statementBalance` that
+ * only picks up real `credit_card_spend` transactions dated on/before
+ * that window's own close (statementCloseDateForPaymentDate) — a
+ * purchase posted after the close still shows in the card's live balance
+ * immediately (via `workingBalance`/`cardBalanceAsOf` elsewhere) but
+ * doesn't count toward THIS minimum, rolling into the next window's
+ * instead, matching real statement mechanics. Lump payments are NOT
+ * window-gated (confirmed against real UK card practice) — they reduce
+ * both balances immediately, same as today. Whenever `statementEndDay`
+ * is absent, `statementBalance` is kept in lockstep with `workingBalance`
+ * the whole way through and never diverges, so the minimum is always
+ * read from `workingBalance` as before — byte-identical output to the
+ * pre-item-e behaviour for every existing card.
  */
 export function generateMinimumPaymentTransactions(
   card: CreditCard,
   rangeStart: Date,
   rangeEnd: Date,
   transactions: Transaction[] = [],
+  // UAT 2026-09-08 (Summary page cycle-end totals) — an optional hook,
+  // fired once per simulated cycle regardless of whether a charge ends
+  // up generated (amount<=0 cycles included), carrying the STATEMENT
+  // balance as it stood right before that cycle's own payment/minimum —
+  // "the balance due for this period" a real statement would show,
+  // which can genuinely differ from the true running balance
+  // (cardBalanceAsOf) once a statement window is involved. Exists so
+  // callers needing this figure (buildCreditCardCycleSections) share the
+  // exact same simulation this function already runs, rather than
+  // re-deriving it separately and risking the two ever disagreeing.
+  onCycle?: (info: { dateIso: string; statementBalanceBeforePayment: number; workingBalanceBeforePayment: number }) => void,
 ): Omit<Transaction, 'id'>[] {
   if (!card.active) return []
   const results: Omit<Transaction, 'id'>[] = []
@@ -248,6 +455,44 @@ export function generateMinimumPaymentTransactions(
   // below drift as real time passed.
   const rangeStartIso = toIso(rangeStart)
   let workingBalance = cardBalanceAsOf(card, transactions, rangeStart)
+  // BUGFIX (2026-09-09, statement-window grace-timing, same root cause
+  // family as the interest-timing fix) — this used to just copy
+  // `workingBalance` wholesale, which is wrong whenever `rangeStart`
+  // lands inside a window that hasn't closed yet (routine for a fresh
+  // card, or any card with no minimum-charge history stored — see
+  // buildCreditCardMinimumChargeRows, which always starts rangeStart AT
+  // asOfDate in that case): a purchase posted only days before rangeStart
+  // would get folded straight into the OPENING statementBalance
+  // uninspected, treating it as already due at the very next calendar
+  // due date instead of the one its window rule actually assigns it to.
+  // `mostRecentStatementCloseOnOrBefore` finds the real cutoff — the
+  // opening figure is the true balance as of THAT close, not rangeStart
+  // itself; anything posted between the close and rangeStart is excluded
+  // here and picked up by `pendingSpendForStatement` below once its own
+  // window closes during the simulation, same as any other in-range spend.
+  const statementOpeningCloseIso = mostRecentStatementCloseOnOrBefore(card, rangeStartIso)
+  // BUGFIX (2026-09-09, UAT-reported: clearing an early due date wrongly
+  // wiped a later, genuinely separate one) — `cardBalanceAsOf` at the
+  // close date only replays activity UP TO that close, so it has no way
+  // to know about a real PAYMENT dated after it but on/before rangeStart
+  // (e.g. a lump payment clearing an earlier balance, made a few days
+  // before this fresh simulation's own rangeStart). Payments are never
+  // window-gated — they apply immediately, same as the main walk's own
+  // lump-payment loop below — so any dated in that gap must still reduce
+  // the opening figure. Deliberately NOT clamped to 0: a payment sized
+  // off the TRUE running balance (which already includes a purchase
+  // whose window hasn't closed yet) can be MORE than this window-gated
+  // opening figure — letting it go negative here means it nets cleanly
+  // to zero once that purchase's window closes and folds in below,
+  // instead of resurrecting it as fresh, unpaid debt.
+  const paymentsBetweenCloseAndRangeStart =
+    statementOpeningCloseIso != null
+      ? transactions
+          .filter((t) => t.creditCardId === card.id && t.type === 'credit_card_payment' && t.date > statementOpeningCloseIso && t.date <= rangeStartIso)
+          .reduce((sum, t) => round2(sum + t.amount), 0)
+      : 0
+  let statementBalance =
+    statementOpeningCloseIso != null ? round2(cardBalanceAsOf(card, transactions, new Date(statementOpeningCloseIso)) - paymentsBetweenCloseAndRangeStart) : workingBalance
   // Same cut, applied to logged lump payments: one dated on or before
   // rangeStart is already inside workingBalance above (its transaction
   // was replayed into it), so folding it in again here would
@@ -255,12 +500,135 @@ export function generateMinimumPaymentTransactions(
   // applied by the loop below.
   const pendingLumpPayments = card.lumpPayments.filter((lp) => lp.date > rangeStartIso).sort((a, b) => a.date.localeCompare(b.date))
   let lumpIndex = 0
+  // item e — real spend dated after rangeStart, needed to know how much
+  // of a window's own activity should count toward ITS minimum (spend on
+  // or before the close) versus roll into the next one (spend after).
+  // Same "already-anchored vs still-to-simulate" cut as lump payments
+  // above; spend already inside `workingBalance`/`rangeStart` needs no
+  // separate handling here.
+  // BUGFIX (2026-09-16, Adam-reported) — this used to filter ONLY on
+  // `t.date > rangeStartIso`, unlike `cardBalanceAsOf`'s own activity
+  // filter (`t.date >= card.balanceAsOfDate`) that `workingBalance`
+  // above is seeded from. Whenever a caller's `rangeStart` lands BEFORE
+  // the card's own opening/anchor date (routine — autoClear.ts passes
+  // the PERSON's pay-cycle start, unrelated to any one card's own
+  // anchor), a transaction dated between rangeStart and the card's real
+  // anchor (e.g. a spend logged before the card even "opened") satisfied
+  // `t.date > rangeStartIso` and got folded into workingBalance/
+  // statementBalance mid-simulation as if it were real debt — even
+  // though `cardBalanceAsOf` had correctly excluded that exact same
+  // transaction from the OPENING figure a few lines above. The result:
+  // a phantom minimum charge kept regenerating for a period that had
+  // already been manually cleared, driven entirely by this leaked
+  // pre-anchor transaction. Same `>= card.balanceAsOfDate` floor as
+  // cardBalanceAsOf now applies here too, so pre-anchor activity can
+  // never leak into the forward simulation regardless of what
+  // `rangeStart` a caller passes in.
+  const pendingSpend = transactions
+    .filter((t) => t.creditCardId === card.id && t.type === 'credit_card_spend' && t.date >= card.balanceAsOfDate && t.date > rangeStartIso)
+    .sort((a, b) => a.date.localeCompare(b.date))
+  // The statement-side fold uses a WIDER list than `pendingSpend` above
+  // whenever `statementOpeningCloseIso` reaches further back than
+  // rangeStart — otherwise spend posted between that close and rangeStart
+  // (deliberately excluded from the opening `statementBalance` above)
+  // would never get folded in at all, falling through the cracks
+  // permanently. Identical to `pendingSpend` when there's no window (or
+  // the close coincides with rangeStart), so non-window cards are
+  // unaffected.
+  const pendingSpendForStatement =
+    statementOpeningCloseIso != null && statementOpeningCloseIso < rangeStartIso
+      ? transactions
+          .filter((t) => t.creditCardId === card.id && t.type === 'credit_card_spend' && t.date >= card.balanceAsOfDate && t.date > statementOpeningCloseIso)
+          .sort((a, b) => a.date.localeCompare(b.date))
+      : pendingSpend
+  // Two INDEPENDENT pointers into two lists that may start from different
+  // dates (see `pendingSpendForStatement` above) — a spend hits
+  // workingBalance (the true running balance) as soon as its own date
+  // has passed, but may need to wait for a LATER iteration's window to
+  // close before it's added to statementBalance (the figure minimums are
+  // computed against). A single shared pointer would consume an entry
+  // the moment it passed `paymentDateIso` regardless of whether it also
+  // cleared `closeDateIso` that same iteration, silently losing it for
+  // the later window it actually belongs to.
+  let workingSpendIndex = 0
+  let statementSpendIndex = 0
+  // BUGFIX (2026-09-09, statement-window grace-timing; see
+  // cardBalanceAsOf's identical `windowEnteringSnapshot` mechanism) —
+  // `workingBalanceEnteringCycle` below answers "what did workingBalance
+  // carry from the PREVIOUS calendar due date," which is the wrong
+  // question once a window is involved — a purchase posted after its own
+  // window's close doesn't belong to the next due date at all, so that
+  // due date must not treat it as "carried debt." The real question is
+  // "was the previous statement's balance paid off by ITS OWN due date" —
+  // `previousStatementCloseSnapshot` is `statementBalance` exactly as it
+  // stood at the END of the previous cycle's full processing (interest,
+  // lump payments, minimum charge — see where it's set, right before
+  // `cursor` advances), which correctly sees a payment made between a
+  // window's close and its own due date. Initialised to the (now
+  // window-corrected) `statementBalance` opening figure, not
+  // `workingBalance` — that's the real balance as of the close BEFORE the
+  // first simulated cycle, which is exactly what this variable represents
+  // for every later cycle too.
+  let previousStatementCloseSnapshot = statementBalance
 
   let cursor = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), 1)
   while (cursor <= rangeEnd) {
     const daysInMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate()
     const paymentDate = new Date(cursor.getFullYear(), cursor.getMonth(), Math.min(card.paymentDayOfMonth, daysInMonth))
     const paymentDateIso = toIso(paymentDate)
+    const closeDateIso = card.statementEndDay != null ? toIso(statementCloseDateForPaymentDate(card, paymentDate)) : null
+    // UAT 2026-09-08 (8-bug9.2, Adam-requested grace period) — frozen
+    // BEFORE this cycle's own spend gets folded in below, so it reflects
+    // what carried INTO this cycle from the end of the last one. Used
+    // just below to decide whether this cycle accrues interest at all —
+    // see cardBalanceAsOf's identical mechanism for the full reasoning.
+    // Deliberately only tracked for workingBalance — see the interest-
+    // gating block below for why statementBalance shares this same gate
+    // rather than tracking its own (lagged, window-delayed) version.
+    const workingBalanceEnteringCycle = workingBalance
+
+    // Fold in any real spend dated up to this payment date into the true
+    // running balance — always, regardless of window.
+    while (workingSpendIndex < pendingSpend.length && pendingSpend[workingSpendIndex].date <= paymentDateIso) {
+      workingBalance = round2(workingBalance + pendingSpend[workingSpendIndex].amount)
+      workingSpendIndex++
+    }
+    // Fold spend into the statement-window balance only once ITS OWN
+    // window has actually closed — `closeDateIso` here is THIS
+    // iteration's close, so a spend dated after it waits for a later
+    // iteration (whichever one's close finally clears it). No window
+    // tracking configured at all (`closeDateIso` null) means every
+    // pending spend qualifies immediately, matching workingBalance
+    // exactly — the pre-item-e behaviour.
+    // No window tracking configured (`closeDateIso` null) falls back to
+    // paymentDateIso as the cutoff — identical pacing to workingBalance
+    // above, so the two stay byte-identical the whole way through.
+    const statementCutoffIso = closeDateIso ?? paymentDateIso
+    while (statementSpendIndex < pendingSpendForStatement.length && pendingSpendForStatement[statementSpendIndex].date <= statementCutoffIso) {
+      statementBalance = round2(statementBalance + pendingSpendForStatement[statementSpendIndex].amount)
+      statementSpendIndex++
+    }
+
+    // UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, retest): the
+    // NEGLIGIBLE_BALANCE snap only catches a balance that's ALREADY tiny
+    // — it never fires for a percent-of-balance minimum stuck on a small
+    // but not-tiny balance (e.g. a few tens of pence) where the payment,
+    // rounded to the nearest penny, doesn't even cover the interest this
+    // cycle accrues on what's left. That's a genuine amortisation
+    // deadlock, not a rounding artefact close to zero — captured here so
+    // the fix generalises to any such balance, not just ones below a
+    // fixed pence threshold.
+    const statementBalanceBeforeInterest = statementBalance
+    // UAT 2026-09-08, second retest — a statement-window card
+    // (statementStartDay/statementEndDay set) can leave workingBalance
+    // and statementBalance permanently diverged: a spend lands in
+    // workingBalance immediately but statementBalance only picks it up
+    // once its own window closes, so the minimum — always sized off
+    // statementBalance — can be too small to even cover the interest
+    // accruing on the LARGER true workingBalance, which then deadlocks
+    // on its own, independently of statementBalance's own (possibly
+    // still-progressing) figure. Both must be checked.
+    const workingBalanceBeforeInterest = workingBalance
 
     // Interest for this cycle posts first, against the balance as it
     // stood going into the cycle — THEN any lump payments logged within
@@ -268,15 +636,73 @@ export function generateMinimumPaymentTransactions(
     // what's left. This slightly overstates interest if a lump payment
     // landed early in the cycle (no daily precision here), which is a
     // deliberate, conservative simplification rather than an attempt at
-    // exact accrual.
-    workingBalance = applyMonthlyInterest(workingBalance, card.interestRatePercent)
-
+    // exact accrual. Applied to BOTH balances identically — item e adds
+    // no new interest-timing modelling of its own beyond the grace-period
+    // check just above: no daily accrual, still no partial-cycle
+    // proration, just an all-or-nothing "did this cycle start already
+    // clear" gate (Adam-requested, 2026-09-08 — real cards charge no
+    // interest on new spend at all if the account entered the cycle fully
+    // paid off, only starting once a balance is actually being carried).
+    // Grace applies when nothing carried in — but still snap a lingering
+    // negligible-dust residual to exactly zero in that case (see
+    // cardBalanceAsOf's identical comment): skipping applyMonthlyInterest
+    // entirely must not resurrect the pre-Batch-8 stuck-forever-at-a-
+    // penny bug for a balance that has no new spend to stay grace-free.
+    // Gated on workingBalanceEnteringCycle for BOTH balances, deliberately
+    // — whether the account is "carrying debt" is a fact about the real
+    // account, and statementBalanceEnteringCycle is a lagged, window-
+    // delayed figure that can read as zero even when workingBalance shows
+    // real debt was carried in (a spend can sit in workingBalance for a
+    // cycle or more before its own window closes and it reaches
+    // statementBalance at all). Gating statementBalance on its OWN
+    // (falsely-zero) entering value granted grace it hadn't earned —
+    // confirmed empirically: a statement-window card that carried real
+    // debt into a cycle got its statementBalance's interest wrongly
+    // skipped while workingBalance's correctly wasn't, so a same-day lump
+    // payment sized to clear the true (interest-inflated) workingBalance
+    // then fully zeroed the (interest-free) statementBalance too, and the
+    // no-longer-owed difference was silently left stranded in
+    // workingBalance forever after.
+    // BUGFIX (2026-09-09, statement-window grace-timing) — once a window
+    // is configured, `workingBalanceEnteringCycle` above is the wrong
+    // gate (see `previousStatementCloseSnapshot`'s declaration comment):
+    // it reflects the last calendar due date, not the close of the
+    // window BEFORE this one. `previousStatementCloseSnapshot` is that
+    // correctly-timed figure instead. No window configured falls back to
+    // `workingBalanceEnteringCycle` exactly as before — byte-identical
+    // for every card that doesn't set a window.
+    const enteringGate = card.statementEndDay != null ? previousStatementCloseSnapshot : workingBalanceEnteringCycle
+    if (enteringGate > NEGLIGIBLE_BALANCE) {
+      workingBalance = applyMonthlyInterest(workingBalance, card.interestRatePercent)
+      statementBalance = applyMonthlyInterest(statementBalance, card.interestRatePercent)
+    } else {
+      if (workingBalance <= NEGLIGIBLE_BALANCE) workingBalance = 0
+      // Math.abs — see the BUGFIX comment on the lump-payment loop just
+      // below for why a genuinely negative statementBalance must survive
+      // this snap, not just a tiny positive one.
+      if (Math.abs(statementBalance) <= NEGLIGIBLE_BALANCE) statementBalance = 0
+    }
     // Apply any still-pending lump payments dated on/before this
     // payment date, in date order, BEFORE computing this month's
     // minimum — this is what makes a repayment logged ahead of the next
-    // charge date actually count toward it.
+    // charge date actually count toward it. NOT window-gated (item e,
+    // confirmed against real practice) — applies to both balances.
     while (lumpIndex < pendingLumpPayments.length && pendingLumpPayments[lumpIndex].date <= paymentDateIso) {
       workingBalance = round2(Math.max(0, workingBalance - pendingLumpPayments[lumpIndex].amount))
+      // BUGFIX (2026-09-09, UAT-reported: clearing an early due date
+      // wrongly zeroed a later, genuinely separate one) — deliberately
+      // NOT clamped to 0 like `workingBalance` just above. A lump payment
+      // sized off the true running balance (e.g. via
+      // buildCreditCardDueOverviewRows' Clear button) can be MORE than
+      // `statementBalance` currently reflects, because `statementBalance`
+      // only picks up a purchase once its own window closes —
+      // `workingBalance` already includes it the moment it's spent.
+      // Clamping here would silently discard that difference; letting it
+      // go negative instead means it nets cleanly to zero once the
+      // delayed purchase's window finally closes and folds it in (see the
+      // statement-side spend fold above), rather than that purchase
+      // resurrecting a bogus "still owed" minimum charge once it arrives.
+      statementBalance = round2(statementBalance - pendingLumpPayments[lumpIndex].amount)
       lumpIndex++
     }
 
@@ -291,7 +717,50 @@ export function generateMinimumPaymentTransactions(
       // than silently reverting to the un-overridden trajectory next
       // month.
       const override = card.minimumPaymentOverrides?.find((o) => o.date === paymentDateIso)
-      const amount = override ? override.amount : minimumPaymentForBalance(card.minimumPayment, workingBalance)
+      const computedMinimum = minimumPaymentForBalance(card.minimumPayment, statementBalance)
+      // Deadlock guard: if paying this cycle's computed minimum wouldn't
+      // leave EITHER balance any lower than it stood BEFORE this cycle's
+      // interest was even applied, the payment isn't keeping pace with
+      // interest — pay off the larger of the two remaining balances
+      // instead of perpetuating a residue that just regrows every month.
+      // Checking statementBalance alone isn't enough on a statement-
+      // window card (see workingBalanceBeforeInterest's own comment
+      // above) — the minimum is sized off statementBalance, but
+      // workingBalance is the TRUE debt, and it can be deadlocked even
+      // while statementBalance is still (very slowly) progressing. An
+      // explicit override is left untouched (a deliberate figure, not
+      // the computed one this guard exists to correct).
+      // UAT 2026-09-08 (found while adding the grace-period feature,
+      // running the full verify-*.ts suite for the first time in a while)
+      // — this guard was firing for a genuine, real-world debt trap too:
+      // a FIXED minimum (or a percent that's mathematically too small
+      // for the rate, regardless of rounding) smaller than the interest
+      // accruing is completely real credit-card behaviour — the balance
+      // is SUPPOSED to grow, forever, exactly as the pre-existing
+      // verify-ledger-phase2.ts debt-trap test expects. That's a
+      // different thing entirely from every ORIGINAL bug report here
+      // (Adam's 5%-of-balance-vs-20%-APR repros), where the minimum
+      // percent mathematically EXCEEDS the monthly rate — it SHOULD
+      // converge — and only fails to because of rounding at small-pence
+      // scale. Distinguishing the two: only a percent_of_balance minimum
+      // whose UNROUNDED theoretical amount would have exceeded this
+      // cycle's own interest (i.e. rounding, not the policy itself, is
+      // what erased the progress) counts as a deadlock to force-resolve.
+      // A fixed minimum, or a percent genuinely smaller than the rate,
+      // is left alone — the balance is allowed to grow/stay flat, same
+      // as any real card.
+      const percent = card.minimumPayment.type === 'percent_of_balance' ? card.minimumPayment.percent : null
+      const roundingCouldExplainDeadlock =
+        percent != null &&
+        ((statementBalance * percent) / 100 > statementBalance - statementBalanceBeforeInterest ||
+          (workingBalance * percent) / 100 > workingBalance - workingBalanceBeforeInterest)
+      const deadlocked =
+        !override &&
+        computedMinimum > 0 &&
+        roundingCouldExplainDeadlock &&
+        (round2(statementBalance - computedMinimum) >= statementBalanceBeforeInterest || round2(workingBalance - computedMinimum) >= workingBalanceBeforeInterest)
+      const amount = override ? override.amount : deadlocked ? Math.max(statementBalance, workingBalance) : computedMinimum
+      onCycle?.({ dateIso: paymentDateIso, statementBalanceBeforePayment: statementBalance, workingBalanceBeforePayment: workingBalance })
       if (amount > 0) {
         results.push({
           date: paymentDateIso,
@@ -318,8 +787,24 @@ export function generateMinimumPaymentTransactions(
           note: `${card.name} - Minimum Charge`,
         })
         workingBalance = round2(Math.max(0, workingBalance - amount))
+        // Not clamped — same reasoning as the lump-payment loop above
+        // (the deadlock guard's `Math.max(statementBalance, workingBalance)`
+        // amount can exceed statementBalance on its own).
+        statementBalance = round2(statementBalance - amount)
       }
     }
+    // BUGFIX (2026-09-09, statement-window grace-timing) — captured HERE,
+    // at the very end of the cycle's full processing (interest, lump
+    // payments, AND the minimum charge just deducted above), not right
+    // after interest posted. An earlier version captured this mid-cycle
+    // and so couldn't see a lump payment or minimum charge made later in
+    // the SAME cycle — which meant a genuine full payoff between a
+    // window's close and its own due date still got charged interest the
+    // cycle after, wrongly, since the snapshot looked frozen-in-debt.
+    // `statementBalance` here is exactly "was the previous statement paid
+    // off by its own due date," the real question the NEXT cycle's grace
+    // gate needs answered.
+    previousStatementCloseSnapshot = statementBalance
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
   }
   return results
@@ -434,9 +919,99 @@ export function simulateCardPayoffMonths(card: CreditCard, extraPerMonth = 0, ma
   return { months, totalInterestPaid }
 }
 
-/** Round-robins through CREDIT_CARD_COLORS by however many cards already exist — same auto-assignment idea as pickColorForIndex in categories.ts, but on the separate palette described in types/ledger.ts. */
-export function pickCreditCardColor(existingCount: number): string {
-  return CREDIT_CARD_COLORS[existingCount % CREDIT_CARD_COLORS.length]
+/**
+ * Picks the first SHARED_CARD_COLORS entry not currently held by any
+ * credit card/pot/savings pot, so none of them ever repeat a colour as
+ * far as the palette's own size allows.
+ *
+ * BUGFIX (2026-09-16, Adam-reported — a brand-new card landed on the
+ * exact colour an existing, untouched Bills Pot already had). This used
+ * to key off `data.creditCards.length + data.pots.length +
+ * data.savingsPots.length` — the current LIVE count, not a stable,
+ * ever-increasing counter. Deleting any card/pot/savings pot permanently
+ * decrements that count, so a later-created entity could be re-assigned
+ * an index a still-existing entity already held (e.g.: Bills Pot created
+ * first at index 0; some other card created after it, then deleted;
+ * the next new card's count falls back to a value that recomputes to
+ * index 0 again — landing it on Bills Pot's own colour, even though
+ * Bills Pot itself was never touched). Scanning actual colours-in-use
+ * instead is immune to deletions entirely, at the small cost of no
+ * longer being a pure function of count alone. Falls back to the old
+ * round-robin-by-count behaviour only once every palette colour is
+ * genuinely taken (more of these entities exist than the palette has
+ * colours) — collisions at that point are unavoidable, not a bug.
+ */
+export function pickNextSharedCardColor(data: Pick<AppDataV2, 'creditCards' | 'pots' | 'savingsPots'>): string {
+  const usedColors = new Set([...data.creditCards.map((c) => c.color), ...data.pots.map((p) => p.color), ...data.savingsPots.map((p) => p.color)])
+  const firstUnused = SHARED_CARD_COLORS.find((color) => !usedColors.has(color))
+  if (firstUnused) return firstUnused
+  const existingCount = data.creditCards.length + data.pots.length + data.savingsPots.length
+  return SHARED_CARD_COLORS[existingCount % SHARED_CARD_COLORS.length]
+}
+
+// ── Trends feature (2026-09-15 build; date-source fixed 2026-09-16) ─────
+const CC_THREE_CYCLES_AHEAD = 3
+
+function isCardSpend(cardId: string) {
+  return (t: Transaction) => t.type === 'credit_card_spend' && t.creditCardId === cardId
+}
+
+/**
+ * Builds the Credit Card's Balance/Spend trend series. Balance = the
+ * card's own OUTSTANDING/owed balance over the period (Adam-confirmed
+ * clarification), NOT a cash balance — sampled directly via
+ * cardBalanceAsOf per day rather than folded incrementally the way a cash
+ * ledger's balance is, since cardBalanceAsOf already correctly replays
+ * interest/statement-window mechanics and a naive incremental sum would
+ * have to reimplement all of that separately (and could drift from it).
+ * cardBalanceAsOf doesn't distinguish cleared vs pending by status, only
+ * by date, so there's no genuine "cleared vs projected" split to make the
+ * way a cash ledger has — both DailyBalancePoint fields carry the same
+ * value so the shared chart component doesn't need a credit-card special
+ * case. Spend = credit_card_spend charged to this card in the period.
+ *
+ * JUDGMENT CALL (flagged per the prompt doc's own instruction to decide
+ * and document, not leave ambiguous): the dotted forecast continuation on
+ * this card's Spend view does NOT layer in averageSpendForecast.ts's
+ * dailyAvg rate — that lib's SpendScope is defined for personal/joint ad-
+ * hoc expense only (see its own file header), and extending it to a new
+ * scope wasn't part of what Adam confirmed. The Balance view's dotted
+ * portion still reads correctly as "projected" via generated future
+ * minimum-charge transactions (see above); the Spend view's dotted
+ * portion is a flat continuation from the last actual cumulative spend
+ * figure (no further growth assumed) rather than a fabricated rate.
+ */
+export function buildCreditCardTrendSeries(data: AppDataV2, card: CreditCard, granularity: BalanceSpendGranularity, asOfDate: Date = new Date()): BalanceSpendTrendSeries {
+  const aheadCount = granularity === 'this_cycle' ? 0 : CC_THREE_CYCLES_AHEAD
+  // 2026-09-16 (Adam-reported): this used to walk the household's pay
+  // cycle (creditCardHorizonCycles/creditCardPreviousCycles, since
+  // removed) — the exact mismatch creditCardCyclePeriods already exists
+  // to prevent for CreditCardDetail's own ledger. Now sourced from the
+  // SAME statement/due-date periods the ledger itself uses, so "This
+  // Cycle"/"Next 3 Cycles" here line up with what the card page shows.
+  const periods = creditCardCyclePeriods(card, asOfDate, aheadCount + 1)
+  const periodStart = periods[0].windowStart
+  const periodEnd = periods[periods.length - 1].windowEnd
+  const days = daysBetweenInclusive(periodStart, periodEnd)
+  const todayIso = toIso(asOfDate)
+
+  const generatedMinimums = generateMinimumPaymentTransactions(card, periodStart, periodEnd, data.transactions)
+  const existingMinDates = new Set(data.transactions.filter((t) => t.type === 'credit_card_payment' && t.creditCardId === card.id).map((t) => t.date))
+  const dedupedGenerated = generatedMinimums.filter((t) => !existingMinDates.has(t.date)).map((t, i) => ({ ...t, id: `generated:cc-trend:${i}` }))
+  const activity = [...data.transactions, ...dedupedGenerated]
+
+  const balance: DailyBalancePoint[] = days.map((date) => {
+    const owed = cardBalanceAsOf(card, activity, new Date(date))
+    return { date, clearedBalance: owed, projectedBalance: owed }
+  })
+  const spend = buildDailySpendSeries(activity, days, isCardSpend(card.id))
+
+  const cyclesBack = aheadCount === 0 ? 1 : CC_THREE_CYCLES_AHEAD + 1
+  const prevPeriodsAsc = [...creditCardPreviousCyclePeriods(card, asOfDate, cyclesBack)].reverse()
+  const prevDays = daysBetweenInclusive(prevPeriodsAsc[0].windowStart, prevPeriodsAsc[prevPeriodsAsc.length - 1].windowEnd)
+  const previousPeriodSpend = buildDailySpendSeries(data.transactions, prevDays, isCardSpend(card.id))
+
+  return { granularity, days, todayIso, balance, spend, previousPeriodSpend }
 }
 
 /** Total paid to date against this card — the "paid" half of the card page's pie chart (doc addendum). Sums credit_card_payment transactions for this card from the full transaction list, since payments aren't tracked as a running total on the CreditCard itself. */
@@ -472,6 +1047,25 @@ export interface CreditCardMinimumChargeRow {
   // happened" vs "projected" distinction if it wants to, not because the
   // edit flow itself needs the caller to know which path it'll take.
   materialized: boolean
+  // BUGFIX (2026-09-09, "assume the minimum gets paid" projection,
+  // Adam-requested) — the TRUE balance owed as of this due date. For a
+  // materialized row this is just cardBalanceAsOf (real activity always
+  // wins, unconditionally). For a projected row, cardBalanceAsOf would be
+  // wrong here: it replays ONLY real, logged activity, so any due date
+  // beyond the next one silently assumes NOTHING gets paid at all between
+  // now and then — overstating both the balance and the interest that
+  // compounds on it, since in reality the contractual minimum is paid
+  // every cycle whether or not Adam has logged it (same principle
+  // `simulateCardPayoffMonths`, the What-if page's own projection,
+  // already uses). Sourced from `generateMinimumPaymentTransactions`'s own
+  // `onCycle` hook — the exact figure ITS simulation already treats as
+  // "the true running balance right before this cycle's own minimum gets
+  // deducted," so this can never disagree with the schedule the rows
+  // above were generated from. This is what buildCreditCardBalanceDueRows/
+  // buildCreditCardDueOverviewRows (the Borrowing page's "Payment due"
+  // section, and its Clear button's own payoff amount) use — never
+  // cardBalanceAsOf directly for a projected row.
+  projectedBalanceDue: number
 }
 
 /**
@@ -511,16 +1105,294 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   // showed an empty future for a card that genuinely owed £228.07. Any
   // figure that did appear was a manual minimumPaymentOverride being
   // echoed back, never something the modal had computed.
-  const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions).filter((t) => !storedDates.has(t.date))
+  //
+  // BUGFIX (2026-09-09, "assume the minimum gets paid" projection) —
+  // `onCycle` captures `workingBalanceBeforePayment` for every simulated
+  // due date (whether or not a row ends up generated for it) — the true
+  // running balance the generator's OWN simulation used right before that
+  // cycle's own minimum was deducted from it. This is the "assume every
+  // prior cycle's minimum got paid" figure Adam asked for, and reusing
+  // this function's own internal simulation (rather than re-deriving it
+  // separately) is what guarantees it can never disagree with the
+  // schedule these rows themselves came from.
+  const workingBalanceByDate = new Map<string, number>()
+  const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions, ({ dateIso, workingBalanceBeforePayment }) =>
+    workingBalanceByDate.set(dateIso, workingBalanceBeforePayment),
+  ).filter((t) => !storedDates.has(t.date))
 
   const rows: CreditCardMinimumChargeRow[] = [
-    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true })),
-    ...generated.map((t) => ({ date: t.date, amount: t.amount, status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const), materialized: false })),
+    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true, projectedBalanceDue: cardBalanceAsOf(card, transactions, new Date(t.date)) })),
+    ...generated.map((t) => ({
+      date: t.date,
+      amount: t.amount,
+      status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const),
+      materialized: false,
+      projectedBalanceDue: workingBalanceByDate.get(t.date) ?? cardBalanceAsOf(card, transactions, new Date(t.date)),
+    })),
   ]
   return rows.sort((a, b) => a.date.localeCompare(b.date))
+}
+
+export interface CreditCardBalanceDueRow {
+  date: string
+  /** The full balance owed as of this date — not just that date's own
+   * minimum payment. */
+  balanceDue: number
+}
+
+/**
+ * UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, Adam's own spec, 2nd
+ * design pass) — a SEPARATE row from the minimum-charge one above, shown
+ * first for the same date in the ledger modal: "I see two rows per
+ * payment date, first being any due balance... second row is the minimum
+ * charge for the same date." Only for still-UPCOMING payment dates (a
+ * past one already happened, nothing left to pre-empt) where the real
+ * balance is meaningfully more than that date's own minimum — otherwise
+ * there's nothing worth offering an early payoff for. Clearing this row
+ * (a lump payment dated on/before this date, for at least this amount)
+ * naturally zeroes that date's own minimum AND every later one too, via
+ * generateMinimumPaymentTransactions's own existing lump-payment-before-
+ * minimum-computation ordering — no separate "future charges" mechanism
+ * needed, paying the real balance down to (near) zero is what makes every
+ * later minimum compute to zero on its own.
+ */
+export function buildCreditCardBalanceDueRows(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): CreditCardBalanceDueRow[] {
+  const minimumRows = buildCreditCardMinimumChargeRows(card, transactions, asOfDate)
+  return minimumRows
+    .filter((r) => r.status === 'pending')
+    .map((r) => ({ date: r.date, balanceDue: r.projectedBalanceDue, minimum: r.amount }))
+    .filter((r) => r.balanceDue > r.minimum + 0.01)
+    .map((r) => ({ date: r.date, balanceDue: r.balanceDue }))
+}
+
+export interface CreditCardDueOverviewRow {
+  date: string
+  balanceDue: number
+  /** Whether this date has already happened — a past row is informational only (no Clear action), an upcoming one can be pre-paid via onClearBalance. */
+  isPast: boolean
+}
+
+/**
+ * 2026-09-09 session (Adam-specified) — feeds the Borrowing page's own
+ * "most recent + next 3 (or 4 if none recent) payment due dates" section
+ * on the expanded credit card, mirroring the Salary page's PayPeriodsSection
+ * styling. Deliberately UNFILTERED by "meaningfully more than minimum"
+ * (unlike buildCreditCardBalanceDueRows above, which only surfaces dates
+ * worth an early payoff nudge) — this is a plain schedule overview, every
+ * due date gets its own row with the balance owed as of that date, same
+ * as the info modal now shows for minimum charges alone.
+ *
+ * BUGFIX (2026-09-09, "assume the minimum gets paid" projection) — used
+ * to read `cardBalanceAsOf` directly here, which overstated every row
+ * beyond the very next one (see `CreditCardMinimumChargeRow.projectedBalanceDue`'s
+ * own comment). Reads `projectedBalanceDue` instead — real activity for a
+ * materialized (already-happened) row, the assumed-minimum-paid
+ * projection for anything still upcoming. This is also what sizes the
+ * Clear button's own payoff transaction for an upcoming row, so clearing
+ * it genuinely zeroes the card rather than leaving an interest-inflated
+ * residual behind.
+ */
+export function buildCreditCardDueOverviewRows(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): CreditCardDueOverviewRow[] {
+  const rows = buildCreditCardMinimumChargeRows(card, transactions, asOfDate)
+  return rows.map((r) => ({ date: r.date, balanceDue: r.projectedBalanceDue, isPast: r.status === 'cleared' }))
 }
 
 /** Convenience wrapper over withLiveBalance for a whole list — the shape almost every read site actually wants. Same rule applies: display/compute only, never persisted. */
 export function withLiveBalances(cards: CreditCard[], transactions: Transaction[], asOfDate: Date = new Date()): CreditCard[] {
   return cards.map((card) => withLiveBalance(card, transactions, asOfDate))
+}
+
+/** This card's own paymentDayOfMonth due date falling in the given calendar month, clamped to the month's real length (short months, Feb) — same clamp generateMinimumPaymentTransactions/billingDatesBetween already use. */
+function creditCardDueDateForMonth(card: CreditCard, monthCursor: Date): Date {
+  const daysInMonth = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 0).getDate()
+  return new Date(monthCursor.getFullYear(), monthCursor.getMonth(), Math.min(card.paymentDayOfMonth, daysInMonth))
+}
+
+/**
+ * UAT 2026-09-08 (Summary page cycle-end totals, Adam-requested) — a
+ * credit card's own accounting periods: bounded by consecutive PAYMENT
+ * dates (paymentDayOfMonth), never the household's own pay-cycle bounds
+ * — a card's due date is its own fixed, independent schedule, unrelated
+ * to when anyone gets paid.
+ *
+ * Each period carries `dueDate` (when the payment/minimum actually posts
+ * — what "the balance due for this period" means) separately from
+ * `windowStart`/`windowEnd` (which real spend counts toward THIS
+ * period). When `statementEndDay` is set, `windowEnd` is that period's
+ * own statement close — via the exact same `statementCloseDateForPaymentDate`
+ * mapping `generateMinimumPaymentTransactions` already uses for minimum-
+ * charge sizing — which can land WEEKS before `dueDate` (e.g. a window
+ * closing the 18th, due the 14th of the month after next); spend dated
+ * in that gap belongs to the FOLLOWING period's window, not this one, so
+ * `windowEnd` (not `dueDate`) is the real spend-bucketing bound. A card
+ * with no statement window configured falls back to `windowEnd ===
+ * dueDate` (spend up to and including the due date itself counts),
+ * matching the same "no window" fallback used elsewhere.
+ *
+ * `count` is the caller's own concern (e.g. 1 for "this cycle", or
+ * `1 + THREE_CYCLES_AHEAD` for "next 3 cycles", matching
+ * projection.ts's horizonCycles convention of current-cycle-first) —
+ * kept as a plain number rather than importing ProjectionHorizon/
+ * THREE_CYCLES_AHEAD from projection.ts, which itself imports FROM this
+ * file (generateMinimumPaymentTransactions) and would create a cycle.
+ */
+/** Shared by `creditCardCyclePeriods`/`creditCardPreviousCyclePeriods` — one due date in, its full period (window bounds + the due date itself) out. Factored out so the 2026-09-16 backward-walking variant (for the Trends chart's previous-period comparison) can't drift from this forward-walking one's own window math. */
+function creditCardPeriodForDueDate(card: CreditCard, due: Date): { windowStart: Date; windowEnd: Date; dueDate: Date } {
+  const prevMonthCursor = new Date(due.getFullYear(), due.getMonth() - 1, 1)
+  const prevDue = creditCardDueDateForMonth(card, prevMonthCursor)
+  const windowEnd = card.statementEndDay != null ? statementCloseDateForPaymentDate(card, due) : due
+  const windowStart = card.statementEndDay != null ? addDays(statementCloseDateForPaymentDate(card, prevDue), 1) : addDays(prevDue, 1)
+  return { windowStart, windowEnd, dueDate: due }
+}
+
+export function creditCardCyclePeriods(card: CreditCard, asOfDate: Date, count: number): { windowStart: Date; windowEnd: Date; dueDate: Date }[] {
+  const asOfIso = toIso(asOfDate)
+
+  // The "current" period is the one whose OWN due date hasn't happened
+  // yet (today counts as not-yet-happened, same "due today is still
+  // this period" convention the rest of the app uses).
+  let cursor = new Date(asOfDate.getFullYear(), asOfDate.getMonth(), 1)
+  let dueDate = creditCardDueDateForMonth(card, cursor)
+  while (toIso(dueDate) < asOfIso) {
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+    dueDate = creditCardDueDateForMonth(card, cursor)
+  }
+
+  const dueDates: Date[] = [dueDate]
+  for (let i = 1; i < count; i++) {
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+    dueDates.push(creditCardDueDateForMonth(card, cursor))
+  }
+
+  return dueDates.map((due) => creditCardPeriodForDueDate(card, due))
+}
+
+/**
+ * 2026-09-16 (Adam-reported — the Trends chart used the household's pay
+ * cycle instead of this card's own statement/due-date periods, the exact
+ * same bug `creditCardCyclePeriods` was built to prevent for the ledger
+ * itself). The backward-walking counterpart to `creditCardCyclePeriods` —
+ * `n` periods immediately BEFORE the current one, most-recent-first (same
+ * convention `creditCardPreviousCycles`/`previousCycles` already use for
+ * the pay-cycle case), for the Spend view's previous-period comparison
+ * line.
+ */
+export function creditCardPreviousCyclePeriods(card: CreditCard, asOfDate: Date, n: number): { windowStart: Date; windowEnd: Date; dueDate: Date }[] {
+  const [current] = creditCardCyclePeriods(card, asOfDate, 1)
+  const periods: { windowStart: Date; windowEnd: Date; dueDate: Date }[] = []
+  let cursor = new Date(current.dueDate.getFullYear(), current.dueDate.getMonth(), 1)
+  for (let i = 0; i < n; i++) {
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1)
+    periods.push(creditCardPeriodForDueDate(card, creditCardDueDateForMonth(card, cursor)))
+  }
+  return periods
+}
+
+export interface CreditCardCycleSection {
+  windowStart: Date
+  windowEnd: Date
+  dueDate: Date
+  /** Real spend/payments whose date falls in (windowStart, windowEnd], plus
+   * this period's own minimum-charge/interest row (dated exactly on
+   * dueDate) if one applies — real transactions where they already
+   * exist, generated/projected ones otherwise, exactly like
+   * buildCreditCardMinimumChargeRows' own materialized-wins rule. */
+  rows: { date: string; type: 'credit_card_spend' | 'credit_card_payment'; amount: number; status: 'cleared' | 'pending'; note?: string; sourceType?: string }[]
+  /** The real balance owed as of dueDate — "the balance due for this
+   * period" — via cardBalanceAsOf, not a manual fold of `rows` (interest
+   * itself has no row of its own to fold, so summing rows would silently
+   * omit it). */
+  closingBalance: number
+}
+
+/**
+ * UAT 2026-09-08 (Summary page cycle-end totals, Adam-requested) — one
+ * section per credit-card cycle period, each with its own spend/payment
+ * rows and its own closing (due) balance — the credit-card equivalent of
+ * projection.ts's horizonCycles + Home.tsx's CycleGroupedList, but using
+ * this card's own periods (see creditCardCyclePeriods) instead of the
+ * household pay cycle, and a real cardBalanceAsOf query for each
+ * period's closing figure instead of a running-balance fold (which
+ * would miss interest, since interest has no transaction row of its
+ * own). "We also need to make sure minimum charges appear in this same
+ * ledger" — a period's own not-yet-materialized minimum charge is
+ * generated here exactly like the info modal's ledger does, so an
+ * upcoming due date's charge is visible before autoClear ever
+ * materializes it into a real Transaction.
+ */
+export function buildCreditCardCycleSections(card: CreditCard, transactions: Transaction[], cycles: { windowStart: Date; windowEnd: Date; dueDate: Date }[]): CreditCardCycleSection[] {
+  if (cycles.length === 0) return []
+  const rangeStart = cycles[0].windowStart
+  const rangeEnd = cycles[cycles.length - 1].dueDate
+
+  const cardTransactions = transactions.filter((t) => t.creditCardId === card.id && (t.type === 'credit_card_spend' || t.type === 'credit_card_payment'))
+  // Same materialized-wins dedupe rule as buildCreditCardMinimumChargeRows:
+  // a stored (real, not-lump-payment) credit_card_payment on a given date
+  // IS that date's minimum charge already actually happening — the
+  // generator's own projection for that same date would just restate it.
+  const storedMinimumDates = new Set(cardTransactions.filter((t) => t.type === 'credit_card_payment' && !t.sourceType).map((t) => t.date))
+  // UAT 2026-09-08 — the `onCycle` hook captures the real STATEMENT
+  // balance the simulation computed for each due date, regardless of
+  // whether a charge ended up generated for it (a cycle with nothing due
+  // pushes no row at all) — "the balance due for this period" a real
+  // statement would show, which is what closingBalance below uses,
+  // rather than cardBalanceAsOf's true-running-balance figure (which
+  // would incorrectly include spend that hasn't reached this period's
+  // own statement yet — see the type's own comment on windowEnd vs
+  // dueDate for why that gap is real).
+  const statementBalanceByDate = new Map<string, number>()
+  const generatedMinimums = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions, ({ dateIso, statementBalanceBeforePayment }) =>
+    statementBalanceByDate.set(dateIso, statementBalanceBeforePayment),
+  ).filter((t) => !storedMinimumDates.has(t.date))
+  const todayIso = toIso(new Date())
+  const allRows = [
+    ...cardTransactions.map((t) => ({ date: t.date, type: t.type as 'credit_card_spend' | 'credit_card_payment', amount: t.amount, status: t.status, note: t.note, sourceType: t.sourceType })),
+    ...generatedMinimums.map((t) => ({ date: t.date, type: t.type as 'credit_card_spend' | 'credit_card_payment', amount: t.amount, status: (t.date <= todayIso ? 'cleared' : 'pending') as 'cleared' | 'pending', note: t.note, sourceType: t.sourceType })),
+  ]
+  // For cardBalanceAsOf, which needs real Transaction-shaped objects with
+  // an id — the generated rows above have none, since they're pure
+  // projections.
+  const allAsTransactions: Transaction[] = [
+    ...cardTransactions,
+    ...generatedMinimums.map((t, i) => ({ ...t, id: `projected-${i}` })),
+  ]
+
+  return cycles.map((cycle, cycleIndex) => {
+    const windowStartIso = toIso(cycle.windowStart)
+    const windowEndIso = toIso(cycle.windowEnd)
+    const dueDateIso = toIso(cycle.dueDate)
+    // BUGFIX (2026-09-09, UAT-reported) — a lump payment dated between a
+    // window's close and its own due date (routine on a statement-window
+    // card — see windowEnd vs dueDate's own comment) was falling into
+    // the FOLLOWING cycle's section instead of the one it actually
+    // clears, since the general filter below bounds by windowStart/
+    // windowEnd (a spend-attribution concept a payment has no part of —
+    // payments are never window-gated, they apply immediately). A
+    // payment is grouped by which due-date cycle it's paying toward
+    // instead: everything after the PREVIOUS cycle's own due date, up to
+    // and including THIS cycle's — so a payment dated exactly on a due
+    // date lands in that same cycle's section, next to the balance it
+    // just cleared, not the next one.
+    const prevDueDateIso = cycleIndex > 0 ? toIso(cycles[cycleIndex - 1].dueDate) : null
+    const rows = allRows
+      .filter((r) => {
+        // A minimum-charge row is EXPLICITLY dated on a due date by
+        // construction — it must anchor to THAT due date's own section
+        // exclusively. Without this, a due date numerically sitting
+        // inside the FOLLOWING cycle's own spend window (a real
+        // possibility — see the type's own comment on why windowEnd,
+        // not dueDate, bounds spend) would wrongly pull it into that
+        // later section too, double-counting the same charge.
+        const isMinimumChargeRow = r.type === 'credit_card_payment' && !r.sourceType
+        if (isMinimumChargeRow) return r.date === dueDateIso
+        if (r.type === 'credit_card_payment') return (prevDueDateIso == null || r.date > prevDueDateIso) && r.date <= dueDateIso
+        return r.date >= windowStartIso && r.date <= windowEndIso
+      })
+      .sort((a, b) => a.date.localeCompare(b.date))
+    // Fallback only for a due date genuinely outside the simulated range
+    // (shouldn't happen — rangeEnd is always the last cycle's own
+    // dueDate — but cardBalanceAsOf is a safe, real answer either way).
+    const closingBalance = statementBalanceByDate.get(dueDateIso) ?? cardBalanceAsOf(card, allAsTransactions, cycle.dueDate)
+    return { ...cycle, rows, closingBalance }
+  })
 }

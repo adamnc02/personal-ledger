@@ -70,6 +70,15 @@ export function pickColorForIndex(existingCount: number): string {
   return ICON_COLORS[existingCount % ICON_COLORS.length]
 }
 
+// 2026-09-14 (group-by-category fix, Pot/SavingsPot categoryIcon) — the
+// shared fallback for any Pot/SavingsPot that hasn't had its own category
+// icon picked yet (see Pot.categoryIcon/SavingsPot.categoryIcon in
+// types/ledger.ts). Same ICON_COLORS[3] the built-in "Savings" category
+// itself uses, so an unpicked pot still reads visually consistent with
+// the bucket it used to fold into.
+export const DEFAULT_POT_CATEGORY_ICON = 'wallet'
+export const DEFAULT_POT_CATEGORY_ICON_COLOR = ICON_COLORS[3]
+
 export function createCategory(name: string, existing: Category[], overrides?: { icon?: string; iconColor?: string }): Category {
   return {
     id: nanoid(8),

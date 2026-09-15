@@ -66,6 +66,7 @@ const data: AppDataV2 = {
   creditCards: [card],
   transactions: [],
   payCycles: [payCycle],
+  pensions: [],
   scenarios: [],
   primaryPersonId: 'me',
 }

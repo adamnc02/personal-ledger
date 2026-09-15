@@ -1,0 +1,2266 @@
+diff --git a/scripts/verify-autoclear.ts b/scripts/verify-autoclear.ts
+index 70c05ae..bb858fb 100644
+--- a/scripts/verify-autoclear.ts
++++ b/scripts/verify-autoclear.ts
+@@ -66,6 +66,7 @@ const data: AppDataV2 = {
+   creditCards: [card],
+   transactions: [],
+   payCycles: [payCycle],
++  pensions: [],
+   scenarios: [],
+   primaryPersonId: 'me',
+ }
+diff --git a/scripts/verify-bonus-tax.ts b/scripts/verify-bonus-tax.ts
+index 629314c..87ea04d 100644
+--- a/scripts/verify-bonus-tax.ts
++++ b/scripts/verify-bonus-tax.ts
+@@ -183,6 +183,7 @@ const baseData: AppDataV2 = {
+   creditCards: [],
+   transactions: [],
+   payCycles: [payCycle],
++  pensions: [],
+   scenarios: [],
+ }
+ const settled = autoClearDuePayments(baseData, asOf)
+diff --git a/scripts/verify-credit-card-balance.ts b/scripts/verify-credit-card-balance.ts
+index 473bf64..0c333ed 100644
+--- a/scripts/verify-credit-card-balance.ts
++++ b/scripts/verify-credit-card-balance.ts
+@@ -100,7 +100,7 @@ check('Spend increases the derived balance', cardBalanceAsOf(card, [{ ...spend.t
+ check('A spend never counts as "paid"', totalPaidForCard('card-1', [{ ...spend.transaction, id: 'tx-spend' }], new Date(2026, 7, 25)), 0)
+ 
+ // ---- 4. No double-counting: clearing has no side effect any more ----
+-const data: AppDataV2 = { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [card], transactions: paid200, payCycles: [], scenarios: [], primaryPersonId: '' }
++const data: AppDataV2 = { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [card], pensions: [], transactions: paid200, payCycles: [], scenarios: [], primaryPersonId: '' }
+ const afterClear = applyClearSideEffects(data, paid200[0])
+ check('applyClearSideEffects is a no-op for credit card payments (reintroducing the mutation would double-count)', afterClear.creditCards[0].currentBalance, 1600)
+ check('...so the derived balance after a clear pass is still the single, correct figure', cardBalanceAsOf(afterClear.creditCards[0], afterClear.transactions, today), 1400)
+@@ -145,7 +145,7 @@ check('A lump payment before rangeStart is not subtracted twice (once via the an
+ const todayIso = toLocalIsoDate(new Date())
+ const legacyCard = { ...card, currentBalance: 1400 } as Partial<CreditCard>
+ delete legacyCard.balanceAsOfDate
+-const legacy = { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [legacyCard], transactions: [], payCycles: [], scenarios: [], primaryPersonId: '' } as unknown as AppDataV2
++const legacy = { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [legacyCard], pensions: [], transactions: [], payCycles: [], scenarios: [], primaryPersonId: '' } as unknown as AppDataV2
+ const migrated = migrateLedgerData(legacy)
+ check('Migration backfills balanceAsOfDate to today', migrated.creditCards[0].balanceAsOfDate, todayIso)
+ check('Migration preserves the stored figure when there is no activity today', migrated.creditCards[0].currentBalance, 1400)
+diff --git a/scripts/verify-cycle-end-totals.ts b/scripts/verify-cycle-end-totals.ts
+index fb70509..e2444d1 100644
+--- a/scripts/verify-cycle-end-totals.ts
++++ b/scripts/verify-cycle-end-totals.ts
+@@ -13,6 +13,7 @@ import { upcomingPaydays } from '../src/lib/salaryLedger'
+ import { nextMinimumChargeAmount, buildCreditCardMinimumChargeRows } from '../src/lib/creditCards'
+ import { summarizeLoanProgress } from '../src/lib/ledgerLoans'
+ import { toLocalIsoDate } from '../src/lib/date'
++import { migrateLedgerData } from '../src/lib/ledgerStorage'
+ import type { AppDataV2, Loan, Transaction } from '../src/types/ledger'
+ 
+ // Reads a real backup so the fixtures are authoritative app state rather
+@@ -20,7 +21,7 @@ import type { AppDataV2, Loan, Transaction } from '../src/types/ledger'
+ // scripts/fixtures; point LEDGER_BACKUP at a fresher export to re-run
+ // these checks against current data.
+ const BACKUP = process.env.LEDGER_BACKUP ?? new URL('./fixtures/backup-2026-08-24.json', import.meta.url).pathname
+-const data = JSON.parse(readFileSync(BACKUP, 'utf8')) as AppDataV2
++const data = migrateLedgerData(JSON.parse(readFileSync(BACKUP, 'utf8')) as AppDataV2)
+ const payCycle = data.payCycles[0]
+ const personId = payCycle.personId
+ const round2 = (n: number) => Math.round(n * 100) / 100
+diff --git a/scripts/verify-cycle-follows-payday.ts b/scripts/verify-cycle-follows-payday.ts
+index c6b0d21..d88453b 100644
+--- a/scripts/verify-cycle-follows-payday.ts
++++ b/scripts/verify-cycle-follows-payday.ts
+@@ -185,6 +185,7 @@ function dataWith(payCycle: PayCycleConfig): AppDataV2 {
+     creditCards: [],
+     transactions: [] as Transaction[],
+     payCycles: [payCycle],
++    pensions: [],
+     scenarios: [],
+   } as unknown as AppDataV2
+ }
+diff --git a/scripts/verify-household.ts b/scripts/verify-household.ts
+index c45b98d..e2177ff 100644
+--- a/scripts/verify-household.ts
++++ b/scripts/verify-household.ts
+@@ -75,6 +75,7 @@ function baseData(overrides: Partial<AppDataV2>): AppDataV2 {
+     creditCards: [],
+     transactions: [],
+     payCycles: [],
++    pensions: [],
+     scenarios: [],
+     primaryPersonId: 'me',
+     ...overrides,
+diff --git a/scripts/verify-ledger-phase3.ts b/scripts/verify-ledger-phase3.ts
+index dbe73bd..65ba193 100644
+--- a/scripts/verify-ledger-phase3.ts
++++ b/scripts/verify-ledger-phase3.ts
+@@ -133,6 +133,7 @@ const data: AppDataV2 = {
+   creditCards: [],
+   transactions: [existingClearedTxn, alreadyMaterializedRent],
+   payCycles: [payCycle],
++  pensions: [],
+   scenarios: [],
+   primaryPersonId: 'me',
+ }
+@@ -226,6 +227,7 @@ const jointData: AppDataV2 = {
+   creditCards: [],
+   transactions: [],
+   payCycles: [],
++  pensions: [],
+   scenarios: [],
+   primaryPersonId: 'alice',
+ }
+diff --git a/scripts/verify-ledger.ts b/scripts/verify-ledger.ts
+index 79afed5..041721e 100644
+--- a/scripts/verify-ledger.ts
++++ b/scripts/verify-ledger.ts
+@@ -227,6 +227,7 @@ const staleData = {
+   creditCards: [],
+   transactions: [],
+   payCycles: [],
++  pensions: [],
+   scenarios: [],
+   primaryPersonId: '',
+ } as unknown as AppDataV2
+diff --git a/scripts/verify-loan-migration.ts b/scripts/verify-loan-migration.ts
+index 62310e0..70a4c22 100644
+--- a/scripts/verify-loan-migration.ts
++++ b/scripts/verify-loan-migration.ts
+@@ -41,6 +41,7 @@ const rawData = {
+   creditCards: [],
+   transactions: [],
+   payCycles: [],
++  pensions: [],
+   scenarios: [],
+ } as unknown as AppDataV2
+ 
+diff --git a/scripts/verify-pending-net.ts b/scripts/verify-pending-net.ts
+index f8bd199..c29efd1 100644
+--- a/scripts/verify-pending-net.ts
++++ b/scripts/verify-pending-net.ts
+@@ -121,6 +121,7 @@ const data: AppDataV2 = {
+   creditCards: [],
+   transactions: [familyTransfer],
+   payCycles: [payCycle],
++  pensions: [],
+   scenarios: [],
+ }
+ const asOf = new Date(2026, 7, 22)
+diff --git a/scripts/verify-pension-ledger.ts b/scripts/verify-pension-ledger.ts
+new file mode 100644
+index 0000000..73debbe
+--- /dev/null
++++ b/scripts/verify-pension-ledger.ts
+@@ -0,0 +1,171 @@
++// Regression checks for Pension (backlog item c). Covers:
++//  1. generatePensionTransactions across weekly/monthly frequency, amount
++//     history, occurrence overrides (edit + delete), and an inactive
++//     pension generating nothing.
++//  2. resolvePensionAmount / applyPensionAmountChange — same tie-break and
++//     patch-building contract as schedule.ts's RecurringTemplate versions.
++//  3. Every generated transaction's shape: direction/category/sourceType/
++//     sourceId/personId/note, matching Pension's "treated as income
++//     exactly like salary" spec.
++//  4. autoClearDuePayments actually materializes a due pension payment
++//     (not just computes it) and reconcilePensionTransactions corrects an
++//     already-cleared one after the pension's amount changes.
++//  5. convertClearedSalaryToStandaloneIncome — the confirmed "silently
++//     convert cleared payments" behaviour when a salary is deleted:
++//     cleared rows convert, pending rows and other people's rows don't.
++
++import { generatePensionTransactions, resolvePensionAmount, applyPensionAmountChange, pensionOccurrencePreviews, newPension } from '../src/lib/pensionLedger'
++import { convertClearedSalaryToStandaloneIncome } from '../src/lib/salaryLedger'
++import { autoClearDuePayments } from '../src/lib/autoClear'
++import { INCOME_CATEGORY_ID } from '../src/types/ledger'
++import { defaultPayCycleConfig } from '../src/lib/ledgerStorage'
++import type { AppDataV2, Pension, Person, Transaction } from '../src/types/ledger'
++
++let failures = 0
++function check(label: string, actual: unknown, expected: unknown, tolerance = 0.01) {
++  const ok = typeof actual === 'number' && typeof expected === 'number' ? Math.abs(actual - expected) <= tolerance : JSON.stringify(actual) === JSON.stringify(expected)
++  console.log(`${ok ? '✓' : '✗ FAIL'} ${label} — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
++  if (!ok) failures++
++}
++
++// ---- 1. Basic generation: monthly, and weekly ----
++const statePension: Pension = {
++  id: 'pen-state',
++  personId: 'p1',
++  name: 'State Pension',
++  amount: 221.2,
++  frequency: 'weekly',
++  anchorDate: '2026-01-05', // a Monday
++  active: true,
++}
++const stateOccurrences = generatePensionTransactions(statePension, new Date(2026, 0, 1), new Date(2026, 0, 31))
++check('Weekly pension: 4 Mondays fall within January 2026 (5th, 12th, 19th, 26th)', stateOccurrences.length, 4)
++check('Each weekly occurrence is £221.20', stateOccurrences.every((t) => t.amount === 221.2), true)
++
++const privatePension: Pension = {
++  id: 'pen-private',
++  personId: 'p1',
++  name: 'Private Pension',
++  amount: 500,
++  frequency: 'monthly',
++  anchorDate: '2026-01-15',
++  active: true,
++}
++const privateOccurrences = generatePensionTransactions(privatePension, new Date(2026, 0, 1), new Date(2026, 5, 30))
++check('Monthly pension: 6 occurrences Jan–Jun 2026', privateOccurrences.length, 6)
++check('Monthly pension dates land on the 15th every month', privateOccurrences.map((t) => t.date).sort(), ['2026-01-15', '2026-02-15', '2026-03-15', '2026-04-15', '2026-05-15', '2026-06-15'].sort())
++
++// ---- 2. Transaction shape — "treated as income exactly like salary" ----
++const one = privateOccurrences[0]
++check('direction is "in"', one.direction, 'in')
++check('categoryId is the reserved Income category', one.categoryId, INCOME_CATEGORY_ID)
++check('type is pension_income, distinct from salary', one.type, 'pension_income')
++check('status starts pending', one.status, 'pending')
++check('sourceType/sourceId link back to the Pension', [one.sourceType, one.sourceId], ['pension', 'pen-private'])
++check('personId set (so it counts as this person\'s income)', one.personId, 'p1')
++check('note carries the pension\'s own name, not a generic "Salary" label', one.note, 'Private Pension')
++
++// ---- 3. Inactive pension generates nothing ----
++const paused: Pension = { ...privatePension, active: false }
++check('An inactive pension generates zero occurrences', generatePensionTransactions(paused, new Date(2026, 0, 1), new Date(2026, 11, 31)).length, 0)
++
++// ---- 4. resolvePensionAmount + amountHistory (standing change, "all future") ----
++const raised: Pension = {
++  ...privatePension,
++  amount: 550,
++  amountEffectiveFrom: '2026-04-15',
++  amountHistory: [{ effectiveFrom: '2026-01-15', amount: 500 }],
++}
++check('Before the raise: old amount applies', resolvePensionAmount(raised, '2026-03-15'), 500)
++check('On the raise date: new amount applies', resolvePensionAmount(raised, '2026-04-15'), 550)
++check('After the raise: new amount still applies', resolvePensionAmount(raised, '2026-06-15'), 550)
++
++const raisedOccurrences = generatePensionTransactions(raised, new Date(2026, 0, 1), new Date(2026, 5, 30))
++check('Generated occurrences reflect the historized raise, not a flat amount', raisedOccurrences.map((t) => t.amount), [500, 500, 500, 550, 550, 550])
++
++// ---- 5. applyPensionAmountChange builds the correct patch ----
++const patch = applyPensionAmountChange(privatePension, 600, '2026-07-15')
++check('New amount is the patch\'s amount', patch.amount, 600)
++check('amountEffectiveFrom is the chosen date', patch.amountEffectiveFrom, '2026-07-15')
++check('Prior value preserved in amountHistory', patch.amountHistory, [{ effectiveFrom: '2026-01-15', amount: 500 }])
++
++// ---- 6. occurrenceOverrides — single-row edit + delete, same shape as RecurringTemplate ----
++const withOverrides: Pension = {
++  ...privatePension,
++  occurrenceOverrides: [
++    { originalDate: '2026-02-15', amount: 750 }, // one-off higher payment this month only
++    { originalDate: '2026-03-15', deleted: true }, // skipped entirely
++  ],
++}
++const overriddenOccurrences = generatePensionTransactions(withOverrides, new Date(2026, 0, 1), new Date(2026, 3, 30))
++check('Deleted occurrence is dropped entirely (Jan, Feb, Apr remain — Mar gone)', overriddenOccurrences.map((t) => t.date), ['2026-01-15', '2026-02-15', '2026-04-15'])
++check('Overridden amount applies to just that one occurrence', overriddenOccurrences.find((t) => t.date === '2026-02-15')?.amount, 750)
++check('Every other occurrence keeps the standing amount', overriddenOccurrences.find((t) => t.date === '2026-01-15')?.amount, 500)
++
++// ---- 7. pensionOccurrencePreviews — Wallet.tsx's "next N upcoming" pills ----
++const previews = pensionOccurrencePreviews(privatePension, new Date(2026, 0, 1), 3)
++check('Returns exactly `count` previews', previews.length, 3)
++check('Each preview carries its originalDate alongside the resolved date', previews[0].originalDate, previews[0].date)
++
++// ---- 8. newPension constructor ----
++const built = newPension({ personId: 'p1', name: 'Test', amount: 100, frequency: 'monthly', anchorDate: '2026-01-01' })
++check('newPension defaults to active', built.active, true)
++
++// ---- 9. autoClearDuePayments actually materializes a due pension payment ----
++const person: Person = { id: 'p1', name: 'Pat', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
++const payCycle = { ...defaultPayCycleConfig('p1'), openingBalanceDate: '2026-01-01' }
++const baseData: AppDataV2 = {
++  people: [person],
++  categories: [],
++  recurringTemplates: [],
++  loans: [],
++  creditCards: [],
++  pensions: [{ ...privatePension, anchorDate: '2026-01-15' }],
++  transactions: [],
++  payCycles: [payCycle],
++  scenarios: [],
++  primaryPersonId: 'p1',
++}
++const afterAutoClear = autoClearDuePayments(baseData, new Date(2026, 1, 20)) // 20 Feb — Jan + Feb payments due
++const materialized = afterAutoClear.transactions.filter((t) => t.type === 'pension_income')
++check('Two pension payments materialized as real, cleared transactions', materialized.length, 2)
++check('Both are cleared, not pending', materialized.every((t) => t.status === 'cleared'), true)
++
++// A second pass on the SAME data (asOf unchanged) must be a no-op — the
++// dedupeKey (sourceType:sourceId:date) should suppress re-materializing
++// what's already there.
++const secondPass = autoClearDuePayments(afterAutoClear, new Date(2026, 1, 20))
++check('A second pass with nothing new due changes nothing (idempotent)', secondPass === afterAutoClear, true)
++
++// ---- 10. reconcilePensionTransactions corrects an already-cleared row after the amount changes ----
++const raisedAfterClearing: AppDataV2 = { ...afterAutoClear, pensions: [{ ...afterAutoClear.pensions[0], amount: 700 }] }
++const reconciled = autoClearDuePayments(raisedAfterClearing, new Date(2026, 1, 20))
++const reconciledAmounts = reconciled.transactions.filter((t) => t.type === 'pension_income').map((t) => t.amount)
++check('Already-cleared pension transactions re-sync to the new amount', reconciledAmounts, [700, 700])
++
++// ---- 11. convertClearedSalaryToStandaloneIncome — the confirmed salary-deletion behaviour ----
++const salaryTx: Transaction = {
++  id: 't1',
++  date: '2026-01-28',
++  amount: 3000,
++  direction: 'in',
++  categoryId: INCOME_CATEGORY_ID,
++  paymentMethod: 'bank_transfer',
++  status: 'cleared',
++  type: 'salary',
++  location: 'personal',
++  ownerId: 'p1',
++  personId: 'p1',
++}
++const pendingSalaryTx: Transaction = { ...salaryTx, id: 't2', date: '2026-03-28', status: 'pending' }
++const otherPersonSalaryTx: Transaction = { ...salaryTx, id: 't3', personId: 'p2', ownerId: 'p2' }
++const unrelatedTx: Transaction = { ...salaryTx, id: 't4', type: 'expense', direction: 'out' }
++
++const converted = convertClearedSalaryToStandaloneIncome([salaryTx, pendingSalaryTx, otherPersonSalaryTx, unrelatedTx], 'p1')
++check('The cleared salary transaction for THIS person converts to plain income', converted.find((t) => t.id === 't1')?.type, 'income')
++check('A PENDING salary transaction is left alone (still salary)', converted.find((t) => t.id === 't2')?.type, 'salary')
++check("Another person's cleared salary transaction is left alone", converted.find((t) => t.id === 't3')?.type, 'salary')
++check('A non-salary transaction is untouched', converted.find((t) => t.id === 't4')?.type, 'expense')
++check('The converted transaction keeps its amount/date/status — only type changes', converted.find((t) => t.id === 't1'), { ...salaryTx, type: 'income' })
++
++process.exit(failures === 0 ? 0 : 1)
+diff --git a/scripts/verify-purchase-scenario.ts b/scripts/verify-purchase-scenario.ts
+index 5cbfde6..9ab76fa 100644
+--- a/scripts/verify-purchase-scenario.ts
++++ b/scripts/verify-purchase-scenario.ts
+@@ -78,6 +78,7 @@ const data: AppDataV2 = {
+   creditCards: [],
+   transactions: [tx('bill-a', '2026-09-10', 200, 'pending'), tx('bill-b', '2026-09-25', 300, 'pending')],
+   payCycles: [payCycle],
++  pensions: [],
+   scenarios: [],
+ } as unknown as AppDataV2
+ 
+@@ -231,6 +232,7 @@ const legacyData: AppData = {
+   bills: [],
+   loans: [],
+   creditCards: [],
++  pensions: [],
+   scenarios: [],
+   primaryPersonId: 'p1',
+ }
+diff --git a/scripts/verify-salary-end-date.ts b/scripts/verify-salary-end-date.ts
+new file mode 100644
+index 0000000..b403061
+--- /dev/null
++++ b/scripts/verify-salary-end-date.ts
+@@ -0,0 +1,109 @@
++// Regression checks for the salary end-date field (backlog item b — see
++// SUPABASE-MIGRATION-PLAN.md's "Personal-Ledger feature backlog"). Covers:
++//  1. findApplicableSnapshot respects endDate — a snapshot stops governing
++//     any date after its own end.
++//  2. A later snapshot with no end date correctly takes back over, even
++//     though an earlier one in the same history has already ended.
++//  3. computeNetPayForPeriod returns null past the end, INCLUDING for a
++//     period that already has a manual override or an attached bonus —
++//     an end date must be able to suppress those too, not just the plain
++//     snapshot-derived figure.
++//  4. generateSalaryTransactions stops producing pending occurrences past
++//     the end date, and produces nothing at all for a range entirely past
++//     it — without needing a real Transaction to already exist (this is
++//     the generator, not the ledger; "already cleared payments are
++//     unaffected" is a property of what the caller does with already-
++//     materialized Transaction rows, which this generator never touches).
++//  5. latestSalarySnapshot finds the governing-for-editing snapshot even
++//     once it's ended — the whole reason it's a separate lookup from
++//     findApplicableSnapshot.
++//  6. Clearing endDate (back to undefined) resumes indefinite generation,
++//     exactly as if it had never been set.
++
++import { findApplicableSnapshot, latestSalarySnapshot, computeNetPayForPeriod, generateSalaryTransactions } from '../src/lib/salaryLedger'
++import type { Person, PayCycleConfig } from '../src/types/ledger'
++
++let failures = 0
++function check(label: string, actual: unknown, expected: unknown, tolerance = 0.01) {
++  const ok = typeof actual === 'number' && typeof expected === 'number' ? Math.abs(actual - expected) <= tolerance : JSON.stringify(actual) === JSON.stringify(expected)
++  console.log(`${ok ? '✓' : '✗ FAIL'} ${label} — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
++  if (!ok) failures++
++}
++
++// ---- 1 & 2. findApplicableSnapshot respects endDate, and a later snapshot still wins where it should ----
++const retiring: Person = {
++  id: 'p1',
++  name: 'Pat',
++  color: '#ff5b4c',
++  salaryHistory: [{ id: 's1', personId: 'p1', effectiveFrom: '2026-01-01', grossAnnual: 40000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [], endDate: '2026-06-30' }],
++  salaryOverrides: [],
++  savingsEntries: [],
++}
++check('Before end date: snapshot still applies', findApplicableSnapshot(retiring, '2026-06-15')?.id, 's1')
++check('On end date: snapshot still applies (final payment)', findApplicableSnapshot(retiring, '2026-06-30')?.id, 's1')
++check('After end date: no snapshot applies', findApplicableSnapshot(retiring, '2026-07-01'), null)
++check('Well after end date: still no snapshot applies', findApplicableSnapshot(retiring, '2026-12-25'), null)
++
++const newJob: Person = {
++  id: 'p2',
++  name: 'Sam',
++  color: '#4c9aff',
++  salaryHistory: [
++    { id: 's1', personId: 'p2', effectiveFrom: '2026-01-01', grossAnnual: 35000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [], endDate: '2026-05-31' },
++    { id: 's2', personId: 'p2', effectiveFrom: '2026-06-01', grossAnnual: 42000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] },
++  ],
++  salaryOverrides: [],
++  savingsEntries: [],
++}
++check('A later snapshot with no end date supersedes an earlier ended one', findApplicableSnapshot(newJob, '2026-06-15')?.id, 's2')
++check('The ended snapshot still governs its own (pre-handover) window', findApplicableSnapshot(newJob, '2026-03-01')?.id, 's1')
++check('New job has no end date of its own — keeps applying indefinitely', findApplicableSnapshot(newJob, '2027-01-01')?.id, 's2')
++
++// ---- 3. computeNetPayForPeriod: end date suppresses overrides and bonuses too, not just the plain figure ----
++const withOverride: Person = {
++  ...retiring,
++  salaryOverrides: [
++    { id: 'o1', personId: 'p1', payPeriodDate: '2026-05-29', netPayOverride: 3000, reason: 'manual bump' },
++    // A period past the end date that ALREADY has a manual override —
++    // simulates the override having been set before the end date was
++    // pulled backward. The end date must win.
++    { id: 'o2', personId: 'p1', payPeriodDate: '2026-08-31', netPayOverride: 3000, reason: 'stale override past the end' },
++    { id: 'o3', personId: 'p1', payPeriodDate: '2026-08-31', netPayOverride: 3000, reason: 'stale bonus past the end', bonusGrossAmount: 500 },
++  ],
++}
++check('A manual override BEFORE the end date still applies', computeNetPayForPeriod(withOverride, '2026-05-29'), 3000)
++check('A manual override AFTER the end date is suppressed', computeNetPayForPeriod({ ...withOverride, salaryOverrides: [withOverride.salaryOverrides[1]] }, '2026-08-31'), null)
++check(
++  'An attached-bonus override AFTER the end date is also suppressed',
++  computeNetPayForPeriod({ ...withOverride, salaryOverrides: [withOverride.salaryOverrides[2]] }, '2026-08-31'),
++  null,
++)
++check('Plain net pay after the end date is null (no snapshot governs it)', computeNetPayForPeriod(retiring, '2026-09-01'), null)
++check('Plain net pay before the end date is unaffected', computeNetPayForPeriod(retiring, '2026-02-15') !== null, true)
++
++// ---- 4. generateSalaryTransactions stops producing pending occurrences past the end date ----
++const payCycle: PayCycleConfig = {
++  personId: 'p1',
++  openingBalance: 0,
++  openingBalanceDate: '2026-01-01',
++  paydayDayOfMonth: 28,
++  paydayAdjustForNonWorkingDay: true,
++  cycleStartDayOfMonth: 1,
++}
++const generatedAcrossEnd = generateSalaryTransactions(retiring, payCycle, new Date(2026, 4, 1), new Date(2026, 7, 31)) // May–Aug 2026
++check('Generates May, June — nothing for July/August (past the 30 Jun end)', generatedAcrossEnd.map((t) => t.date).sort(), ['2026-05-28', '2026-06-26'].sort())
++// Nov 2026's 28th is a Saturday — resolves to Fri 27th (see verify-ledger.ts §3), still before the retiring test's own end date's month; use a range entirely past it instead.
++const generatedFullyPast = generateSalaryTransactions(retiring, payCycle, new Date(2026, 8, 1), new Date(2026, 10, 30)) // Sep–Nov 2026, entirely past 30 Jun
++check('A range entirely past the end date generates nothing at all', generatedFullyPast.length, 0)
++
++// ---- 5. latestSalarySnapshot finds the governing-for-editing snapshot even once it's ended ----
++check('latestSalarySnapshot finds the ended snapshot (findApplicableSnapshot would return null here)', latestSalarySnapshot(retiring)?.id, 's1')
++check('latestSalarySnapshot picks the later of two, regardless of either one\'s end date', latestSalarySnapshot(newJob)?.id, 's2')
++check('latestSalarySnapshot returns null for a person with no salary history at all', latestSalarySnapshot({ ...retiring, salaryHistory: [] }), null)
++
++// ---- 6. Clearing endDate resumes indefinite generation ----
++const cleared: Person = { ...retiring, salaryHistory: [{ ...retiring.salaryHistory[0], endDate: undefined }] }
++check('Clearing endDate: a date that used to be past-end now resolves again', findApplicableSnapshot(cleared, '2026-09-01')?.id, 's1')
++check('Clearing endDate: net pay resumes for a previously-suppressed period', computeNetPayForPeriod(cleared, '2026-09-01') !== null, true)
++
++process.exit(failures === 0 ? 0 : 1)
+diff --git a/scripts/verify-savings.ts b/scripts/verify-savings.ts
+index ca95679..3e4f4ae 100644
+--- a/scripts/verify-savings.ts
++++ b/scripts/verify-savings.ts
+@@ -65,6 +65,7 @@ const savingsData: AppDataV2 = {
+   creditCards: [],
+   transactions: [],
+   payCycles: [payCycle],
++  pensions: [],
+   scenarios: [],
+   primaryPersonId: 'me',
+ }
+diff --git a/src/components/BottomNav.tsx b/src/components/BottomNav.tsx
+index 97f3fa2..69ead91 100644
+--- a/src/components/BottomNav.tsx
++++ b/src/components/BottomNav.tsx
+@@ -3,7 +3,7 @@ import { Home, Wallet, Landmark, Receipt, Banknote, FlaskConical } from 'lucide-
+ 
+ const TABS = [
+   { to: '/', label: 'Home', icon: Home, end: true },
+-  { to: '/salary', label: 'Salary', icon: Wallet },
++  { to: '/salary', label: 'Wallet', icon: Wallet },
+   { to: '/loans', label: 'Borrowing', icon: Landmark },
+   { to: '/bills', label: 'Bills', icon: Receipt },
+   { to: '/expenses', label: 'Transactions', icon: Banknote },
+diff --git a/src/context/LedgerContext.tsx b/src/context/LedgerContext.tsx
+index 5c105fc..59a2f2d 100644
+--- a/src/context/LedgerContext.tsx
++++ b/src/context/LedgerContext.tsx
+@@ -7,6 +7,7 @@ import type {
+   Loan,
+   PayCycleConfig,
+   PaymentMethod,
++  Pension,
+   Person,
+   RecurringTemplate,
+   SalaryOverride,
+@@ -22,6 +23,7 @@ import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/credi
+ import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, type CalibrationResult } from '../lib/ledgerLoans'
+ import { autoClearDuePayments } from '../lib/autoClear'
+ import { reconcilePersonReferences } from '../lib/household'
++import { convertClearedSalaryToStandaloneIncome } from '../lib/salaryLedger'
+ 
+ import { toLocalIsoDate as toIso } from '../lib/date'
+ const todayIso = () => toIso(new Date())
+@@ -98,6 +100,19 @@ interface LedgerContextValue {
+   addSalarySnapshot: (personId: string, snapshot: Omit<SalarySnapshot, 'id' | 'personId'>) => string
+   updateSalarySnapshot: (personId: string, snapshotId: string, updates: Partial<Omit<SalarySnapshot, 'id' | 'personId'>>) => void
+   removeSalarySnapshot: (personId: string, snapshotId: string) => void
++  /**
++   * Deletes a person's ENTIRE salary — every snapshot and override, not
++   * just one (see removeSalarySnapshot for that). Distinct from the
++   * end-date field (Wallet.tsx), which is non-destructive and preserves
++   * history for a salary that's simply ending; this is the rarer,
++   * deliberate "wipe it" action — e.g. correcting a mis-set-up salary, or
++   * fully retiring someone whose income is now entirely pension-based.
++   * Already-CLEARED 'salary' transactions are converted to standalone
++   * 'income' ones first (see salaryLedger.ts's
++   * convertClearedSalaryToStandaloneIncome for the full reasoning) so
++   * deleting the record never ripples into already-happened history.
++   */
++  removeAllSalaryHistory: (personId: string) => void
+ 
+   addSalaryOverride: (personId: string, override: Omit<SalaryOverride, 'id' | 'personId'>) => string
+   updateSalaryOverride: (personId: string, overrideId: string, updates: Partial<Omit<SalaryOverride, 'id' | 'personId'>>) => void
+@@ -107,6 +122,17 @@ interface LedgerContextValue {
+   updateSavingsEntry: (personId: string, entryId: string, updates: Partial<Omit<SavingsEntry, 'id'>>) => void
+   removeSavingsEntry: (personId: string, entryId: string) => void
+ 
++  // Pensions — a concurrent, explicitly-OWNED income source (personId),
++  // not nested under Person the way salary is. See Pension's own comment
++  // in types/ledger.ts for why. Single generic update action, same
++  // convention as updateRecurringTemplate — the UI computes the patch
++  // (via pensionLedger.ts's applyPensionAmountChange for a standing
++  // change, or a direct occurrenceOverrides patch for a single-row edit)
++  // before calling this, rather than this action knowing about either.
++  addPension: (personId: string, pension: Omit<Pension, 'id' | 'personId'>) => string
++  updatePension: (id: string, updates: Partial<Omit<Pension, 'id' | 'personId'>>) => void
++  removePension: (id: string) => void
++
+   // What-if scenarios — data storage only. See lib/legacyBridge.ts for
+   // how the scenario ENGINE itself gets fed real ledger data.
+   addScenario: (scenario: Omit<Scenario, 'id'>) => string
+@@ -439,6 +465,13 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
+       people: prev.people.map((p) => (p.id === personId ? { ...p, salaryHistory: p.salaryHistory.filter((s) => s.id !== snapshotId) } : p)),
+     }))
+   }
++  const removeAllSalaryHistory: LedgerContextValue['removeAllSalaryHistory'] = (personId) => {
++    setDataState((prev) => ({
++      ...prev,
++      transactions: convertClearedSalaryToStandaloneIncome(prev.transactions, personId),
++      people: prev.people.map((p) => (p.id === personId ? { ...p, salaryHistory: [], salaryOverrides: [] } : p)),
++    }))
++  }
+ 
+   const addSalaryOverride: LedgerContextValue['addSalaryOverride'] = (personId, override) => {
+     const id = nanoid(8)
+@@ -486,6 +519,31 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
+     }))
+   }
+ 
++  const addPension: LedgerContextValue['addPension'] = (personId, pension) => {
++    const id = nanoid(8)
++    setDataState((prev) => ({ ...prev, pensions: [...prev.pensions, { ...pension, id, personId }] }))
++    return id
++  }
++  const updatePension: LedgerContextValue['updatePension'] = (id, updates) => {
++    setDataState((prev) => ({ ...prev, pensions: prev.pensions.map((p) => (p.id === id ? { ...p, ...updates } : p)) }))
++  }
++  const removePension: LedgerContextValue['removePension'] = (id) => {
++    setDataState((prev) => ({
++      ...prev,
++      pensions: prev.pensions.filter((p) => p.id !== id),
++      // A person's followsIncomeSource pointing at a now-deleted pension
++      // would silently strand their cycle-following choice — fall back
++      // to 'salary' (the same default as never having set one), same
++      // reconciliation instinct as household.ts's reconcilePersonReferences
++      // for a dangling ownerId.
++      payCycles: prev.payCycles.map((pc) =>
++        pc.followsIncomeSource?.type === 'pension' && pc.followsIncomeSource.pensionId === id
++          ? { ...pc, followsIncomeSource: { type: 'salary' } }
++          : pc,
++      ),
++    }))
++  }
++
+   const addScenario: LedgerContextValue['addScenario'] = (scenario) => {
+     const id = nanoid(8)
+     setDataState((prev) => ({ ...prev, scenarios: [...prev.scenarios, { ...scenario, id }] }))
+@@ -534,12 +592,16 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
+     addSalarySnapshot,
+     updateSalarySnapshot,
+     removeSalarySnapshot,
++    removeAllSalaryHistory,
+     addSalaryOverride,
+     updateSalaryOverride,
+     removeSalaryOverride,
+     addSavingsEntry,
+     updateSavingsEntry,
+     removeSavingsEntry,
++    addPension,
++    updatePension,
++    removePension,
+     addScenario,
+     updateScenario,
+     removeScenario,
+diff --git a/src/lib/autoClear.ts b/src/lib/autoClear.ts
+index 886786f..d11ed32 100644
+--- a/src/lib/autoClear.ts
++++ b/src/lib/autoClear.ts
+@@ -29,6 +29,7 @@ import { generateTransactionsForTemplate } from './schedule'
+ import { generateLoanPaymentTransactions } from './ledgerLoans'
+ import { generateMinimumPaymentTransactions } from './creditCards'
+ import { computeNetPayForPeriod, generateSalaryTransactions } from './salaryLedger'
++import { resolvePensionAmount, generatePensionTransactions } from './pensionLedger'
+ import { generateSavingsContributions } from './savingsLedger'
+ import { generateJointContributionTransactions } from './jointLedger'
+ import { dedupeKey } from './projection'
+@@ -70,15 +71,39 @@ function reconcileSalaryTransactions(data: AppDataV2): AppDataV2 {
+   return changed ? { ...data, transactions } : data
+ }
+ 
++/**
++ * Same reconciliation as reconcileSalaryTransactions above, for
++ * 'pension_income' — a materialized transaction's amount can drift from
++ * what pensionLedger.ts's resolvePensionAmount now computes for that
++ * date, the same way a salary transaction can: editing a pension's
++ * standing amount (with a real effective-from date, per
++ * applyPensionAmountChange) or a single occurrence's override after that
++ * date has already cleared. Keyed on sourceId (the specific Pension),
++ * not just personId, since one person can own several pensions.
++ */
++function reconcilePensionTransactions(data: AppDataV2): AppDataV2 {
++  let changed = false
++  const transactions = data.transactions.map((t) => {
++    if (t.type !== 'pension_income' || !t.sourceId) return t
++    const pension = data.pensions.find((p) => p.id === t.sourceId)
++    if (!pension) return t
++    const amount = resolvePensionAmount(pension, t.date)
++    if (amount <= 0 || amount === t.amount) return t
++    changed = true
++    return { ...t, amount }
++  })
++  return changed ? { ...data, transactions } : data
++}
++
+ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): AppDataV2 {
+   const asOfIso = toLocalIsoDate(asOf)
+   let result = data
+   let changed = false
+ 
+-  // Runs FIRST, before anything is settled: a stored salary row that's
+-  // drifted from its computed value should be corrected whether or not
+-  // there's also something new coming due this pass.
+-  const reconciled = reconcileSalaryTransactions(data)
++  // Runs FIRST, before anything is settled: a stored salary/pension row
++  // that's drifted from its computed value should be corrected whether
++  // or not there's also something new coming due this pass.
++  const reconciled = reconcilePensionTransactions(reconcileSalaryTransactions(data))
+   if (reconciled !== data) {
+     result = reconciled
+     changed = true
+@@ -118,6 +143,9 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()):
+       candidates.push(...generateMinimumPaymentTransactions(card, rangeStart, asOf, result.transactions))
+     }
+     candidates.push(...generateSalaryTransactions(person, payCycle, rangeStart, asOf))
++    for (const pension of result.pensions.filter((p) => p.personId === person.id)) {
++      candidates.push(...generatePensionTransactions(pension, rangeStart, asOf))
++    }
+     candidates.push(...generateSavingsContributions(person, payCycle, rangeStart, asOf))
+     candidates.push(...generateJointContributionTransactions(result, person.id, rangeStart, asOf))
+ 
+diff --git a/src/lib/cycleSummary.ts b/src/lib/cycleSummary.ts
+index 2124266..4657202 100644
+--- a/src/lib/cycleSummary.ts
++++ b/src/lib/cycleSummary.ts
+@@ -74,7 +74,17 @@ export function computeCycleSummary(transactions: Transaction[], clearedBalance:
+     if (t.status === 'pending') pendingDelta += signedAmount(t)
+ 
+     if (t.direction === 'in') {
+-      if (t.type === 'salary' || t.type === 'bonus') salary += t.amount
++      // Pension income counted in the same bucket as salary/bonus — same
++      // "the wage/pension arriving" concept, and per Pension's own type
++      // comment, treated as income exactly like salary everywhere else
++      // already was. The BUCKET's label ("salary") not yet reflecting
++      // that a pension can be the one filling it is exactly backlog item
++      // c's flagged, still-open complication #1 ("transaction sort order
++      // forcing salary first — needs revisiting once multiple income
++      // sources exist") — this fix is the correctness-preserving part
++      // (nothing silently undercounts pension income in the summary
++      // totals), not that deeper relabeling.
++      if (t.type === 'salary' || t.type === 'bonus' || t.type === 'pension_income') salary += t.amount
+       else otherIncome += t.amount
+       continue
+     }
+@@ -100,17 +110,22 @@ export function computeCycleSummary(transactions: Transaction[], clearedBalance:
+ 
+ /**
+  * Ordering rank within a single date for the Summary ledger's
+- * group-by-list / order-by-date view: salary (and a bonus paid alongside
+- * it) always lands FIRST on its date, before any bill or loan due the
+- * same day. This isn't cosmetic — the rolling balance figure shown beside
+- * each row is a running fold in list order, so a bill sorted above the
+- * salary that funds it shows a dip that never actually happens.
++ * group-by-list / order-by-date view: salary/pension income (and a bonus
++ * paid alongside salary) always lands FIRST on its date, before any bill
++ * or loan due the same day. This isn't cosmetic — the rolling balance
++ * figure shown beside each row is a running fold in list order, so a
++ * bill sorted above the income that funds it shows a dip that never
++ * actually happens. Same open question as computeCycleSummary above once
++ * there's genuinely more than one same-day income source (e.g. a salary
++ * AND a pension landing the same date) — which of the two should rank
++ * first between THEM isn't resolved here, only that both rank ahead of
++ * outgoings.
+  */
+ export function sameDateRank(t: Pick<Transaction, 'type'>): number {
+-  return t.type === 'salary' || t.type === 'bonus' ? 0 : 1
++  return t.type === 'salary' || t.type === 'bonus' || t.type === 'pension_income' ? 0 : 1
+ }
+ 
+-/** Chronological, with salary first within any given date. */
++/** Chronological, with salary/pension income first within any given date. */
+ export function compareByDateSalaryFirst(a: Transaction, b: Transaction): number {
+   if (a.date !== b.date) return a.date.localeCompare(b.date)
+   return sameDateRank(a) - sameDateRank(b)
+diff --git a/src/lib/household.ts b/src/lib/household.ts
+index 18c8333..eb63565 100644
+--- a/src/lib/household.ts
++++ b/src/lib/household.ts
+@@ -1,6 +1,6 @@
+ import type { AppData, Person as LegacyPerson } from '../types/models'
+ import type { BillLocation } from '../types/models'
+-import type { AppDataV2, Person } from '../types/ledger'
++import type { AppDataV2, Pension, Person } from '../types/ledger'
+ import { calculateNetSalary } from './tax'
+ import { combineBillsWithLoans } from './loans'
+ 
+@@ -28,13 +28,19 @@ function round2(n: number): number {
+   return Math.round(n * 100) / 100
+ }
+ 
+-// ── "Has a salary configured" helpers ───────────────────────────────────
+-// "A second person exists" and "a second salary is configured" are NOT the
+-// same thing — addPerson() creates a person with an empty salaryHistory,
+-// so a household can have 2+ people with only one of them actually earning
+-// anything yet. Joint bills/loans split a real income between people, so
+-// anywhere that offers "Joint" as a choice (not just displays one that
+-// already exists) should gate on this, not on people.length alone.
++// ── "Has any income configured" helpers ──────────────────────────────
++// "A second person exists" and "a second income source is configured"
++// are NOT the same thing — addPerson() creates a person with an empty
++// salaryHistory and no pensions, so a household can have 2+ people with
++// only one of them actually earning anything yet. Joint bills/loans
++// split a real income between people, so anywhere that offers "Joint" as
++// a choice (not just displays one that already exists) should gate on
++// this, not on people.length alone.
++//
++// Broadened from "has a salary" to "has a salary OR an active pension"
++// once Pension became a real income type (backlog item c) — a
++// pension-only household still needs Joint to work, exactly as a
++// salary-only one always has.
+ 
+ /** Ledger shape (types/ledger.ts) — current app data, most pages. */
+ export function hasSalaryConfigured(person: Pick<Person, 'salaryHistory'>): boolean {
+@@ -45,6 +51,15 @@ export function peopleWithSalaryCount(people: Pick<Person, 'salaryHistory'>[]):
+   return people.filter(hasSalaryConfigured).length
+ }
+ 
++/** True if this person has a salary OR at least one active pension — the real "has any income" check for gating Joint. */
++export function hasIncomeConfigured(person: Pick<Person, 'salaryHistory' | 'id'>, pensions: Pick<Pension, 'personId' | 'active'>[]): boolean {
++  return hasSalaryConfigured(person) || pensions.some((p) => p.personId === person.id && p.active)
++}
++
++export function peopleWithIncomeCount(people: Pick<Person, 'salaryHistory' | 'id'>[], pensions: Pick<Pension, 'personId' | 'active'>[]): number {
++  return people.filter((p) => hasIncomeConfigured(p, pensions)).length
++}
++
+ /**
+  * Legacy shape (types/models.ts) — used by Scenarios.tsx/Dashboard.tsx via
+  * legacyBridge's adapter. The adapter always produces a `salary` object
+diff --git a/src/lib/ledgerStorage.ts b/src/lib/ledgerStorage.ts
+index 83c4e8d..c6fbb0a 100644
+--- a/src/lib/ledgerStorage.ts
++++ b/src/lib/ledgerStorage.ts
+@@ -88,6 +88,7 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
+     // runs exactly once per card and re-running migration on
+     // already-migrated data is a no-op.
+     creditCards: (data.creditCards ?? []).map((card) => (card.balanceAsOfDate ? card : anchorLegacyCardBalance(card, data.transactions ?? []))),
++    pensions: data.pensions ?? [],
+     transactions: data.transactions ?? [],
+     payCycles: data.payCycles ?? [],
+     scenarios: data.scenarios ?? [],
+@@ -158,6 +159,7 @@ export function defaultLedgerData(): AppDataV2 {
+     recurringTemplates: [],
+     loans: [],
+     creditCards: [],
++    pensions: [],
+     transactions: [],
+     payCycles: [defaultPayCycleConfig(meId)],
+     scenarios: [],
+diff --git a/src/lib/pensionLedger.ts b/src/lib/pensionLedger.ts
+new file mode 100644
+index 0000000..a7be6b0
+--- /dev/null
++++ b/src/lib/pensionLedger.ts
+@@ -0,0 +1,145 @@
++// Pension as its own scheduled income source (backlog item c). Deliberately
++// a SEPARATE small implementation from schedule.ts's RecurringTemplate
++// walker rather than forcing Pension through it — schedule.ts's functions
++// read RecurringTemplate-only fields throughout (categoryId, paymentMethod,
++// location, payee, payeeSharePercent, kind), none of which Pension has, and
++// genericizing that file would touch the Bills/Expenses pipeline it's
++// already load-bearing for. The date-walking ALGORITHM is intentionally
++// identical (same frequency stepping, same amount-history resolution, same
++// occurrence-override shape) — only the field set differs — so this file
++// mirrors schedule.ts's structure closely on purpose, the same way
++// salaryLedger.ts and savingsLedger.ts each already implement their own
++// variant of "walk paydays forward" rather than sharing one.
++
++import { addMonths, addQuarters, addWeeks, addYears } from 'date-fns'
++import { toLocalIsoDate as toIso } from './date'
++import { INCOME_CATEGORY_ID } from '../types/ledger'
++import type { Pension, RecurrenceFrequency, Transaction } from '../types/ledger'
++
++const MAX_OCCURRENCES = 2000
++
++function daysInMonth(year: number, monthIndex0: number): number {
++  return new Date(year, monthIndex0 + 1, 0).getDate()
++}
++
++function clampToAnchorDay(date: Date, anchorDay: number): Date {
++  const day = Math.min(anchorDay, daysInMonth(date.getFullYear(), date.getMonth()))
++  return new Date(date.getFullYear(), date.getMonth(), day)
++}
++
++function nextOccurrence(current: Date, frequency: RecurrenceFrequency, intervalWeeks: number | undefined, anchorDay: number): Date {
++  switch (frequency) {
++    case 'weekly':
++      return addWeeks(current, 1)
++    case 'every_n_weeks':
++      return addWeeks(current, Math.max(1, intervalWeeks ?? 1))
++    case 'monthly':
++      return clampToAnchorDay(addMonths(current, 1), anchorDay)
++    case 'quarterly':
++      return clampToAnchorDay(addQuarters(current, 1), anchorDay)
++    case 'annual':
++      return clampToAnchorDay(addYears(current, 1), anchorDay)
++  }
++}
++
++/**
++ * What `pension.amount` resolves to on a specific date — identical logic
++ * to schedule.ts's resolveTemplateAmount (see that function's comment for
++ * the full reasoning on the tie-break rule), against Pension's fields.
++ */
++export function resolvePensionAmount(pension: Pension, dateIso: string): number {
++  const candidates: { effectiveFrom: string; amount: number }[] = [...(pension.amountHistory ?? [])]
++  if (pension.amountEffectiveFrom) candidates.push({ effectiveFrom: pension.amountEffectiveFrom, amount: pension.amount })
++  if (candidates.length === 0) return pension.amount
++
++  const applicable = candidates
++    .map((c, index) => ({ ...c, index }))
++    .filter((c) => c.effectiveFrom <= dateIso)
++    .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom) || b.index - a.index)
++  return applicable[0]?.amount ?? pension.amount
++}
++
++export interface RawPensionOccurrence {
++  originalDate: string
++  date: string
++  amount: number
++}
++
++function walkPensionOccurrences(pension: Pension, rangeStart: Date, rangeEnd: Date): RawPensionOccurrence[] {
++  if (!pension.active) return []
++  if (rangeEnd < rangeStart) return []
++
++  const anchor = new Date(pension.anchorDate)
++  const anchorDay = anchor.getDate()
++
++  let cursor = anchor
++  let iterations = 0
++  while (cursor < rangeStart && iterations < MAX_OCCURRENCES) {
++    cursor = nextOccurrence(cursor, pension.frequency, pension.intervalWeeks, anchorDay)
++    iterations++
++  }
++
++  const results: RawPensionOccurrence[] = []
++  while (cursor <= rangeEnd && iterations < MAX_OCCURRENCES) {
++    const originalDate = toIso(cursor)
++    const override = pension.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
++    if (!override?.deleted) {
++      results.push({
++        originalDate,
++        date: override?.date ?? originalDate,
++        amount: override?.amount ?? resolvePensionAmount(pension, originalDate),
++      })
++    }
++    cursor = nextOccurrence(cursor, pension.frequency, pension.intervalWeeks, anchorDay)
++    iterations++
++  }
++
++  return results
++}
++
++/** Generates pending 'pension_income' transactions for every occurrence in the range — same "compute what should exist, caller dedupes" contract as schedule.ts/salaryLedger.ts/creditCards.ts. */
++export function generatePensionTransactions(pension: Pension, rangeStart: Date, rangeEnd: Date): Omit<Transaction, 'id'>[] {
++  return walkPensionOccurrences(pension, rangeStart, rangeEnd).map((occ) => ({
++    date: occ.date,
++    amount: occ.amount,
++    direction: 'in',
++    categoryId: INCOME_CATEGORY_ID,
++    paymentMethod: 'bank_transfer',
++    status: 'pending',
++    type: 'pension_income',
++    location: 'personal',
++    ownerId: pension.personId,
++    personId: pension.personId,
++    sourceType: 'pension',
++    sourceId: pension.id,
++    note: pension.name,
++  }))
++}
++
++/** Every upcoming occurrence, WITH its original scheduled date — Wallet.tsx's "next N upcoming payments as editable pills" needs this, same reason schedule.ts's templateOccurrencePreviews exists. */
++export function pensionOccurrencePreviews(pension: Pension, asOfDate: Date, count: number): RawPensionOccurrence[] {
++  return walkPensionOccurrences(pension, asOfDate, addYears(asOfDate, 15)).slice(0, count)
++}
++
++/** Builds the patch for "change the standing amount, effective from a chosen upcoming payment" — mirrors schedule.ts's applyTemplateAmountChange exactly, against Pension's fields. */
++export function applyPensionAmountChange(pension: Pension, newAmount: number, effectiveFrom: string): Pick<Pension, 'amount' | 'amountEffectiveFrom' | 'amountHistory'> {
++  const priorEntry = { effectiveFrom: pension.amountEffectiveFrom ?? pension.anchorDate, amount: pension.amount }
++  return {
++    amount: newAmount,
++    amountEffectiveFrom: effectiveFrom,
++    amountHistory: [...(pension.amountHistory ?? []), priorEntry],
++  }
++}
++
++/** Convenience constructor for a new pension with sensible defaults, same role as schedule.ts's newRecurringTemplate. */
++export function newPension(input: { personId: string; name: string; amount: number; frequency: RecurrenceFrequency; intervalWeeks?: number; anchorDate: string }): Omit<Pension, 'id'> {
++  return {
++    personId: input.personId,
++    name: input.name,
++    amount: input.amount,
++    frequency: input.frequency,
++    intervalWeeks: input.intervalWeeks,
++    anchorDate: input.anchorDate,
++    active: true,
++  }
++}
+diff --git a/src/lib/projection.ts b/src/lib/projection.ts
+index efce6a5..057388a 100644
+--- a/src/lib/projection.ts
++++ b/src/lib/projection.ts
+@@ -13,6 +13,7 @@ import { generateTransactionsForTemplate } from './schedule'
+ import { generateLoanPaymentTransactions } from './ledgerLoans'
+ import { generateMinimumPaymentTransactions } from './creditCards'
+ import { generateSalaryTransactions } from './salaryLedger'
++import { generatePensionTransactions } from './pensionLedger'
+ import { generateSavingsContributions } from './savingsLedger'
+ import { generateJointContributionTransactions } from './jointLedger'
+ import { cycleBoundsForDate } from './payCycle'
+@@ -176,6 +177,9 @@ export function computeProjectionToDate(
+   }
+   if (person) {
+     generated.push(...generateSalaryTransactions(person, payCycle, rangeStart, horizonEndDate))
++    for (const pension of data.pensions.filter((p) => p.personId === personId)) {
++      generated.push(...generatePensionTransactions(pension, rangeStart, horizonEndDate))
++    }
+     generated.push(...generateSavingsContributions(person, payCycle, rangeStart, horizonEndDate))
+   }
+   // This person's share of every joint bill/loan — the piece that used to
+diff --git a/src/lib/salaryLedger.ts b/src/lib/salaryLedger.ts
+index 24ee842..49ceecc 100644
+--- a/src/lib/salaryLedger.ts
++++ b/src/lib/salaryLedger.ts
+@@ -52,7 +52,35 @@ export function findApplicableSnapshot(person: Person, date: string): SalarySnap
+       if (byDate !== 0) return byDate
+       return b.index - a.index // tie: prefer the one added later (a more recent edit)
+     })
+-  return applicable[0]?.s ?? null
++  const resolved = applicable[0]?.s ?? null
++  // If the snapshot that would otherwise govern `date` has an end date,
++  // and `date` falls after it, nothing governs this period — this is
++  // exactly the "no salary payments generate after [end date]" behaviour
++  // the Wallet page's end-date field promises. Only the RESOLVED
++  // snapshot's own endDate matters here: if a later snapshot exists
++  // covering `date`, it already won the sort above and its own (likely
++  // unset) endDate is what applies instead, correctly ignoring the
++  // earlier snapshot's end.
++  if (resolved?.endDate && date > resolved.endDate) return null
++  return resolved
++}
++
++/**
++ * The most recent snapshot by effectiveFrom, regardless of endDate —
++ * deliberately NOT the same lookup as findApplicableSnapshot, which
++ * excludes a snapshot once its own endDate has passed. The Wallet page's
++ * end-date field needs to find and edit that snapshot even once it's
++ * ended (e.g. to push the date back out, or clear it entirely) —
++ * findApplicableSnapshot(person, today) would return null in exactly
++ * that case, since "no longer governs today" is precisely what it just
++ * got told to mean. Returns null only when the person has no salary
++ * history at all yet.
++ */
++export function latestSalarySnapshot(person: Person): SalarySnapshot | null {
++  return person.salaryHistory.reduce<SalarySnapshot | null>(
++    (latest, s) => (!latest || s.effectiveFrom >= latest.effectiveFrom ? s : latest),
++    null,
++  )
+ }
+ 
+ function snapshotToSalaryInput(snapshot: SalarySnapshot): SalaryInput {
+@@ -108,6 +136,16 @@ export function computeSnapshotNetPayForPeriod(person: Person, payPeriodDate: st
+  * that date) — a genuinely unanswerable case, not a zero.
+  */
+ export function computeNetPayForPeriod(person: Person, payPeriodDate: string): number | null {
++  // Gate on the underlying snapshot FIRST, even for a manual override —
++  // findApplicableSnapshot already returns null for a period past the
++  // governing snapshot's endDate (see its own comment), and a manual
++  // override or an attached bonus shouldn't be able to resurrect a
++  // payment for a period the end date says shouldn't happen. This only
++  // affects periods created before the end date was set and now fall
++  // after it; it never touches an already-materialized/cleared
++  // Transaction, which doesn't go through this function again.
++  if (!findApplicableSnapshot(person, payPeriodDate)) return null
++
+   const override = person.salaryOverrides.find((o) => o.payPeriodDate === payPeriodDate)
+ 
+   // A BONUS override is RECOMPUTED here rather than read back from its
+@@ -133,6 +171,26 @@ export function computeNetPayForPeriod(person: Person, payPeriodDate: string): n
+   return computeSnapshotNetPayForPeriod(person, payPeriodDate)
+ }
+ 
++/**
++ * When a person's ENTIRE salary is deleted (not just an end date — see
++ * SalaryEndDateField/Wallet.tsx for that, deliberately non-destructive,
++ * case), already-CLEARED 'salary' transactions must not retroactively
++ * look broken, or keep being chased forever by autoClear.ts's
++ * reconcileSalaryTransactions against a person who no longer has any
++ * salary history to compute against. Confirmed direction: convert them
++ * into standalone 'income' transactions — same date/amount/note,
++ * silently, in the background — so deleting the salary record never
++ * ripples into already-happened history. PENDING 'salary' transactions
++ * are deliberately left alone: they simply stop being regenerated
++ * (autoClearDuePayments's materialization step produces nothing new once
++ * salaryHistory is empty, since computeNetPayForPeriod has nothing left
++ * to compute against), and any already-stored pending one is harmless to
++ * leave as-is since it hasn't touched the balance yet.
++ */
++export function convertClearedSalaryToStandaloneIncome(transactions: Transaction[], personId: string): Transaction[] {
++  return transactions.map((t) => (t.type === 'salary' && t.personId === personId && t.status === 'cleared' ? { ...t, type: 'income' } : t))
++}
++
+ /** Generates pending 'salary' transactions for each resolved payday in the range. Skips any period with no applicable snapshot rather than emitting a zero-amount transaction. */
+ export function generateSalaryTransactions(person: Person, payCycle: PayCycleConfig, rangeStart: Date, rangeEnd: Date): Omit<Transaction, 'id'>[] {
+   const results: Omit<Transaction, 'id'>[] = []
+diff --git a/src/pages/Bills.tsx b/src/pages/Bills.tsx
+index c1d0b5c..1b344dc 100644
+--- a/src/pages/Bills.tsx
++++ b/src/pages/Bills.tsx
+@@ -15,7 +15,7 @@ import { CategoryManagerButton } from '../components/CategoryManagerModal'
+ import { LocationEditor } from '../components/LocationEditor'
+ import { SwipeToDelete } from '../components/SwipeToDelete'
+ import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
+-import { peopleWithSalaryCount } from '../lib/household'
++import { peopleWithIncomeCount } from '../lib/household'
+ import { recentAndUpcomingOccurrences, applyTemplateAmountChange } from '../lib/schedule'
+ 
+ const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
+@@ -46,9 +46,10 @@ export function Bills() {
+   const navigate = useNavigate()
+   const prefill = (routerLocation.state as { billPrefill?: BillPrefill } | null)?.billPrefill
+   // "Joint" is only offered as a location choice once 2+ people actually
+-  // have a salary configured — see lib/household.ts's hasSalaryConfigured
+-  // for why this differs from a plain people.length check.
+-  const canBeJoint = peopleWithSalaryCount(data.people) >= 2
++  // have real income (salary or an active pension) configured — see
++  // lib/household.ts's hasIncomeConfigured for why this differs from a
++  // plain people.length check.
++  const canBeJoint = peopleWithIncomeCount(data.people, data.pensions) >= 2
+ 
+   useEffect(() => {
+     if (prefill) setAdding(true)
+diff --git a/src/pages/Loans.tsx b/src/pages/Loans.tsx
+index 1873210..685d954 100644
+--- a/src/pages/Loans.tsx
++++ b/src/pages/Loans.tsx
+@@ -17,7 +17,7 @@ import { LocationEditor } from '../components/LocationEditor'
+ import { SwipeToDelete } from '../components/SwipeToDelete'
+ import { CollapsibleSection } from '../components/CollapsibleSection'
+ import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
+-import { peopleWithSalaryCount } from '../lib/household'
++import { peopleWithIncomeCount } from '../lib/household'
+ 
+ import { todayIso } from '../lib/date'
+ 
+@@ -83,9 +83,10 @@ export function Loans() {
+   // bill to make that split meaningful — see LoanEditPanel/LoanForm's
+   // "hasJointBills" prop for the full reasoning.
+   const hasJointBills = data.recurringTemplates.some((t) => t.location === 'joint')
+-  // ...and, separately, only once 2+ people actually have a salary
+-  // configured to split — see lib/household.ts's hasSalaryConfigured.
+-  const canBeJoint = peopleWithSalaryCount(data.people) >= 2
++  // ...and, separately, only once 2+ people actually have real income
++  // (salary or an active pension) to split — see lib/household.ts's
++  // hasIncomeConfigured.
++  const canBeJoint = peopleWithIncomeCount(data.people, data.pensions) >= 2
+ 
+   useEffect(() => {
+     if (loanPrefill) setAddingLoan(true)
+diff --git a/src/pages/Salary.tsx b/src/pages/Salary.tsx
+index d449581..44c6b28 100644
+--- a/src/pages/Salary.tsx
++++ b/src/pages/Salary.tsx
+@@ -4,18 +4,22 @@ import { formatCurrency } from '../lib/format'
+ import { useLedgerData } from '../context/LedgerContext'
+ import { calculateNetSalary, type StudentLoanPlan, type PayFrequency, type SalaryDeduction, type DeductionType } from '../lib/tax'
+ import { THREE_CYCLES_AHEAD } from '../lib/projection'
+-import { findApplicableSnapshot, computeNetPayForPeriod, upcomingPaydays, closedPaydays } from '../lib/salaryLedger'
++import { findApplicableSnapshot, latestSalarySnapshot, computeNetPayForPeriod, upcomingPaydays, closedPaydays } from '../lib/salaryLedger'
+ import { calculateBonusOnTop } from '../lib/tax'
+ import { monthlyAmountForEntry } from '../lib/savings'
+ import { AttachBonusButton } from '../components/AttachBonusButton'
+ import { downloadLedgerBackup, parseLedgerBackupJson } from '../lib/ledgerStorage'
+-import { Plus, Trash2, Download, Upload, ChevronDown, ChevronUp, Settings, X } from 'lucide-react'
+-import type { AppDataV2, PayCycleConfig, Person, SavingsEntry } from '../types/ledger'
++import { Plus, Trash2, Download, Upload, ChevronDown, ChevronUp, Settings, X, Users, CalendarClock } from 'lucide-react'
++import type { AppDataV2, PayCycleConfig, Pension, Person, RecurrenceFrequency, SavingsEntry } from '../types/ledger'
+ import { nanoid } from 'nanoid'
+ import { DeductionModal } from '../components/DeductionModal'
+ import { SwipeToDelete } from '../components/SwipeToDelete'
+ import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
+ import { NumberInput } from '../components/NumberInput'
++import { CollapsibleSection } from '../components/CollapsibleSection'
++import { EditField } from '../components/EditField'
++import { hasSalaryConfigured } from '../lib/household'
++import { pensionOccurrencePreviews, applyPensionAmountChange, newPension } from '../lib/pensionLedger'
+ 
+ /**
+  * Compact amount label for a deduction's collapsed row.
+@@ -53,6 +57,484 @@ function emptySalaryFields() {
+   }
+ }
+ 
++function blankSavingsEntry(type: 'goal' | 'plan'): Omit<SavingsEntry, 'id'> {
++  return type === 'goal'
++    ? { type: 'goal', name: '', includeInSummary: false, targetAmount: 0, currentAmount: 0, targetDate: '' }
++    : { type: 'plan', name: '', includeInSummary: false, monthlyAmount: 0 }
++}
++
++// Same style as Borrowing's per-section AddButton (Loans.tsx) — kept as
++// its own local copy rather than a shared import, matching this
++// codebase's existing per-page-file convention for small one-off UI bits.
++function AddButton({ onClick }: { onClick: () => void }) {
++  return (
++    <button onClick={onClick} className="w-7 h-7 rounded-full flex items-center justify-center" style={{ background: 'var(--color-coral)' }}>
++      <Plus size={14} className="text-white" />
++    </button>
++  )
++}
++
++/**
++ * "For" person picker — used inside every new-entry form on this page
++ * (Pension's, Savings') per Adam's spec: invisible with just one person
++ * (silently binds to them, exactly today's single-user behaviour), an
++ * editable dropdown once a second person exists — same field, both at
++ * creation AND when editing an existing record afterward, since it's
++ * just rendered inline in the form rather than a separate one-off picker
++ * step. Defaults to the primary person when nothing's been chosen yet.
++ */
++function PersonSelectField({ people, value, onChange }: { people: Person[]; value: string; onChange: (personId: string) => void }) {
++  if (people.length <= 1) return null
++  return (
++    <Field label="For">
++      <select
++        value={value}
++        onChange={(e) => onChange(e.target.value)}
++        className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
++      >
++        {people.map((p) => (
++          <option key={p.id} value={p.id}>
++            {p.name}
++          </option>
++        ))}
++      </select>
++    </Field>
++  )
++}
++
++function activeIncomeSourceCount(person: Person, pensions: Pension[]): number {
++  return (hasSalaryConfigured(person) ? 1 : 0) + pensions.filter((p) => p.personId === person.id && p.active).length
++}
++
++function FollowingTag() {
++  return (
++    <span
++      className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide shrink-0"
++      style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink-muted)' }}
++    >
++      Following
++    </span>
++  )
++}
++
++function FollowingPickerButton({ onClick }: { onClick: () => void }) {
++  return (
++    <button onClick={onClick} className="w-7 h-7 rounded-full flex items-center justify-center" style={{ background: 'var(--color-bg-elevated)' }} aria-label="Choose which income source the budgeting cycle follows">
++      <CalendarClock size={14} className="text-[var(--color-ink)]" />
++    </button>
++  )
++}
++
++/** Inline "who's this for?" picker — shown before a form when 2+ candidates exist (Adam's spec: skip straight to the form with exactly one). */
++function PersonPickerCard({ people, onPick, onCancel }: { people: Person[]; onPick: (personId: string) => void; onCancel: () => void }) {
++  return (
++    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
++      <div className="flex items-center justify-between mb-2">
++        <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Who's this for?</span>
++        <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
++          <X size={16} />
++        </button>
++      </div>
++      <div className="flex flex-col gap-1.5">
++        {people.map((p) => (
++          <button
++            key={p.id}
++            onClick={() => onPick(p.id)}
++            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
++            style={{ background: 'var(--color-surface)' }}
++          >
++            {p.name}
++          </button>
++        ))}
++      </div>
++    </div>
++  )
++}
++
++const PENSION_FREQUENCY_LABELS: Record<RecurrenceFrequency, string> = {
++  weekly: 'Weekly',
++  every_n_weeks: 'Every N weeks',
++  monthly: 'Monthly',
++  quarterly: 'Quarterly',
++  annual: 'Annually',
++}
++
++interface PensionFields {
++  name: string
++  amount: number
++  frequency: RecurrenceFrequency
++  intervalWeeks?: number
++  anchorDate: string
++}
++
++/** New-pension form — same "For" person picker as every other new-entry form on this page (PersonSelectField), reused unmodified when editing an existing pension's owner (PensionRow passes the same field through). */
++function PensionForm({
++  people,
++  defaultPersonId,
++  initial,
++  onSave,
++  onCancel,
++}: {
++  people: Person[]
++  defaultPersonId: string
++  initial?: PensionFields
++  onSave: (personId: string, fields: PensionFields) => void
++  onCancel: () => void
++}) {
++  const [personId, setPersonId] = useState(defaultPersonId)
++  const [name, setName] = useState(initial?.name ?? '')
++  const [amount, setAmount] = useState(initial?.amount ?? 0)
++  const [frequency, setFrequency] = useState<RecurrenceFrequency>(initial?.frequency ?? 'monthly')
++  const [intervalWeeks, setIntervalWeeks] = useState(initial?.intervalWeeks ?? 2)
++  const [anchorDate, setAnchorDate] = useState(initial?.anchorDate ?? todayIso())
++
++  return (
++    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
++      <div className="grid grid-cols-2 gap-3">
++        <PersonSelectField people={people} value={personId} onChange={setPersonId} />
++        <Field label="Name">
++          <input
++            autoFocus
++            value={name}
++            onChange={(e) => setName(e.target.value)}
++            placeholder="e.g. State Pension"
++            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
++          />
++        </Field>
++        <Field label="Net amount (£)">
++          <NumberInput
++            inputMode="decimal"
++            value={amount || ''}
++            onChange={(v) => setAmount(Number(v) || 0)}
++            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
++          />
++        </Field>
++        <Field label="Frequency">
++          <select
++            value={frequency}
++            onChange={(e) => setFrequency(e.target.value as RecurrenceFrequency)}
++            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
++          >
++            {(Object.keys(PENSION_FREQUENCY_LABELS) as RecurrenceFrequency[]).map((f) => (
++              <option key={f} value={f} style={{ color: '#000' }}>
++                {PENSION_FREQUENCY_LABELS[f]}
++              </option>
++            ))}
++          </select>
++        </Field>
++        {frequency === 'every_n_weeks' && (
++          <EditField label="Every N weeks" type="number" value={String(intervalWeeks)} onChange={(v) => setIntervalWeeks(Math.max(1, Number(v) || 1))} />
++        )}
++        <EditField label={frequency === 'weekly' || frequency === 'every_n_weeks' ? 'First payment date' : 'Payment date'} type="date" value={anchorDate} onChange={setAnchorDate} />
++      </div>
++      <div className="flex gap-2 mt-4">
++        <button onClick={onCancel} className="flex-1 py-2 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-surface)' }}>
++          Cancel
++        </button>
++        <button
++          onClick={() => {
++            if (!name.trim()) return
++            onSave(personId, { name: name.trim(), amount, frequency, intervalWeeks: frequency === 'every_n_weeks' ? intervalWeeks : undefined, anchorDate })
++          }}
++          className="flex-1 py-2 rounded-full text-sm font-semibold text-white"
++          style={{ background: 'var(--color-coral)' }}
++        >
++          Save
++        </button>
++      </div>
++    </div>
++  )
++}
++
++/** A single pension's row — collapsed summary + expand, same pattern as Borrowing's LoanRow/CreditCardRow, and the Salary section's own person rows. */
++function PensionRow({
++  pension,
++  people,
++  showFollowingTag,
++  isOpen,
++  onToggle,
++  onSave,
++  onRemove,
++}: {
++  pension: Pension
++  people: Person[]
++  showFollowingTag: boolean
++  isOpen: boolean
++  onToggle: () => void
++  onSave: (updates: Partial<Omit<Pension, 'id' | 'personId'>> & { personId?: string }) => void
++  onRemove: () => void
++}) {
++  const owner = people.find((p) => p.id === pension.personId)
++  const previews = pensionOccurrencePreviews(pension, new Date(), 1)
++  const next = previews[0]
++
++  return (
++    <SwipeToDelete onDelete={onRemove} confirmLabel={pension.name}>
++      <div className="rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
++        <div className="flex items-center justify-between mb-1">
++          <div className="flex items-center gap-2 min-w-0">
++            <span className="font-display text-base font-semibold text-[var(--color-ink)] truncate">{pension.name}</span>
++            {people.length > 1 && <span className="text-xs text-[var(--color-ink-muted)] shrink-0">{owner?.name ?? 'Unknown'}</span>}
++            {showFollowingTag && <FollowingTag />}
++          </div>
++        </div>
++
++        <button onClick={onToggle} className="w-full flex items-center justify-between text-left py-1">
++          <span className="text-sm text-[var(--color-ink-muted)]">
++            {pension.active ? (next ? <>Next payment {next.date} · £{formatCurrency(next.amount)}</> : 'No upcoming payment') : 'Paused'}
++          </span>
++          <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
++        </button>
++
++        {isOpen && (
++          <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
++            <PensionForm
++              people={people}
++              defaultPersonId={pension.personId}
++              initial={{ name: pension.name, amount: pension.amount, frequency: pension.frequency, intervalWeeks: pension.intervalWeeks, anchorDate: pension.anchorDate }}
++              onCancel={onToggle}
++              onSave={(personId, fields) => {
++                // A standing amount change goes through applyPensionAmountChange
++                // (historized, same as a salary snapshot or a bill's amount
++                // change) — but only when the amount actually changed; editing
++                // just the name/frequency/date shouldn't fabricate a change
++                // record for an amount that never moved.
++                const amountPatch = fields.amount !== pension.amount ? applyPensionAmountChange(pension, fields.amount, todayIso()) : { amount: fields.amount }
++                onSave({ personId, name: fields.name, frequency: fields.frequency, intervalWeeks: fields.intervalWeeks, anchorDate: fields.anchorDate, ...amountPatch })
++                onToggle()
++              }}
++            />
++            <label className="flex items-center gap-2 mt-1">
++              <input type="checkbox" checked={pension.active} onChange={(e) => onSave({ active: e.target.checked })} />
++              <span className="text-xs text-[var(--color-ink-muted)]">Active — paused pensions stop generating new payments</span>
++            </label>
++          </div>
++        )}
++      </div>
++    </SwipeToDelete>
++  )
++}
++
++/** People management — add (always visible)/rename/delete/Set-as-me, pulled off the Salary rows into its own surface per Adam's separation-of-concerns direction. */
++function PeopleModal({
++  people,
++  primaryPersonId,
++  onAdd,
++  onRename,
++  onRemove,
++  onSetPrimary,
++  onClose,
++}: {
++  people: Person[]
++  primaryPersonId: string
++  onAdd: (name: string) => void
++  onRename: (id: string, name: string) => void
++  onRemove: (id: string) => void
++  onSetPrimary: (id: string) => void
++  onClose: () => void
++}) {
++  const [newName, setNewName] = useState('')
++  return createPortal(
++    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
++      <div
++        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto"
++        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
++        onClick={(e) => e.stopPropagation()}
++      >
++        <div className="flex items-center justify-between mb-4">
++          <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">People</h3>
++          <button onClick={onClose} className="text-[var(--color-ink-muted)]">
++            <X size={20} />
++          </button>
++        </div>
++
++        {/* Always visible — never gated behind any other flow (linking,
++            salary, etc.). See the household-ownership discussion this
++            follows from: person creation is independent of everything
++            else on this page and always has been. */}
++        <div className="rounded-2xl p-3 mb-4 flex gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
++          <input
++            value={newName}
++            onChange={(e) => setNewName(e.target.value)}
++            placeholder="Add a person"
++            className="flex-1 bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
++          />
++          <button
++            onClick={() => {
++              if (!newName.trim()) return
++              onAdd(newName.trim())
++              setNewName('')
++            }}
++            className="px-3 rounded-lg font-medium text-sm"
++            style={{ background: 'var(--color-coral)', color: '#fff' }}
++          >
++            Add
++          </button>
++        </div>
++
++        <div className="flex flex-col gap-2">
++          {people.map((p) => {
++            const isPrimary = p.id === primaryPersonId
++            return (
++              <div key={p.id} className="flex items-center justify-between gap-2 rounded-2xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
++                <EditablePersonName name={p.name} onRename={(name) => onRename(p.id, name)} />
++                <div className="flex items-center gap-3 shrink-0">
++                  <button
++                    onClick={() => onSetPrimary(p.id)}
++                    disabled={isPrimary}
++                    className="px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wide transition-colors"
++                    style={{ background: isPrimary ? 'var(--color-coral)' : 'var(--color-surface)', color: isPrimary ? '#fff' : 'var(--color-ink-muted)' }}
++                    title={isPrimary ? 'This is your own dashboard view' : 'Make this your dashboard view'}
++                  >
++                    {isPrimary ? 'Me' : 'Set as me'}
++                  </button>
++                  {people.length > 1 && (
++                    <button onClick={() => onRemove(p.id)} className="text-[var(--color-ink-faint)]">
++                      <Trash2 size={16} />
++                    </button>
++                  )}
++                </div>
++              </div>
++            )
++          })}
++        </div>
++      </div>
++    </div>,
++    document.body,
++  )
++}
++
++/**
++ * The calendar-icon "Following" picker — one radio group per person with
++ * 2+ active income sources (people with just one are never shown here at
++ * all, since there's nothing to choose). Lives on whichever of Salary/
++ * Pensions' headers currently hosts the calendar icon; the picker's own
++ * content doesn't depend on which — it always covers the whole household.
++ */
++function FollowingPickerModal({
++  people,
++  pensions,
++  payCycles,
++  onChoose,
++  onClose,
++}: {
++  people: Person[]
++  pensions: Pension[]
++  payCycles: PayCycleConfig[]
++  onChoose: (personId: string, source: PayCycleConfig['followsIncomeSource']) => void
++  onClose: () => void
++}) {
++  const eligible = people.filter((p) => activeIncomeSourceCount(p, pensions) >= 2)
++  return createPortal(
++    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
++      <div
++        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto"
++        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
++        onClick={(e) => e.stopPropagation()}
++      >
++        <div className="flex items-center justify-between mb-1">
++          <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">Which period to follow</h3>
++          <button onClick={onClose} className="text-[var(--color-ink-muted)]">
++            <X size={20} />
++          </button>
++        </div>
++        <p className="text-xs text-[var(--color-ink-faint)] mb-4">
++          Every income source still generates and shows in the ledger regardless — this only decides which one's cadence sets the budgeting-cycle boundary.
++        </p>
++        <div className="flex flex-col gap-5">
++          {eligible.map((person) => {
++            const payCycle = payCycles.find((pc) => pc.personId === person.id)
++            const current = payCycle?.followsIncomeSource ?? { type: 'salary' as const }
++            const personPensions = pensions.filter((p) => p.personId === person.id && p.active)
++            return (
++              <div key={person.id}>
++                {people.length > 1 && <p className="text-xs font-semibold text-[var(--color-ink-muted)] mb-2">{person.name}</p>}
++                <div className="flex flex-col gap-1.5">
++                  {hasSalaryConfigured(person) && (
++                    <label className="flex items-center gap-2 px-3 py-2 rounded-xl" style={{ background: 'var(--color-bg-elevated)' }}>
++                      <input type="radio" checked={current.type === 'salary'} onChange={() => onChoose(person.id, { type: 'salary' })} />
++                      <span className="text-sm text-[var(--color-ink)]">Salary</span>
++                    </label>
++                  )}
++                  {personPensions.map((pension) => (
++                    <label key={pension.id} className="flex items-center gap-2 px-3 py-2 rounded-xl" style={{ background: 'var(--color-bg-elevated)' }}>
++                      <input
++                        type="radio"
++                        checked={current.type === 'pension' && current.pensionId === pension.id}
++                        onChange={() => onChoose(person.id, { type: 'pension', pensionId: pension.id })}
++                      />
++                      <span className="text-sm text-[var(--color-ink)]">{pension.name}</span>
++                    </label>
++                  ))}
++                </div>
++              </div>
++            )
++          })}
++        </div>
++        <button onClick={onClose} className="w-full mt-5 py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
++          Done
++        </button>
++      </div>
++    </div>,
++    document.body,
++  )
++}
++
++/** Collapsed-row summary line for a person's Salary block — mirrors LoanRow's collapsed summary. */
++function SalaryRowSummary({ person, payCycle, hasSalary }: { person: Person; payCycle: PayCycleConfig | undefined; hasSalary: boolean }) {
++  if (!hasSalary) {
++    return <span className="text-sm" style={{ color: 'var(--color-coral)' }}>Set up salary</span>
++  }
++  if (!payCycle) {
++    return <span className="text-sm text-[var(--color-ink-muted)]">Pay cycle not configured</span>
++  }
++  const today = new Date()
++  const [nextPayday] = upcomingPaydays(payCycle, today, 1)
++  if (!nextPayday) {
++    // hasSalary but no upcoming payday resolves — the governing snapshot
++    // has an end date in the past (or right at today) and nothing
++    // supersedes it. Distinct message from "not configured" so it's
++    // clear this was a deliberate end, not a missing setup.
++    const snapshot = latestSalarySnapshot(person)
++    return (
++      <span className="text-sm text-[var(--color-ink-muted)]">{snapshot?.endDate ? `Ended ${snapshot.endDate}` : 'No upcoming pay'}</span>
++    )
++  }
++  const dateIso = toLocalIsoDate(nextPayday)
++  const netPay = computeNetPayForPeriod(person, dateIso)
++  return (
++    <span className="text-sm text-[var(--color-ink-muted)]">
++      Next payday {dateIso}
++      {netPay !== null && <> · £{formatCurrency(netPay)}</>}
++    </span>
++  )
++}
++
++/**
++ * The "final salary payment" date-picker (backlog item b). Edits
++ * whichever snapshot latestSalarySnapshot resolves to — NOT
++ * findApplicableSnapshot(person, today), since that deliberately returns
++ * null once a snapshot's own end date has passed, which would make an
++ * already-ended salary's end date impossible to view or clear from this
++ * field. Clearing the field (the EditField's `v || undefined` pattern,
++ * same as Loans.tsx's own "End date" field) resumes indefinite
++ * generation, same as it never having been set.
++ */
++function SalaryEndDateField({ person, onChange }: { person: Person; onChange: (snapshotId: string, endDate: string | undefined) => void }) {
++  const snapshot = latestSalarySnapshot(person)
++  if (!snapshot) return null
++  return (
++    <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--color-track)' }}>
++      <EditField label="End date (optional)" type="date" value={snapshot.endDate ?? ''} onChange={(v) => onChange(snapshot.id, v || undefined)} />
++      <p className="text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
++        {snapshot.endDate
++          ? `No further salary payments generate after ${snapshot.endDate}. Anything already cleared isn't affected.`
++          : 'Set this when this salary is ending — e.g. a new job with different accounting periods, or retiring onto a pension.'}
++      </p>
++    </div>
++  )
++}
++
+ export function Salary() {
+   const {
+     data,
+@@ -63,124 +545,283 @@ export function Salary() {
+     setPrimaryPerson,
+     updatePayCycle,
+     addSalarySnapshot,
++    updateSalarySnapshot,
++    removeAllSalaryHistory,
+     addSalaryOverride,
+     updateSalaryOverride,
+     addSavingsEntry,
+     updateSavingsEntry,
+     removeSavingsEntry,
++    addPension,
++    updatePension,
++    removePension,
+   } = useLedgerData()
+-  const [addingPerson, setAddingPerson] = useState(false)
+   const [editingDeduction, setEditingDeduction] = useState<{ personId: string; deductionId: string } | null>(null)
+-  const [newName, setNewName] = useState('')
+   const [settingsOpenFor, setSettingsOpenFor] = useState<string | null>(null)
++  // Which person's Salary row / which Pension's row is expanded — one at
++  // a time per section, same pattern as Borrowing's expandedLoan/
++  // expandedCard. Starts on the primary person (rather than fully
++  // collapsed) since salary is the main reason most visits happen.
++  const [expandedPersonId, setExpandedPersonId] = useState<string | null>(data.primaryPersonId ?? null)
++  const [expandedPensionId, setExpandedPensionId] = useState<string | null>(null)
++  const [addingPension, setAddingPension] = useState(false)
++  // Salary's "+" doesn't open a form of its own (salary setup is already
++  // inline on each person's row) — with 2+ candidates still needing
++  // setup it shows a quick picker; with exactly one, or with everyone
++  // already set up, it just expands the relevant row directly.
++  const [pickingSalaryPerson, setPickingSalaryPerson] = useState(false)
++  const [addingSavingsFor, setAddingSavingsFor] = useState<string | null>(null) // personId once chosen (or the sole person, immediately)
++  const [pickingSavingsPerson, setPickingSavingsPerson] = useState(false)
++  const [peopleModalOpen, setPeopleModalOpen] = useState(false)
++  const [followingPickerOpen, setFollowingPickerOpen] = useState(false)
++
++  // All three sections (Salary, Pensions, Savings) always render, each
++  // with its own "+", matching Borrowing's Loans/Credit Cards layout —
++  // per Adam's own instruction, superseding this page's earlier
++  // hide-when-empty treatment of Savings specifically.
++  const peopleWithoutSalary = data.people.filter((p) => !hasSalaryConfigured(p))
++  // Whether ANYONE in the household has 2+ active income sources — the
++  // calendar-icon "Following" picker is pointless (and stays fully
++  // hidden) until that's true for at least one person, same "invisible
++  // until it would do something" instinct as the rest of this page.
++  const anyoneHasMultipleIncomeSources = data.people.some((p) => activeIncomeSourceCount(p, data.pensions) >= 2)
++  // Fallback position for the calendar icon (Adam's own spec): lives on
++  // the Salary section's header normally, but once NOBODY in the
++  // household has any salary left at all, it moves to the Pensions
++  // section header instead — both sections always render regardless, so
++  // this only decides which header hosts the icon.
++  const anyoneHasSalary = data.people.some(hasSalaryConfigured)
+ 
+   return (
+     <div className="max-w-md mx-auto px-4 pt-6">
+       <header className="mb-6 flex items-center justify-between">
+-        <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Salary</h1>
++        <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Wallet</h1>
+         <button
+-          onClick={() => setAddingPerson(true)}
++          onClick={() => setPeopleModalOpen(true)}
+           className="w-9 h-9 rounded-full flex items-center justify-center"
+           style={{ background: 'var(--color-surface)' }}
++          aria-label="Manage people"
+         >
+-          <Plus size={18} className="text-[var(--color-ink)]" />
++          <Users size={18} className="text-[var(--color-ink)]" />
+         </button>
+       </header>
+ 
+       <BackupSection data={data} onRestore={setData} />
+ 
+-      {addingPerson && (
+-        <div className="rounded-2xl p-4 mb-6 flex gap-2" style={{ background: 'var(--color-surface)' }}>
+-          <input
+-            autoFocus
+-            value={newName}
+-            onChange={(e) => setNewName(e.target.value)}
+-            placeholder="Name"
+-            className="flex-1 bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+-          />
+-          <button
+-            onClick={() => {
+-              if (!newName.trim()) return
+-              addPerson({ name: newName.trim(), color: '#7c6fe0' })
+-              setNewName('')
+-              setAddingPerson(false)
++      <CollapsibleSection
++        title="Salary"
++        className="mb-8"
++        headerExtra={
++          <div className="flex items-center gap-2">
++            {anyoneHasSalary && anyoneHasMultipleIncomeSources && <FollowingPickerButton onClick={() => setFollowingPickerOpen(true)} />}
++            <AddButton
++              onClick={() => {
++                if (peopleWithoutSalary.length === 0) {
++                  // Nobody left to set up — everyone already has a
++                  // salary. A pay rise or a new job for someone who's
++                  // already set up goes through their own row's "all
++                  // future" edit, not this button.
++                  return
++                }
++                if (peopleWithoutSalary.length === 1) setExpandedPersonId(peopleWithoutSalary[0].id)
++                else setPickingSalaryPerson(true)
++              }}
++            />
++          </div>
++        }
++      >
++        {pickingSalaryPerson && (
++          <PersonPickerCard
++            people={peopleWithoutSalary}
++            onPick={(id) => {
++              setExpandedPersonId(id)
++              setPickingSalaryPerson(false)
+             }}
+-            className="px-3 rounded-lg font-medium text-sm"
+-            style={{ background: 'var(--color-coral)', color: '#fff' }}
+-          >
+-            Add
+-          </button>
+-        </div>
+-      )}
+-
+-      <div className="flex flex-col gap-6">
+-        {data.people.map((person) => {
+-          const payCycle = data.payCycles.find((pc) => pc.personId === person.id)
+-          const isPrimary = person.id === data.primaryPersonId
+-          const hasSalary = person.salaryHistory.length > 0
++            onCancel={() => setPickingSalaryPerson(false)}
++          />
++        )}
++        <div className="flex flex-col gap-3">
++          {data.people.map((person) => {
++            const payCycle = data.payCycles.find((pc) => pc.personId === person.id)
++            const hasSalary = hasSalaryConfigured(person)
++            const isOpen = expandedPersonId === person.id
++            const isFollowed = payCycle?.followsIncomeSource === undefined || payCycle.followsIncomeSource.type === 'salary'
++            const showFollowingTag = hasSalary && isFollowed && activeIncomeSourceCount(person, data.pensions) >= 2
+ 
+-          return (
+-            <div key={person.id} className="flex flex-col gap-6">
+-              <div className="rounded-2xl p-5" style={{ background: 'var(--color-surface)' }}>
+-                <div className="flex items-center justify-between mb-4">
+-                  <div className="flex items-center gap-2">
+-                    <EditablePersonName name={person.name} onRename={(name) => updatePerson(person.id, { name })} />
+-                    <button
+-                      onClick={() => setPrimaryPerson(person.id)}
+-                      disabled={isPrimary}
+-                      className="px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wide transition-colors"
+-                      style={{
+-                        background: isPrimary ? 'var(--color-coral)' : 'var(--color-bg-elevated)',
+-                        color: isPrimary ? '#fff' : 'var(--color-ink-muted)',
+-                      }}
+-                      title={isPrimary ? 'This is your own dashboard view' : 'Make this your dashboard view'}
+-                    >
+-                      {isPrimary ? 'Me' : 'Set as me'}
+-                    </button>
+-                  </div>
+-                  <div className="flex items-center gap-3">
+-                    {hasSalary && (
+-                      <button onClick={() => setSettingsOpenFor(person.id)} className="text-[var(--color-ink-muted)]" aria-label="Pay cycle settings">
+-                        <Settings size={16} />
+-                      </button>
+-                    )}
+-                    {data.people.length > 1 && (
+-                      <button onClick={() => removePerson(person.id)} className="text-[var(--color-ink-faint)]">
+-                        <Trash2 size={16} />
+-                      </button>
+-                    )}
++            return (
++              <div key={person.id} className="rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
++                <div className="flex items-center justify-between mb-1">
++                  <div className="flex items-center gap-2 min-w-0">
++                    <span className="font-display text-base font-semibold text-[var(--color-ink)] truncate">{person.name}</span>
++                    {person.id === data.primaryPersonId && <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-coral)] shrink-0">Me</span>}
++                    {showFollowingTag && <FollowingTag />}
+                   </div>
++                  {hasSalary && (
++                    <button onClick={() => setSettingsOpenFor(person.id)} className="text-[var(--color-ink-muted)] shrink-0" aria-label="Pay cycle settings">
++                      <Settings size={16} />
++                    </button>
++                  )}
+                 </div>
+ 
+-                {!hasSalary ? (
+-                  <SalarySetupForm
+-                    payCycle={payCycle}
+-                    onSave={(fields, payCycleFields) => {
+-                      addSalarySnapshot(person.id, { ...fields, effectiveFrom: todayIso() })
+-                      updatePayCycle(person.id, payCycleFields)
+-                    }}
+-                    editingDeduction={editingDeduction}
+-                    setEditingDeduction={setEditingDeduction}
+-                  />
+-                ) : payCycle ? (
+-                  <PayPeriodsSection
+-                    person={person}
+-                    payCycle={payCycle}
+-                    onSaveJustThis={(dateIso, fields) => {
+-                      const netPay = calculateNetSalary(fields).netPerPeriod
+-                      const existing = person.salaryOverrides.find((o) => o.payPeriodDate === dateIso)
+-                      const reason = 'Salary amended (this payment only)'
+-                      if (existing) updateSalaryOverride(person.id, existing.id, { netPayOverride: netPay, reason })
+-                      else addSalaryOverride(person.id, { payPeriodDate: dateIso, netPayOverride: netPay, reason })
+-                    }}
+-                    onSaveAllFuture={(dateIso, fields) => {
+-                      addSalarySnapshot(person.id, { ...fields, effectiveFrom: dateIso })
+-                    }}
+-                    editingDeduction={editingDeduction}
+-                    setEditingDeduction={setEditingDeduction}
+-                  />
+-                ) : null}
++                <button
++                  onClick={() => setExpandedPersonId(isOpen ? null : person.id)}
++                  className="w-full flex items-center justify-between text-left py-1"
++                >
++                  <SalaryRowSummary person={person} payCycle={payCycle} hasSalary={hasSalary} />
++                  <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
++                </button>
++
++                {isOpen && (
++                  <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
++                    {!hasSalary ? (
++                      <SalarySetupForm
++                        payCycle={payCycle}
++                        onSave={(fields, payCycleFields) => {
++                          addSalarySnapshot(person.id, { ...fields, effectiveFrom: todayIso() })
++                          updatePayCycle(person.id, payCycleFields)
++                        }}
++                        editingDeduction={editingDeduction}
++                        setEditingDeduction={setEditingDeduction}
++                      />
++                    ) : payCycle ? (
++                      <>
++                        <PayPeriodsSection
++                          person={person}
++                          payCycle={payCycle}
++                          onSaveJustThis={(dateIso, fields) => {
++                            const netPay = calculateNetSalary(fields).netPerPeriod
++                            const existing = person.salaryOverrides.find((o) => o.payPeriodDate === dateIso)
++                            const reason = 'Salary amended (this payment only)'
++                            if (existing) updateSalaryOverride(person.id, existing.id, { netPayOverride: netPay, reason })
++                            else addSalaryOverride(person.id, { payPeriodDate: dateIso, netPayOverride: netPay, reason })
++                          }}
++                          onSaveAllFuture={(dateIso, fields) => {
++                            addSalarySnapshot(person.id, { ...fields, effectiveFrom: dateIso })
++                          }}
++                          editingDeduction={editingDeduction}
++                          setEditingDeduction={setEditingDeduction}
++                        />
++                        <SalaryEndDateField
++                          person={person}
++                          onChange={(snapshotId, endDate) => updateSalarySnapshot(person.id, snapshotId, { endDate })}
++                        />
++                        {/* Savings now has its own section-level "+" below —
++                            no per-row stopgap needed here any more. */}
++                      </>
++                    ) : null}
++                  </div>
++                )}
++              </div>
++            )
++          })}
++        </div>
++      </CollapsibleSection>
+ 
++      <CollapsibleSection
++        title="Pensions"
++        className="mb-8"
++        headerExtra={
++          <div className="flex items-center gap-2">
++            {!anyoneHasSalary && anyoneHasMultipleIncomeSources && <FollowingPickerButton onClick={() => setFollowingPickerOpen(true)} />}
++            <AddButton onClick={() => setAddingPension(true)} />
++          </div>
++        }
++      >
++        {addingPension && (
++          <PensionForm
++            people={data.people}
++            defaultPersonId={data.primaryPersonId}
++            onCancel={() => setAddingPension(false)}
++            onSave={(personId, fields) => {
++              const id = addPension(personId, newPension({ personId, ...fields }))
++              setAddingPension(false)
++              setExpandedPensionId(id)
++            }}
++          />
++        )}
++        <div className="flex flex-col gap-3">
++          {data.pensions.map((pension) => {
++            const person = data.people.find((p) => p.id === pension.personId)
++            const payCycle = data.payCycles.find((pc) => pc.personId === pension.personId)
++            const isFollowed = payCycle?.followsIncomeSource?.type === 'pension' && payCycle.followsIncomeSource.pensionId === pension.id
++            const showFollowingTag = isFollowed && person && activeIncomeSourceCount(person, data.pensions) >= 2
++            return (
++              <PensionRow
++                key={pension.id}
++                pension={pension}
++                people={data.people}
++                showFollowingTag={!!showFollowingTag}
++                isOpen={expandedPensionId === pension.id}
++                onToggle={() => setExpandedPensionId(expandedPensionId === pension.id ? null : pension.id)}
++                onSave={(updates) => updatePension(pension.id, updates)}
++                onRemove={() => removePension(pension.id)}
++              />
++            )
++          })}
++          {data.pensions.length === 0 && !addingPension && <p className="text-sm text-[var(--color-ink-muted)] text-center py-8">No pensions yet.</p>}
++        </div>
++      </CollapsibleSection>
++
++      <CollapsibleSection
++        title="Savings"
++        className="mb-8"
++        headerExtra={
++          <AddButton
++            onClick={() => {
++              if (data.people.length === 1) setAddingSavingsFor(data.people[0].id)
++              else setPickingSavingsPerson(true)
++            }}
++          />
++        }
++      >
++        {pickingSavingsPerson && (
++          <PersonPickerCard
++            people={data.people}
++            onPick={(id) => {
++              setAddingSavingsFor(id)
++              setPickingSavingsPerson(false)
++            }}
++            onCancel={() => setPickingSavingsPerson(false)}
++          />
++        )}
++        {addingSavingsFor && (
++          <div className="rounded-2xl p-4 mb-4 flex items-center justify-between" style={{ background: 'var(--color-bg-elevated)' }}>
++            <span className="text-sm text-[var(--color-ink)]">
++              {data.people.length > 1 ? `For ${data.people.find((p) => p.id === addingSavingsFor)?.name}` : 'New entry'}
++            </span>
++            <div className="flex gap-3">
++              <button
++                onClick={() => {
++                  addSavingsEntry(addingSavingsFor, blankSavingsEntry('plan'))
++                  setAddingSavingsFor(null)
++                }}
++                className="text-xs font-medium"
++                style={{ color: 'var(--color-coral)' }}
++              >
++                + Monthly plan
++              </button>
++              <button
++                onClick={() => {
++                  addSavingsEntry(addingSavingsFor, blankSavingsEntry('goal'))
++                  setAddingSavingsFor(null)
++                }}
++                className="text-xs font-medium"
++                style={{ color: 'var(--color-coral)' }}
++              >
++                + Goal
++              </button>
++              <button onClick={() => setAddingSavingsFor(null)} className="text-[var(--color-ink-faint)]">
++                <X size={16} />
++              </button>
++            </div>
++          </div>
++        )}
++        <div className="flex flex-col gap-5">
++          {data.people
++            .filter((p) => p.savingsEntries.length > 0)
++            .map((person) => (
++              <div key={person.id}>
++                {data.people.length > 1 && <p className="text-xs font-semibold text-[var(--color-ink-muted)] mb-2">{person.name}</p>}
+                 <SavingsSection
+                   entries={person.savingsEntries}
+                   onAdd={(entry) => addSavingsEntry(person.id, entry)}
+@@ -188,10 +829,34 @@ export function Salary() {
+                   onRemove={(entryId) => removeSavingsEntry(person.id, entryId)}
+                 />
+               </div>
+-            </div>
+-          )
+-        })}
+-      </div>
++            ))}
++          {data.people.every((p) => p.savingsEntries.length === 0) && !addingSavingsFor && (
++            <p className="text-sm text-[var(--color-ink-muted)] text-center py-8">No savings tracked yet.</p>
++          )}
++        </div>
++      </CollapsibleSection>
++
++      {peopleModalOpen && (
++        <PeopleModal
++          people={data.people}
++          primaryPersonId={data.primaryPersonId}
++          onAdd={(name) => addPerson({ name, color: '#7c6fe0' })}
++          onRename={(id, name) => updatePerson(id, { name })}
++          onRemove={removePerson}
++          onSetPrimary={setPrimaryPerson}
++          onClose={() => setPeopleModalOpen(false)}
++        />
++      )}
++
++      {followingPickerOpen && (
++        <FollowingPickerModal
++          people={data.people}
++          pensions={data.pensions}
++          payCycles={data.payCycles}
++          onChoose={(personId, source) => updatePayCycle(personId, { followsIncomeSource: source })}
++          onClose={() => setFollowingPickerOpen(false)}
++        />
++      )}
+ 
+       {settingsOpenFor &&
+         (() => {
+@@ -208,6 +873,11 @@ export function Salary() {
+               openingBalance={payCycle?.openingBalance ?? 0}
+               openingBalanceDate={payCycle?.openingBalanceDate ?? todayIso()}
+               onChange={(updates) => updatePayCycle(person.id, updates)}
++              onDeleteSalary={() => {
++                removeAllSalaryHistory(person.id)
++                setSettingsOpenFor(null)
++                setExpandedPersonId(null)
++              }}
+               onClose={() => setSettingsOpenFor(null)}
+             />
+           )
+@@ -555,6 +1225,7 @@ function PayCycleSettingsModal({
+   openingBalance,
+   openingBalanceDate,
+   onChange,
++  onDeleteSalary,
+   onClose,
+ }: {
+   personName: string
+@@ -572,11 +1243,17 @@ function PayCycleSettingsModal({
+     openingBalance?: number
+     openingBalanceDate?: string
+   }) => void
++  onDeleteSalary: () => void
+   onClose: () => void
+ }) {
++  const [confirmingDelete, setConfirmingDelete] = useState(false)
+   return createPortal(
+     <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
+-      <div className="w-full max-w-md rounded-t-3xl p-5" style={{ background: 'var(--color-surface)' }} onClick={(e) => e.stopPropagation()}>
++      <div
++        className="w-full max-w-md rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto"
++        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
++        onClick={(e) => e.stopPropagation()}
++      >
+         <div className="flex items-center justify-between mb-1">
+           <h3 className="font-display text-base font-semibold text-[var(--color-ink)]">{personName}'s pay cycle</h3>
+           <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+@@ -652,6 +1329,29 @@ function PayCycleSettingsModal({
+         <button onClick={onClose} className="w-full mt-4 py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
+           Done
+         </button>
++
++        <div className="mt-6 pt-4 border-t" style={{ borderColor: 'var(--color-track)' }}>
++          {!confirmingDelete ? (
++            <button onClick={() => setConfirmingDelete(true)} className="w-full text-center py-2 text-xs font-medium text-[var(--color-ink-faint)]">
++              Delete {personName}'s salary
++            </button>
++          ) : (
++            <div className="text-center">
++              <p className="text-xs text-[var(--color-ink-muted)] mb-2">
++                Deletes every salary snapshot and override. Already-cleared payments stay in the ledger as plain income —
++                only future ones stop. This can't be undone.
++              </p>
++              <div className="flex gap-2">
++                <button onClick={() => setConfirmingDelete(false)} className="flex-1 py-2 rounded-full text-xs font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-bg-elevated)' }}>
++                  Cancel
++                </button>
++                <button onClick={onDeleteSalary} className="flex-1 py-2 rounded-full text-xs font-semibold text-white" style={{ background: '#e5484d' }}>
++                  Tap again to confirm
++                </button>
++              </div>
++            </div>
++          )}
++        </div>
+       </div>
+     </div>,
+     document.body,
+@@ -691,8 +1391,18 @@ function PayPeriodsSection({
+   // payday that Summary projects into its window but Salary doesn't list
+   // reads as a missing period rather than a difference of horizon.
+   // Sourced from the shared constant so the two can't drift apart.
+-  const upcoming = upcomingPaydays(payCycle, today, 1 + THREE_CYCLES_AHEAD).map(toLocalIsoDate)
+-  const closed = closedPaydays(payCycle, today, 6).map(toLocalIsoDate)
++  // Filtered through computeNetPayForPeriod !== null so a period past the
++  // person's salary end date (backlog item b) drops out of this editable
++  // list entirely, rather than showing as a hollow £0.00 row — this list
++  // is a synthetic calendar projection for editing, not the real
++  // Transaction ledger, so removing a date here never touches an
++  // already-materialized/cleared transaction elsewhere in the app.
++  const upcoming = upcomingPaydays(payCycle, today, 1 + THREE_CYCLES_AHEAD)
++    .map(toLocalIsoDate)
++    .filter((d) => computeNetPayForPeriod(person, d) !== null)
++  const closed = closedPaydays(payCycle, today, 6)
++    .map(toLocalIsoDate)
++    .filter((d) => computeNetPayForPeriod(person, d) !== null)
+ 
+   // Saving "just this" period only ever affects the one row being edited.
+   function handleSaveJustThis(dateIso: string, fields: ReturnType<typeof emptySalaryFields>) {
+@@ -1255,11 +1965,7 @@ function SavingsSection({
+   onRemove: (entryId: string) => void
+ }) {
+   function addEntry(type: 'goal' | 'plan') {
+-    const base: Omit<SavingsEntry, 'id'> =
+-      type === 'goal'
+-        ? { type: 'goal', name: '', includeInSummary: false, targetAmount: 0, currentAmount: 0, targetDate: '' }
+-        : { type: 'plan', name: '', includeInSummary: false, monthlyAmount: 0 }
+-    onAdd(base)
++    onAdd(blankSavingsEntry(type))
+   }
+ 
+   return (
+diff --git a/src/types/ledger.ts b/src/types/ledger.ts
+index 1dd5e60..11ba834 100644
+--- a/src/types/ledger.ts
++++ b/src/types/ledger.ts
+@@ -41,7 +41,16 @@ export type TransactionType =
+   | 'expense' // ad-hoc, one-off outgoing paid by cash/bank transfer/direct debit/standing order — real cash out
+   | 'income' // ad-hoc, one-off incoming, no effect on standing salary — e.g. a cash gift, a bank transfer from family
+   | 'bonus' // ad-hoc incoming that DOES add to that period's net pay — see SalaryOverride
+-  | 'salary' // the regular pay-day transaction, generated from Person.salary
++  | 'salary' // the regular pay-day transaction, generated from Person.salaryHistory
++  // A pension payment, generated from a Pension (see "Pensions" below) on
++  // its own frequency/anchorDate — deliberately a distinct type from
++  // 'salary' rather than folded into it, even though both are treated as
++  // income the same way everywhere else (direction 'in', INCOME_CATEGORY_ID,
++  // counted in every projection/summary salary already was) — a distinct
++  // type is what lets the ledger label each row with the PENSION's own
++  // name ("State Pension") instead of everything reading "Salary".
++  // sourceType 'pension' + sourceId link it back to the Pension.
++  | 'pension_income'
+   // Something charged TO a credit card, logged from the Transactions page with
+   // paymentMethod: 'card'. Deliberately NOT real cash out: this does not
+   // touch the ledger's running balance and does not appear on the
+@@ -164,7 +173,7 @@ export interface Transaction {
+   // 'credit_card_lump_payment' links a credit_card_payment transaction
+   // back to the specific CreditCardLumpPayment record (sourceId), when
+   // it wasn't the generated monthly/minimum payment.
+-  sourceType?: 'recurring_template' | 'loan' | 'loan_overpayment' | 'loan_recurring_overpayment' | 'loan_settlement' | 'credit_card_lump_payment' | 'savings_entry'
++  sourceType?: 'recurring_template' | 'loan' | 'loan_overpayment' | 'loan_recurring_overpayment' | 'loan_settlement' | 'credit_card_lump_payment' | 'savings_entry' | 'pension'
+   sourceId?: string
+   // Required when type is 'credit_card_spend' or 'credit_card_payment' —
+   // which card this is against. See TransactionType above for how each
+@@ -404,6 +413,64 @@ export interface PayCycleConfig {
+   // cycleStartDayOfMonth is retained but unused (so unticking restores
+   // the previous setting rather than losing it).
+   cycleStartFollowsPayday?: boolean
++
++  // ── Which income source this person's cycle boundary follows ─────────
++  // Undefined = 'salary' — the only behaviour that existed before Pension
++  // did, so nobody's already-saved config silently changes meaning.
++  // Generation is NEVER gated by this: every active salary AND every
++  // active Pension this person owns always generates its own transactions
++  // and always shows in the ledger, regardless of what's picked here.
++  // This ONLY decides two things: which source's cadence anchors the
++  // budgeting-cycle boundary below, and which source's "next payday"
++  // headlines the Home page hero card. Set via the calendar-icon picker
++  // on the Wallet page (Wallet.tsx), one radio group per person with 2+
++  // active income sources.
++  followsIncomeSource?: { type: 'salary' } | { type: 'pension'; pensionId: string }
++}
++
++// ── Pensions ──────────────────────────────────────────────────────────
++// A second (and third, etc.) income type, genuinely concurrent with a
++// salary and with each other — unlike salary, which is a SUCCESSION (one
++// governing SalarySnapshot at a time, per person, per
++// findApplicableSnapshot), a person can hold a State Pension AND a
++// Private Pension AND a winding-down salary all at once. That's why
++// Pension is its own top-level, explicitly-OWNED entity (personId, set
++// once at creation via an owner-picker, exactly like Loan.ownerId) rather
++// than nested under Person the way SalarySnapshot is — nesting would
++// have meant either forcing a single succession model onto genuinely
++// parallel income, or inventing a second, different nesting shape just
++// for pensions. Matches the architecture Bills/Loans/Transactions already
++// use, per the household-ownership discussion this design follows from.
++//
++// Deliberately simpler than SalarySnapshot: no tax engine, no
++// deductions, no student loan — a pension's net amount IS the payment
++// amount, "a manual net-pay figure" the same way SalaryOverride already
++// works for a one-off salary adjustment, just as the standing figure
++// here rather than an exception. Frequency is fully flexible (state
++// pensions are typically weekly, private ones vary by provider) —
++// deliberately NOT constrained to salary's monthly/four-weekly PayFrequency.
++//
++// The amountEffectiveFrom/amountHistory/occurrenceOverrides fields below
++// are the exact same historized-change + per-occurrence-edit shape
++// RecurringTemplate already uses (see that type's own comments) — reused
++// rather than reinvented, since a pension's "change the standing amount,
++// starting from a chosen future payment" and "edit just this one
++// upcoming payment" needs are identical in kind, just against a simpler
++// schedule engine (lib/pensionLedger.ts) tailored to Pension's smaller
++// field set rather than forced through schedule.ts's RecurringTemplate-
++// specific walker.
++export interface Pension {
++  id: string
++  personId: string
++  name: string // e.g. "State Pension", "Private Pension" — carried onto every generated transaction's note, same as RecurringTemplate.name
++  amount: number // CURRENT net amount per payment — always what's shown/edited; see amountEffectiveFrom/amountHistory for how a scheduled change is recorded without disturbing this
++  frequency: RecurrenceFrequency
++  intervalWeeks?: number // only meaningful when frequency === 'every_n_weeks'
++  anchorDate: string // ISO date — schedule anchor, same meaning as RecurringTemplate.anchorDate
++  active: boolean // paused pensions stop generating new transactions, same as an inactive RecurringTemplate
++  amountEffectiveFrom?: string
++  amountHistory?: { effectiveFrom: string; amount: number }[]
++  occurrenceOverrides?: RecurringOccurrenceOverride[]
+ }
+ 
+ // ── Credit cards ─────────────────────────────────────────────────────────
+@@ -531,6 +598,18 @@ export interface SalarySnapshot {
+   payFrequency: PayFrequency
+   deductions: SalaryDeduction[]
+   employerPensionPercent?: number
++  // ISO date of the final salary payment this snapshot generates — set
++  // from the date-picker at the bottom of the Salary card (Wallet page).
++  // undefined/absent = generates indefinitely (the default, and the only
++  // behaviour that existed before this field). Only meaningful on
++  // whichever snapshot findApplicableSnapshot actually resolves to for a
++  // given date — see salaryLedger.ts's own comment on how this interacts
++  // with a later snapshot superseding it. Deliberately NOT retroactive:
++  // this only stops FUTURE generation (generateSalaryTransactions), it
++  // never touches an already-materialized Transaction row, so anything
++  // already cleared (today or earlier) is unaffected by setting or
++  // changing this.
++  endDate?: string
+ }
+ 
+ export interface SalaryOverride {
+@@ -654,6 +733,7 @@ export interface AppDataV2 {
+   recurringTemplates: RecurringTemplate[]
+   loans: Loan[]
+   creditCards: CreditCard[]
++  pensions: Pension[]
+   transactions: Transaction[]
+   payCycles: PayCycleConfig[] // one per person
+   scenarios: WhatIfScenario[]

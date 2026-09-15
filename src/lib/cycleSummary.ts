@@ -15,6 +15,8 @@ export interface CycleSummary {
   income: {
     /** Regular payday salary plus any bonuses attached to it. */
     salary: number
+    /** A transfer INTO the personal ledger from a savings pot, joint account, or pot. */
+    withdrawals: number
     /** Ad-hoc incoming logged on the Expenses page. */
     other: number
     total: number
@@ -23,6 +25,8 @@ export interface CycleSummary {
     standingOrder: number
     /** Direct debits, plus every loan payment regardless of its own payment method. */
     directDebit: number
+    /** A transfer OUT of the personal ledger into a savings pot, joint account, or pot. */
+    deposits: number
     /** Everything else — cash, card, bank transfer. */
     other: number
     total: number
@@ -60,13 +64,32 @@ function outgoingBucket(t: Transaction): 'standingOrder' | 'directDebit' | 'othe
   return 'other'
 }
 
+/**
+ * True for a transaction that's a transfer between the personal ledger and
+ * a savings pot, the joint account, or a pot — in either direction. Covers
+ * both the current generic 'transfer' type (checked by its fromLocation/
+ * toLocation, since the same type now means either direction — see
+ * types/ledger.ts's own comment on 'transfer') and the superseded
+ * savings_deposit/savings_withdrawal/joint_deposit/joint_withdrawal/
+ * pot_deposit/pot_withdrawal types, kept only for round-tripping an
+ * already-persisted backup that still contains them.
+ */
+function isPotSavingsJointTransfer(t: Transaction): boolean {
+  if (t.type === 'transfer') {
+    return t.fromLocation?.type === 'savings' || t.fromLocation?.type === 'joint' || t.fromLocation?.type === 'pot' || t.toLocation?.type === 'savings' || t.toLocation?.type === 'joint' || t.toLocation?.type === 'pot'
+  }
+  return t.type === 'savings_deposit' || t.type === 'savings_withdrawal' || t.type === 'joint_deposit' || t.type === 'joint_withdrawal' || t.type === 'pot_deposit' || t.type === 'pot_withdrawal'
+}
+
 export function computeCycleSummary(transactions: Transaction[], clearedBalance: number): CycleSummary {
   const ledger = transactions.filter(isLedgerTransaction)
 
   let salary = 0
+  let withdrawals = 0
   let otherIncome = 0
   let standingOrder = 0
   let directDebit = 0
+  let deposits = 0
   let otherOut = 0
   let pendingDelta = 0
 
@@ -74,8 +97,24 @@ export function computeCycleSummary(transactions: Transaction[], clearedBalance:
     if (t.status === 'pending') pendingDelta += signedAmount(t)
 
     if (t.direction === 'in') {
-      if (t.type === 'salary' || t.type === 'bonus') salary += t.amount
+      // Pension income counted in the same bucket as salary/bonus — same
+      // "the wage/pension arriving" concept, and per Pension's own type
+      // comment, treated as income exactly like salary everywhere else
+      // already was. The BUCKET's label ("salary") not yet reflecting
+      // that a pension can be the one filling it is exactly backlog item
+      // c's flagged, still-open complication #1 ("transaction sort order
+      // forcing salary first — needs revisiting once multiple income
+      // sources exist") — this fix is the correctness-preserving part
+      // (nothing silently undercounts pension income in the summary
+      // totals), not that deeper relabeling.
+      if (t.type === 'salary' || t.type === 'bonus' || t.type === 'pension_income') salary += t.amount
+      else if (isPotSavingsJointTransfer(t)) withdrawals += t.amount
       else otherIncome += t.amount
+      continue
+    }
+
+    if (isPotSavingsJointTransfer(t)) {
+      deposits += t.amount
       continue
     }
 
@@ -86,12 +125,18 @@ export function computeCycleSummary(transactions: Transaction[], clearedBalance:
   }
 
   return {
-    income: { salary: round2(salary), other: round2(otherIncome), total: round2(salary + otherIncome) },
+    income: {
+      salary: round2(salary),
+      withdrawals: round2(withdrawals),
+      other: round2(otherIncome),
+      total: round2(salary + withdrawals + otherIncome),
+    },
     outgoings: {
       standingOrder: round2(standingOrder),
       directDebit: round2(directDebit),
+      deposits: round2(deposits),
       other: round2(otherOut),
-      total: round2(standingOrder + directDebit + otherOut),
+      total: round2(standingOrder + directDebit + deposits + otherOut),
     },
     currentBalance: round2(clearedBalance),
     available: round2(clearedBalance + pendingDelta),
@@ -100,17 +145,30 @@ export function computeCycleSummary(transactions: Transaction[], clearedBalance:
 
 /**
  * Ordering rank within a single date for the Summary ledger's
- * group-by-list / order-by-date view: salary (and a bonus paid alongside
- * it) always lands FIRST on its date, before any bill or loan due the
- * same day. This isn't cosmetic — the rolling balance figure shown beside
- * each row is a running fold in list order, so a bill sorted above the
- * salary that funds it shows a dip that never actually happens.
+ * group-by-list / order-by-date view: salary/pension income (and a bonus
+ * paid alongside salary) always lands FIRST on its date, before any bill
+ * or loan due the same day. This isn't cosmetic — the rolling balance
+ * figure shown beside each row is a running fold in list order, so a
+ * bill sorted above the income that funds it shows a dip that never
+ * actually happens. Same open question as computeCycleSummary above once
+ * there's genuinely more than one same-day income source (e.g. a salary
+ * AND a pension landing the same date) — which of the two should rank
+ * first between THEM isn't resolved here, only that both rank ahead of
+ * outgoings.
  */
-export function sameDateRank(t: Pick<Transaction, 'type'>): number {
-  return t.type === 'salary' || t.type === 'bonus' ? 0 : 1
+// Salary/bonus/pension income ranks first same-day (0); a Salary-Sort
+// transfer ranks directly after that income (1) — Adam-specified
+// 2026-09 Salary Sorter session: the money it's sorting only exists
+// because the salary landed moments before, so it should read as "the
+// very next thing that happened," not mixed in among the day's ordinary
+// bills. Everything else keeps its prior rank (2, was 1).
+export function sameDateRank(t: Pick<Transaction, 'type' | 'sourceType'>): number {
+  if (t.type === 'salary' || t.type === 'bonus' || t.type === 'pension_income') return 0
+  if (t.sourceType === 'salary_sort') return 1
+  return 2
 }
 
-/** Chronological, with salary first within any given date. */
+/** Chronological, with salary/pension income first within any given date. */
 export function compareByDateSalaryFirst(a: Transaction, b: Transaction): number {
   if (a.date !== b.date) return a.date.localeCompare(b.date)
   return sameDateRank(a) - sameDateRank(b)

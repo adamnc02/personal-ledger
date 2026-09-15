@@ -18,7 +18,19 @@ import { computeNetBonusAmount, computeSnapshotNetPayForPeriod } from '../lib/sa
  * ledger model directly, so there's no longer a need to bridge between
  * two different Person id spaces by matching names.
  */
-export function AttachBonusButton({ personId, fixedDate, existingOverride }: { personId: string; fixedDate: string; existingOverride?: SalaryOverride }) {
+export function AttachBonusButton({
+  personId,
+  fixedDate,
+  existingOverride,
+  onSaved,
+}: {
+  personId: string
+  fixedDate: string
+  existingOverride?: SalaryOverride
+  /** Batch 9 (2026-09-07, Bug 11) — fired after Attach/Save changes
+   * actually commits (not Remove, and not a plain Cancel/close). */
+  onSaved?: () => void
+}) {
   const [open, setOpen] = useState(false)
   const hasBonus = !!existingOverride?.bonusGrossAmount
 
@@ -35,7 +47,15 @@ export function AttachBonusButton({ personId, fixedDate, existingOverride }: { p
           </>
         )}
       </button>
-      {open && <AttachBonusForm personId={personId} fixedDate={fixedDate} existingOverride={hasBonus ? existingOverride : undefined} onClose={() => setOpen(false)} />}
+      {open && (
+        <AttachBonusForm
+          personId={personId}
+          fixedDate={fixedDate}
+          existingOverride={hasBonus ? existingOverride : undefined}
+          onClose={() => setOpen(false)}
+          onSaved={onSaved}
+        />
+      )}
     </>
   )
 }
@@ -45,11 +65,13 @@ function AttachBonusForm({
   fixedDate,
   existingOverride,
   onClose,
+  onSaved,
 }: {
   personId: string
   fixedDate: string
   existingOverride?: SalaryOverride
   onClose: () => void
+  onSaved?: () => void
 }) {
   const { data, addSalaryOverride, updateSalaryOverride, removeSalaryOverride } = useLedgerData()
   const [grossAmount, setGrossAmount] = useState(existingOverride?.bonusGrossAmount ? String(existingOverride.bonusGrossAmount) : '')
@@ -69,6 +91,7 @@ function AttachBonusForm({
       addSalaryOverride(personId, { payPeriodDate: fixedDate, netPayOverride, reason, bonusGrossAmount: grossNumber })
     }
     onClose()
+    onSaved?.()
   }
 
   function remove() {

@@ -13,6 +13,7 @@ import { upcomingPaydays } from '../src/lib/salaryLedger'
 import { nextMinimumChargeAmount, buildCreditCardMinimumChargeRows } from '../src/lib/creditCards'
 import { summarizeLoanProgress } from '../src/lib/ledgerLoans'
 import { toLocalIsoDate } from '../src/lib/date'
+import { migrateLedgerData } from '../src/lib/ledgerStorage'
 import type { AppDataV2, Loan, Transaction } from '../src/types/ledger'
 
 // Reads a real backup so the fixtures are authoritative app state rather
@@ -20,7 +21,7 @@ import type { AppDataV2, Loan, Transaction } from '../src/types/ledger'
 // scripts/fixtures; point LEDGER_BACKUP at a fresher export to re-run
 // these checks against current data.
 const BACKUP = process.env.LEDGER_BACKUP ?? new URL('./fixtures/backup-2026-08-24.json', import.meta.url).pathname
-const data = JSON.parse(readFileSync(BACKUP, 'utf8')) as AppDataV2
+const data = migrateLedgerData(JSON.parse(readFileSync(BACKUP, 'utf8')) as AppDataV2)
 const payCycle = data.payCycles[0]
 const personId = payCycle.personId
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -43,15 +44,15 @@ const asOfDates = [new Date(2026, 7, 24), new Date(2026, 7, 13), new Date(2026, 
 
 console.log('\n=== 1. Horizon covers current + 3 cycles ===')
 for (const asOf of asOfDates) {
-  const cycles = horizonCycles(payCycle, 'three_cycles', asOf)
+  const cycles = horizonCycles(data, personId, 'three_cycles', asOf)
   check(`${toLocalIsoDate(asOf)}: cycle count`, cycles.length, 1 + THREE_CYCLES_AHEAD)
-  check(`${toLocalIsoDate(asOf)}: horizonRangeEnd === last cycle end`, toLocalIsoDate(horizonRangeEnd(payCycle, 'three_cycles', asOf)), toLocalIsoDate(cycles[cycles.length - 1].end))
-  check(`${toLocalIsoDate(asOf)}: current_cycle still 1 cycle`, horizonCycles(payCycle, 'current_cycle', asOf).length, 1)
+  check(`${toLocalIsoDate(asOf)}: horizonRangeEnd === last cycle end`, toLocalIsoDate(horizonRangeEnd(data, personId, 'three_cycles', asOf)), toLocalIsoDate(cycles[cycles.length - 1].end))
+  check(`${toLocalIsoDate(asOf)}: current_cycle still 1 cycle`, horizonCycles(data, personId, 'current_cycle', asOf).length, 1)
 }
 
 console.log('\n=== 2. Cycles tile the window with no gaps or overlaps ===')
 for (const asOf of asOfDates) {
-  const cycles = horizonCycles(payCycle, 'three_cycles', asOf)
+  const cycles = horizonCycles(data, personId, 'three_cycles', asOf)
   const iso = toLocalIsoDate(asOf)
   assert(`${iso}: first cycle contains asOfDate`, asOf >= cycles[0].start && asOf <= cycles[0].end)
   for (let i = 1; i < cycles.length; i++) {
@@ -63,7 +64,7 @@ console.log('\n=== 3. Cycle ends land the day before the next payday ===')
 // cycleStartFollowsPayday is on for this config, so each boundary should
 // track the RESOLVED (weekend/bank-holiday adjusted) payday, not day 14.
 for (const asOf of asOfDates) {
-  const cycles = horizonCycles(payCycle, 'three_cycles', asOf)
+  const cycles = horizonCycles(data, personId, 'three_cycles', asOf)
   const iso = toLocalIsoDate(asOf)
   for (let i = 0; i < cycles.length - 1; i++) {
     check(`${iso}: cycle ${i} end is day before cycle ${i + 1} start`, toLocalIsoDate(cycles[i].end), toLocalIsoDate(addDays(cycles[i + 1].start, -1)))
@@ -77,7 +78,7 @@ console.log('\n=== 4. Section subtotals reconcile with the projection ===')
 for (const asOf of asOfDates) {
   const iso = toLocalIsoDate(asOf)
   const projection = computeProjection(data, personId, payCycle, 'three_cycles', asOf)
-  const cycles = horizonCycles(payCycle, 'three_cycles', asOf)
+  const cycles = horizonCycles(data, personId, 'three_cycles', asOf)
   const rows = projection.transactions.filter(isLedgerTransaction).slice().sort(compareByDateSalaryFirst)
 
   let running = projection.openingBalance

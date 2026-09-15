@@ -4,9 +4,23 @@ import { formatCurrency, formatMonthYear } from '../lib/format'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Plus, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, X, Info, AlertTriangle } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
-import { summarizeLoan, summarizeLoanProgress, estimateSettlementFigure, findLenderCalibrationProfile, previewOverpaymentRecast, previewRecurringOverpaymentRecast, buildLoanLedgerRows, loanFinishInfo, isLoanConfidentlyCalibrated, MAX_CALIBRATION_LINES, type CalibrationResult, type LoanLedgerRowType } from '../lib/ledgerLoans'
-import { nextMinimumChargeAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
-import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type StatementCalibrationLine, type Transaction } from '../types/ledger'
+import {
+  summarizeLoan,
+  summarizeLoanProgress,
+  estimateSettlementFigure,
+  findLenderCalibrationProfile,
+  previewOverpaymentRecast,
+  buildLoanLedgerRows,
+  loanFinishInfo,
+  isLoanConfidentlyCalibrated,
+  MAX_CALIBRATION_LINES,
+  recentAndUpcomingLoanPaymentDates,
+  applyLoanMonthlyPaymentChange,
+  type CalibrationResult,
+  type LoanLedgerRowType,
+} from '../lib/ledgerLoans'
+import { nextMinimumChargeAmount, pickNextSharedCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
+import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
 import { CategoryIcon } from '../components/CategoryIcon'
@@ -15,9 +29,13 @@ import { visibleCategoriesFor, seededCategoryIdForIcon } from '../lib/categories
 import { aprToMonthlyRate, standardPayment } from '../lib/interestConventions'
 import { LocationEditor } from '../components/LocationEditor'
 import { SwipeToDelete } from '../components/SwipeToDelete'
+import { ConfirmModal } from '../components/ConfirmModal'
+import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
+import { EffectiveDatedChangeFlow, type RecurringChangeField } from '../components/EffectiveDatedChangeFlow'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
-import { peopleWithSalaryCount } from '../lib/household'
+import { peopleWithIncomeCount } from '../lib/household'
+import { shouldOfferLocationPicker } from '../lib/pickerFirst'
 
 import { todayIso } from '../lib/date'
 
@@ -50,15 +68,90 @@ function AddButton({ onClick }: { onClick: () => void }) {
   )
 }
 
+/** Same "who's this for?" picker as Salary.tsx's — own local copy per this codebase's per-page-file convention for small shared UI. */
+function PersonPickerCard({ people, onPick, onCancel }: { people: { id: string; name: string }[]; onPick: (personId: string) => void; onCancel: () => void }) {
+  return (
+    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Who's this for?</span>
+        <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {people.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => onPick(p.id)}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * "Where does this get paid from?" — Picker-First Flows (2026-09
+ * session). Own local copy per this codebase's per-page-file convention
+ * — see Bills.tsx's identical component for the full reasoning (single
+ * flat list, picking a pot sets both location and potId in one tap, not
+ * shown at all when Current Account is the only possible answer).
+ */
+function LocationPickerCard({
+  canBeJoint,
+  ownerPots,
+  onPick,
+  onCancel,
+}: {
+  canBeJoint: boolean
+  ownerPots: Pot[]
+  onPick: (pick: { location: BillLocation; potId?: string }) => void
+  onCancel: () => void
+}) {
+  return (
+    <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Where does this get paid from?</span>
+        <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <button onClick={() => onPick({ location: 'personal' })} className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]" style={{ background: 'var(--color-surface)' }}>
+          Current Account
+        </button>
+        {canBeJoint && (
+          <button onClick={() => onPick({ location: 'joint' })} className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]" style={{ background: 'var(--color-surface)' }}>
+            Joint Account
+          </button>
+        )}
+        {ownerPots.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => onPick({ location: 'pot', potId: p.id })}
+            className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function Loans() {
   const {
     data,
+    importGeneration,
     addLoan,
     updateLoan,
     removeLoan,
     logLoanOverpayment,
-    updateLoanOverpayment,
-    removeLoanOverpayment,
     settleLoanAction,
     calibrateLoanAction,
     addCreditCard,
@@ -66,15 +159,44 @@ export function Loans() {
     updateCreditCardMinimumCharge,
     removeCreditCard,
     logCreditCardLumpPayment,
-    removeCreditCardLumpPayment,
-    updateCreditCardLumpPayment,
     addCategory,
+    assignLoanLocation,
   } = useLedgerData()
   const [addingLoan, setAddingLoan] = useState(false)
+  // Same "if multiple people, person-selector first; otherwise straight
+  // to the form" flow now applied consistently across Salary/Pension/
+  // Savings/Loans/Credit Cards — see PersonPickerCard's own comment in
+  // Salary.tsx for the full reasoning. defaultOwnerId feeds LoanForm's
+  // existing ownerId field unchanged; this only decides what it starts
+  // pre-filled to.
+  const [pickingLoanOwner, setPickingLoanOwner] = useState(false)
+  const [pickingLoanLocation, setPickingLoanLocation] = useState(false)
+  const [loanDefaultOwnerId, setLoanDefaultOwnerId] = useState(data.primaryPersonId)
+  const [loanDefaultLocation, setLoanDefaultLocation] = useState<{ location: BillLocation; potId?: string }>({ location: 'personal' })
   const [addingCard, setAddingCard] = useState(false)
+  const [pickingCardOwner, setPickingCardOwner] = useState(false)
+  const [cardDefaultOwnerId, setCardDefaultOwnerId] = useState(data.primaryPersonId)
   const [expandedLoan, setExpandedLoan] = useState<string | null>(null)
   const [expandedCard, setExpandedCard] = useState<string | null>(null)
+  // Batch 7 (2026-09-07, bug 7) — resync these picker-first defaults (and
+  // drop any stale expanded row) after a backup import, which replaces
+  // `data` wholesale — see LedgerContext's own comment on
+  // `importGeneration` for why an ordinary `data` dependency can't tell
+  // an import apart from any other mutation.
+  useEffect(() => {
+    setLoanDefaultOwnerId(data.primaryPersonId)
+    setCardDefaultOwnerId(data.primaryPersonId)
+    setExpandedLoan(null)
+    setExpandedCard(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importGeneration])
   const [overpaymentPrefill, setOverpaymentPrefill] = useState<OverpaymentPrefill | null>(null)
+  // Batch 9 (2026-09-07, Bug 11) — a brand-new loan/card has no card to
+  // flash at the moment its own Save fires (the row only mounts on the
+  // NEXT render, once data.loans/data.creditCards includes it) — same
+  // "flash on mount instead" handoff Bills.tsx uses for a new bill.
+  const [justCreatedLoanId, setJustCreatedLoanId] = useState<string | null>(null)
+  const [justCreatedCardId, setJustCreatedCardId] = useState<string | null>(null)
   const routerLocation = useLocation()
   const navigate = useNavigate()
   const loanPrefill = (routerLocation.state as { loanPrefill?: LoanPrefill } | null)?.loanPrefill
@@ -83,9 +205,25 @@ export function Loans() {
   // bill to make that split meaningful — see LoanEditPanel/LoanForm's
   // "hasJointBills" prop for the full reasoning.
   const hasJointBills = data.recurringTemplates.some((t) => t.location === 'joint')
-  // ...and, separately, only once 2+ people actually have a salary
-  // configured to split — see lib/household.ts's hasSalaryConfigured.
-  const canBeJoint = peopleWithSalaryCount(data.people) >= 2
+  // ...and, separately, only once 2+ people actually have real income
+  // (salary or an active pension) to split — see lib/household.ts's
+  // hasIncomeConfigured.
+  const canBeJoint = peopleWithIncomeCount(data.people, data.pensions) >= 2
+
+  // Shared by both the single-person-owner shortcut and PersonPickerCard's
+  // onPick (Picker-First Flows, 2026-09 session) — same skip logic as
+  // Bills.tsx's proceedPastOwner: only shows the Location step when
+  // there's a real choice besides Current Account for this owner.
+  function proceedPastLoanOwner(ownerId: string) {
+    setLoanDefaultOwnerId(ownerId)
+    const ownerHasPots = data.pots.some((p) => p.personId === ownerId && p.active)
+    if (shouldOfferLocationPicker(canBeJoint, ownerHasPots)) {
+      setPickingLoanLocation(true)
+    } else {
+      setLoanDefaultLocation({ location: 'personal' })
+      setAddingLoan(true)
+    }
+  }
 
   useEffect(() => {
     if (loanPrefill) setAddingLoan(true)
@@ -108,17 +246,58 @@ export function Loans() {
         <h1 className="font-display text-2xl font-semibold text-[var(--color-ink)]">Borrowing</h1>
       </header>
 
-      <CollapsibleSection title="Loans" className="mb-8" headerExtra={<AddButton onClick={() => setAddingLoan(true)} />}>
+      <CollapsibleSection
+        title="Loans"
+        className="mb-8"
+        headerExtra={
+          <AddButton
+            onClick={() => {
+              if (data.people.length === 1) {
+                proceedPastLoanOwner(data.people[0].id)
+              } else {
+                setPickingLoanOwner(true)
+              }
+            }}
+          />
+        }
+      >
         <p className="text-xs text-[var(--color-ink-faint)] mb-3 leading-relaxed">
           Monthly amount + term are the inputs now — the total payable is worked out from those, rather than the
           other way round. Log a real overpayment on any loan below and its remaining schedule shrinks for good.
         </p>
 
+        {pickingLoanOwner && (
+          <PersonPickerCard
+            people={data.people}
+            onPick={(id) => {
+              setPickingLoanOwner(false)
+              proceedPastLoanOwner(id)
+            }}
+            onCancel={() => setPickingLoanOwner(false)}
+          />
+        )}
+
+        {pickingLoanLocation && (
+          <LocationPickerCard
+            canBeJoint={canBeJoint}
+            ownerPots={data.pots.filter((p) => p.personId === loanDefaultOwnerId && p.active)}
+            onPick={(pick) => {
+              setLoanDefaultLocation(pick)
+              setPickingLoanLocation(false)
+              setAddingLoan(true)
+            }}
+            onCancel={() => setPickingLoanLocation(false)}
+          />
+        )}
+
         {addingLoan && (
           <LoanForm
             people={data.people}
+            pots={data.pots}
             categories={visibleCategoriesFor(data)}
-            defaultOwnerId={data.primaryPersonId}
+            defaultOwnerId={loanDefaultOwnerId}
+            defaultLocation={loanDefaultLocation.location}
+            defaultPotId={loanDefaultLocation.potId}
             initial={loanPrefill}
             hasJointBills={hasJointBills}
             canBeJoint={canBeJoint}
@@ -129,7 +308,8 @@ export function Loans() {
               if (loanPrefill) navigate('.', { replace: true, state: null })
             }}
             onSave={(loan) => {
-              addLoan(loan)
+              const id = addLoan(loan)
+              setJustCreatedLoanId(id)
               setAddingLoan(false)
               if (loanPrefill) navigate('.', { replace: true, state: null })
             }}
@@ -154,17 +334,18 @@ export function Loans() {
                 onRemove={() => removeLoan(loan.id)}
                 categories={visibleCategoriesFor(data, loan.categoryId)}
                 people={data.people}
-                hasJointBills={hasJointBills}
+                pots={data.pots}
                 canBeJoint={canBeJoint}
                 onAddCategory={addCategory}
                 onSave={(u) => updateLoan(loan.id, u)}
+                onAssignLocation={(location, effectiveFrom, potId) => assignLoanLocation(loan.id, location, effectiveFrom, { potId })}
                 onLogOverpayment={(amount, date, note, recastMode) => logLoanOverpayment(loan.id, amount, date, note, recastMode)}
-                onUpdateOverpayment={(overpaymentId, amount, date, note) => updateLoanOverpayment(loan.id, overpaymentId, amount, date, note)}
-                onRemoveOverpayment={(overpaymentId) => removeLoanOverpayment(loan.id, overpaymentId)}
                 onSettle={(amount, date, note) => settleLoanAction(loan.id, amount, date, note)}
                 onCalibrate={(lines) => calibrateLoanAction(loan.id, lines)}
                 overpaymentPrefill={overpaymentPrefill?.targetKind === 'loan' && overpaymentPrefill.targetId === loan.id ? overpaymentPrefill : null}
                 onPrefillConsumed={() => setOverpaymentPrefill(null)}
+                shouldFlashOnMount={justCreatedLoanId === loan.id}
+                onFlashedOnMount={() => setJustCreatedLoanId(null)}
               />
             )
           })}
@@ -172,22 +353,49 @@ export function Loans() {
         </div>
       </CollapsibleSection>
 
-      <CollapsibleSection title="Credit Cards" headerExtra={<AddButton onClick={() => setAddingCard(true)} />}>
+      <CollapsibleSection
+        title="Credit Cards"
+        headerExtra={
+          <AddButton
+            onClick={() => {
+              if (data.people.length === 1) {
+                setCardDefaultOwnerId(data.people[0].id)
+                setAddingCard(true)
+              } else {
+                setPickingCardOwner(true)
+              }
+            }}
+          />
+        }
+      >
         <p className="text-xs text-[var(--color-ink-faint)] mb-3 leading-relaxed">
           A card's minimum/monthly payment is treated like a bill. Spend charged to a card (logged from the Expenses
           page) never touches your cash balance — only actual payments toward the card do.
         </p>
 
+        {pickingCardOwner && (
+          <PersonPickerCard
+            people={data.people}
+            onPick={(id) => {
+              setCardDefaultOwnerId(id)
+              setPickingCardOwner(false)
+              setAddingCard(true)
+            }}
+            onCancel={() => setPickingCardOwner(false)}
+          />
+        )}
+
         {addingCard && (
           <CreditCardForm
             people={data.people}
             categories={visibleCategoriesFor(data, CREDIT_CARD_CATEGORY_ID)}
-            defaultOwnerId={data.primaryPersonId}
-            nextColor={pickCreditCardColor(data.creditCards.length)}
+            defaultOwnerId={cardDefaultOwnerId}
+            nextColor={pickNextSharedCardColor(data)}
             onAddCategory={addCategory}
             onCancel={() => setAddingCard(false)}
             onSave={(card) => {
-              addCreditCard(card)
+              const id = addCreditCard(card)
+              setJustCreatedCardId(id)
               setAddingCard(false)
             }}
           />
@@ -223,12 +431,12 @@ export function Loans() {
                 transactions={data.transactions}
                 onAddCategory={addCategory}
                 onSave={(u) => updateCreditCard(card.id, u)}
-                onUpdateLumpPayment={(lumpPaymentId, amount, date, note) => updateCreditCardLumpPayment(card.id, lumpPaymentId, amount, date, note)}
-                onRemoveLumpPayment={(lumpPaymentId) => removeCreditCardLumpPayment(card.id, lumpPaymentId)}
                 onLogLumpPayment={(amount, date, note) => logCreditCardLumpPayment(card.id, amount, date, note)}
                 onUpdateMinimumCharge={(date, amount) => updateCreditCardMinimumCharge(card.id, date, amount)}
                 overpaymentPrefill={overpaymentPrefill?.targetKind === 'credit_card' && overpaymentPrefill.targetId === card.id ? overpaymentPrefill : null}
                 onPrefillConsumed={() => setOverpaymentPrefill(null)}
+                shouldFlashOnMount={justCreatedCardId === card.id}
+                onFlashedOnMount={() => setJustCreatedCardId(null)}
               />
             )
           })}
@@ -262,17 +470,18 @@ function LoanRow({
   onRemove,
   categories,
   people,
-  hasJointBills,
+  pots,
   canBeJoint,
   onAddCategory,
   onSave,
+  onAssignLocation,
   onLogOverpayment,
-  onUpdateOverpayment,
-  onRemoveOverpayment,
   onSettle,
   onCalibrate,
   overpaymentPrefill,
   onPrefillConsumed,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   loan: Loan
   category: { id: string; name: string; icon: string; iconColor: string } | undefined
@@ -283,20 +492,32 @@ function LoanRow({
   onRemove: () => void
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   people: { id: string; name: string }[]
-  hasJointBills: boolean
+  pots: Pot[]
   canBeJoint: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
+  onAssignLocation: (location: BillLocation, effectiveFrom: string, potId?: string) => void
   onLogOverpayment: (amount: number, date: string, note?: string, recastMode?: 'reduce_term' | 'reduce_payment') => void
-  onUpdateOverpayment: (overpaymentId: string, amount: number, date: string, note?: string) => void
-  onRemoveOverpayment: (overpaymentId: string) => void
   onSettle: (amount: number, date: string, note?: string) => void
   onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — true for exactly one render right
+   * after this loan was newly created, so it can flash "Loan saved." on
+   * mount (no card exists yet at the moment a brand-new loan's own save
+   * button is clicked). */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
-  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash()
   const [ledgerOpen, setLedgerOpen] = useState(false)
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash('Loan saved')
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={loan.name}>
@@ -335,12 +556,16 @@ function LoanRow({
           <div className="h-full rounded-full" style={{ width: `${progress.percentPaid}%`, background: 'var(--color-coral)' }} />
         </div>
 
-        {isOpen && (
-          <LoanEditPanel
+        {/* UAT 2026-09-08 (6-bug4-loans): this panel now always mounts —
+            its own `isOpen` prop gates just the Name/Amount/etc. fields
+            grid, so the log/recurring-overpayment and Settle actions stay
+            visible on the collapsed card too, matching Joint Account. */}
+        <LoanEditPanel
             loan={loan}
+            isOpen={isOpen}
             categories={categories}
             people={people}
-            hasJointBills={hasJointBills}
+            pots={pots}
             canBeJoint={canBeJoint}
             onAddCategory={onAddCategory}
             onSave={(u) => {
@@ -348,21 +573,35 @@ function LoanRow({
               onToggle()
               triggerFlash()
             }}
-            onLogOverpayment={onLogOverpayment}
-            onUpdateOverpayment={onUpdateOverpayment}
-            onRemoveOverpayment={onRemoveOverpayment}
-            onSettle={(amount, date, note) => {
-              onSettle(amount, date, note)
+            onAssignLocation={(location, effectiveFrom, potId) => {
+              onAssignLocation(location, effectiveFrom, potId)
               onToggle()
               triggerFlash()
             }}
+            onLogOverpayment={(amount, date, note, recastMode) => {
+              // UAT 2026-09-08 (followup-loan-overpayment-ui): this was
+              // the one action here that flashed but left the whole loan
+              // card expanded, unlike Save/Settle above. Guarded on isOpen
+              // now that this action is reachable from a collapsed card
+              // too — must never OPEN the card, only collapse it if it
+              // was already open.
+              onLogOverpayment(amount, date, note, recastMode)
+              if (isOpen) onToggle()
+              triggerFlash()
+            }}
+            onSettle={(amount, date, note) => {
+              onSettle(amount, date, note)
+              if (isOpen) onToggle()
+              triggerFlash('Loan settled')
+            }}
             onCalibrate={onCalibrate}
+            onCalibrated={() => triggerFlash('Calibration saved')}
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
+            onCancel={() => isOpen && onToggle()}
           />
-        )}
 
-        <SavedFlashOverlay active={flashActive} />
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
     </SwipeToDelete>
   )
@@ -380,12 +619,12 @@ function CreditCardRow({
   transactions,
   onAddCategory,
   onSave,
-  onUpdateLumpPayment,
-  onRemoveLumpPayment,
   onLogLumpPayment,
   onUpdateMinimumCharge,
   overpaymentPrefill,
   onPrefillConsumed,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   card: CreditCard // live: currentBalance is the DERIVED figure, for display
   storedCard: CreditCard // as persisted: currentBalance is the stated anchor, for editing
@@ -398,15 +637,23 @@ function CreditCardRow({
   transactions: Transaction[]
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>>) => void
-  onUpdateLumpPayment: (lumpPaymentId: string, amount: number, date: string, note?: string) => void
-  onRemoveLumpPayment: (lumpPaymentId: string) => void
   onLogLumpPayment: (amount: number, date: string, note?: string) => void
   onUpdateMinimumCharge: (date: string, amount: number) => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — see LoanRow's own comment. */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
-  const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  const { active: flashActive, message: flashMessage, trigger: triggerFlash } = useSavedFlash()
   const [ledgerOpen, setLedgerOpen] = useState(false)
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash('Credit Card saved')
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={card.name}>
@@ -432,12 +679,31 @@ function CreditCardRow({
           </button>
         </div>
 
-        {ledgerOpen && <CreditCardLedgerModal card={card} transactions={transactions} onUpdateMinimumCharge={onUpdateMinimumCharge} onClose={() => setLedgerOpen(false)} />}
+        {ledgerOpen && (
+          // BUGFIX (2026-09-16, Adam-reported — "Clear" on an EXISTING
+          // card with real transaction history logged double the true
+          // balance due). `card` here is the LIVE variant (see this
+          // component's own prop comment: "currentBalance is the DERIVED
+          // figure, for display") — its `currentBalance` is already the
+          // result of replaying every real transaction onto the stored
+          // anchor, but `balanceAsOfDate` stays at the ORIGINAL anchor
+          // date. Feeding that back into buildCreditCardMinimumChargeRows
+          // (which itself calls cardBalanceAsOf/generateMinimumPaymentTransactions,
+          // both of which start from `card.currentBalance` and then
+          // REPLAY the same real activity from `card.balanceAsOfDate`
+          // onward on top of it) double-counts every transaction between
+          // the anchor and today. `storedCard` is exactly what these
+          // functions expect: currentBalance genuinely AS OF
+          // balanceAsOfDate, nothing replayed into it yet.
+          <CreditCardLedgerModal card={storedCard} transactions={transactions} onUpdateMinimumCharge={onUpdateMinimumCharge} onClose={() => setLedgerOpen(false)} />
+        )}
 
-        {isOpen && (
-          <CreditCardEditPanel
+        {/* UAT 2026-09-08 (6-bug4-cards): always mounted now — see
+            LoanEditPanel's own comment on the same pattern. */}
+        <CreditCardEditPanel
             storedCard={storedCard}
             card={card}
+            isOpen={isOpen}
             transactions={transactions}
             people={people}
             categories={categories}
@@ -447,15 +713,28 @@ function CreditCardRow({
               onToggle()
               triggerFlash()
             }}
-            onUpdateLumpPayment={onUpdateLumpPayment}
-            onRemoveLumpPayment={onRemoveLumpPayment}
-            onLogLumpPayment={onLogLumpPayment}
+            onLogLumpPayment={(amount, date, note) => {
+              // UAT 2026-09-08 (followup-loan-overpayment-ui, same root
+              // cause on the credit card's analogous action). Guarded on
+              // isOpen now that this is reachable from a collapsed card.
+              onLogLumpPayment(amount, date, note)
+              if (isOpen) onToggle()
+              triggerFlash()
+            }}
+            onClearBalance={(date, amount) => {
+              // 2026-09-09 followup (Adam-requested) — Save on the new
+              // confirm modal collapses the card too, same as every other
+              // action here (Save, Log a payment) once it commits.
+              onLogLumpPayment(amount, date, 'Statement cleared')
+              if (isOpen) onToggle()
+              triggerFlash()
+            }}
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
+            onCancel={() => isOpen && onToggle()}
           />
-        )}
 
-        <SavedFlashOverlay active={flashActive} />
+        <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
     </SwipeToDelete>
   )
@@ -469,52 +748,95 @@ function draftFromLoan(loan: Loan): LoanDraft {
   return rest
 }
 
+/** Shared display label for a BillLocation, matching Bills.tsx's
+ * billLocationLabel (Batch 7, Bug 8's confirmation modal) — kept as a
+ * separate small copy here rather than a cross-file import, same
+ * proportionate-duplication call as this file's own pattern elsewhere
+ * (e.g. LoggedPaymentList/LumpPaymentList). */
+function loanLocationLabel(location: BillLocation, potId: string | undefined, pots: Pot[]): string {
+  if (location === 'pot') return pots.find((p) => p.id === potId)?.name ?? 'a pot'
+  if (location === 'joint') return 'Joint Account'
+  return 'Current Account'
+}
+
 function LoanEditPanel({
   loan,
+  isOpen,
   categories,
   people,
-  hasJointBills,
+  pots,
   canBeJoint,
   onAddCategory,
   onSave,
+  onAssignLocation,
   onLogOverpayment,
-  onUpdateOverpayment,
-  onRemoveOverpayment,
   onSettle,
   onCalibrate,
+  onCalibrated,
   overpaymentPrefill,
   onPrefillConsumed,
+  onCancel,
 }: {
   loan: Loan
+  /** UAT 2026-09-08 (6-bug4-loans) — gates only the Name/Amount/etc.
+   * fields grid + its own Save button; the action buttons/lists above it
+   * (log/recurring overpayment, Settle) render regardless, matching Joint
+   * Account's always-visible action buttons. This panel is now always
+   * mounted once expandable at all — see LoanRow's own call site. */
+  isOpen: boolean
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   people: { id: string; name: string }[]
-  hasJointBills: boolean
+  pots: Pot[]
   canBeJoint: boolean
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
+  onAssignLocation: (location: BillLocation, effectiveFrom: string, potId?: string) => void
   onLogOverpayment: (amount: number, date: string, note?: string, recastMode?: 'reduce_term' | 'reduce_payment') => void
-  onUpdateOverpayment: (overpaymentId: string, amount: number, date: string, note?: string) => void
-  onRemoveOverpayment: (overpaymentId: string) => void
   onSettle: (amount: number, date: string, note?: string) => void
   onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
+  /** Batch 9 (2026-09-07, Bug 11) — see CalibrationModal's own comment. */
+  onCalibrated?: () => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
+  /** UAT 2026-09-08 (7-bug8.2-confirm-loans note) — this fields form had
+   * no Cancel at all; collapses the card without saving. */
+  onCancel: () => void
 }) {
-  // A 'recurring' prefill (from the What-if page's "Make this a real
-  // recurring overpayment" button) seeds the draft's recurringOverpayment
-  // straight away rather than the loan's current saved value — the user
-  // still has to hit Save to actually commit it. A 'payoff' prefill
-  // instead pre-opens the one-off log form below (see loggingOverpayment).
-  const [draft, setDraft] = useState<LoanDraft>(() => {
-    const base = draftFromLoan(loan)
-    if (overpaymentPrefill && overpaymentPrefill.mode === 'recurring') {
-      return { ...base, recurringOverpayment: { startDate: todayIso(), amount: { type: 'fixed', amount: overpaymentPrefill.amount } } }
-    }
-    return base
-  })
+  // 2026-09-09 followup — a 'recurring' prefill from the What-if page's
+  // "Make this a real recurring overpayment" button now goes straight to
+  // the Transactions page's Overpayments pill instead of here (recurring
+  // overpayments are no longer created/edited on the Borrowing page at
+  // all — see Scenarios.tsx's makeImpactReal), so overpaymentPrefill
+  // reaching this panel is always a 'payoff' (one-off) prefill now.
+  const [draft, setDraft] = useState<LoanDraft>(() => draftFromLoan(loan))
   const [loggingOverpayment, setLoggingOverpayment] = useState(overpaymentPrefill?.mode === 'payoff')
   const [settlingLoan, setSettlingLoan] = useState(false)
   const [calibratingLoan, setCalibratingLoan] = useState(false)
+  const navigate = useNavigate()
+  // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
+  // when nothing's changed — this panel's Save was a plain always-on
+  // button with no dirty/validity gating at all before this.
+  const dirty = JSON.stringify(draft) !== JSON.stringify(draftFromLoan(loan))
+  // Pots backlog item (2026-09 session) — a location change needs its own
+  // effective date, same reasoning as Bills.tsx's BillEditPanel (see
+  // that component's own comment for the full picture; this mirrors it
+  // with a plain date field rather than a "pick a specific upcoming
+  // payment" list — Loans.tsx has no existing per-occurrence picker
+  // infrastructure the way Bills does, and Adam's own spec for the
+  // closely analogous pot-creation flow was itself just "date picker,
+  // default to today," so this stays proportionate rather than building
+  // a parallel picker UI for one field.
+  // UAT 2026-09-08 (7-bug8.2-confirm-loans note): replaced by a picker-
+  // first flow, matching Bills/Pots — this bare date field with no
+  // occurrence list to anchor to was the specific thing Adam asked to
+  // remove. Generalised 2026-09-09 into the shared EffectiveDatedChangeFlow
+  // (same changeKind convention as BillEditPanel) to also cover a
+  // monthlyPayment change, now that Loan has a real monthlyPaymentHistory
+  // mechanism (ledgerLoans.ts's resolveMonthlyPayment/
+  // applyLoanMonthlyPaymentChange) — no scope ("just this/all future")
+  // step for monthlyPayment, per Adam's own call: a loan's own payment
+  // has no single-occurrence concept, only a permanent change.
+  const [changeKind, setChangeKind] = useState<'monthlyPayment' | 'location' | null>(null)
 
   // Prefill only needs to seed the initial draft/form state above — once
   // this panel has mounted with it, tell the parent to forget it so a
@@ -524,8 +846,31 @@ function LoanEditPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // UAT 2026-09-08 (6-bug4-loans): this panel now stays mounted while the
+  // card is collapsed (see `isOpen`'s own comment) rather than unmounting
+  // and losing its draft the way it used to — so an abandoned field edit
+  // (Cancel, or just tapping the header to collapse without saving) needs
+  // an explicit reset instead of relying on a fresh mount to provide one.
+  useEffect(() => {
+    if (!isOpen) {
+      setDraft(draftFromLoan(loan))
+      setChangeKind(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
+
   function update(patch: Partial<LoanDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
+  }
+
+  // UAT 2026-09-08 (7-bug8.2-confirm-loans note, same fix as Bills.tsx's
+  // own cancelEverything) — Cancel on the location date picker or the
+  // confirm modal must fully discard the edit and collapse the card, not
+  // just step back to the previous screen.
+  function cancelEverything() {
+    setDraft(draftFromLoan(loan))
+    setChangeKind(null)
+    onCancel()
   }
 
   // Live preview of the schedule impact of unsaved edits — merges the draft
@@ -536,6 +881,82 @@ function LoanEditPanel({
 
   return (
     <div className="mt-4 flex flex-col gap-3">
+      {/* Batch 6 (2026-09-07 UAT): action buttons (log/recurring overpayment,
+          Settle this loan) moved above the edit-form fields to match Joint
+          Account's card ordering — visible immediately on expand, not
+          pushed below the fields grid. */}
+      {/* 2026-09-09 session (Adam-specified) — the past-overpayments list
+          used to sit here, inline in the expanded card; it now lives on
+          the Transactions page's Transfers tab instead, mirroring how a
+          pot/savings pot/joint account deposit doesn't show its own
+          inline history on the Wallet page either — only on Transactions.
+          The one-off log button/form and the recurring editor below stay
+          right here, unchanged. */}
+      {!loggingOverpayment ? (
+        <button onClick={() => setLoggingOverpayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+          + Log an overpayment
+        </button>
+      ) : (
+        <LoanOverpaymentForm
+          loan={{ ...loan, ...draft }}
+          initialAmount={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.amount : undefined}
+          initialDate={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.date : undefined}
+          onLog={(amount, date, note, recastMode) => {
+            onLogOverpayment(amount, date, note, recastMode)
+            setLoggingOverpayment(false)
+          }}
+          onCancel={() => setLoggingOverpayment(false)}
+        />
+      )}
+
+      {/* 2026-09-09 followup (Adam-reported) — a real trigger to start a
+          NEW recurring overpayment for this loan needs to stay reachable
+          from here, same as the one-off log button above; it just no
+          longer opens its own inline editor (that's still gone — see the
+          comment on the deleted RecurringOverpaymentEditor). Instead it
+          hands off to the exact same Overpayments-pill wizard the What-if
+          page's "Make this a real recurring overpayment" button already
+          uses, pre-selecting this loan (target only, no amount) so the
+          person still picks amount/from/recast/date themselves. */}
+      <button
+        onClick={() =>
+          navigate('/expenses', {
+            state: { overpaymentPrefill: { targetKind: 'loan', targetId: loan.id, mode: 'recurring', amount: 0 } },
+          })
+        }
+        className="text-xs font-medium self-start"
+        style={{ color: 'var(--color-coral)' }}
+      >
+        + Log a recurring overpayment
+      </button>
+
+      {loan.active ? (
+        <>
+          <button onClick={() => setSettlingLoan(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+            Settle this loan
+          </button>
+          {settlingLoan && (
+            <SettleLoanModal
+              loanName={loan.name}
+              estimatedSettlement={estimateSettlementFigure({ ...loan, ...draft })}
+              trueOutstandingBalance={previewSummary.remainingBalance}
+              onSettle={(amount, date, note) => {
+                onSettle(amount, date, note)
+                setSettlingLoan(false)
+              }}
+              onClose={() => setSettlingLoan(false)}
+            />
+          )}
+        </>
+      ) : (
+        <p className="text-xs text-[var(--color-ink-faint)]">
+          Settled for £{formatCurrency(loan.settledAmount ?? 0)}
+          {loan.closedDate ? ` on ${loan.closedDate}` : ''}
+        </p>
+      )}
+
+      {isOpen && (
+        <>
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Lender (optional)" value={draft.lender ?? ''} onChange={(v) => update({ lender: v || undefined })} />
@@ -566,74 +987,110 @@ function LoanEditPanel({
 
       <CategoryPicker categories={categories} value={draft.categoryId} onChange={(categoryId) => update({ categoryId })} onAddCategory={onAddCategory} />
 
-      {(hasJointBills || draft.location === 'joint') && (
-        <LocationEditor
-          people={people}
-          canBeJoint={canBeJoint}
-          location={draft.location}
-          ownerId={draft.ownerId}
-          payee={draft.payee}
-          payeeSharePercent={draft.payeeSharePercent}
-          onChange={update}
+      {/* UAT follow-up (2026-09-05, Adam-reported): used to be gated on
+          `hasJointBills || pots.some(p => p.personId === draft.ownerId) ||
+          already joint/pot` — for a loan owned by someone with NO pot of
+          their own (and no joint bill anywhere yet to unlock Joint),
+          that condition was false and this never rendered at all, with
+          no way to even reach the Owner field to reassign ownership to
+          someone who DOES have a pot. LocationEditor already self-gates
+          correctly (renders nothing when truly nothing applies, same as
+          Bills.tsx's own unconditional render) — the outer wrapper here
+          was redundant AND wrong, since it couldn't see a pot change
+          becoming possible after an owner reassignment. */}
+      <LocationEditor
+        people={people}
+        pots={pots}
+        canBeJoint={canBeJoint}
+        location={draft.location}
+        ownerId={draft.ownerId}
+        potId={draft.potId}
+        payee={draft.payee}
+        payeeSharePercent={draft.payeeSharePercent}
+        onChange={update}
+      />
+      {calibratingLoan && (
+        <CalibrationModal
+          loanName={loan.name}
+          existingLinesCount={loan.statementCalibrationLines?.length ?? 0}
+          onCalibrate={onCalibrate}
+          onCalibrated={onCalibrated}
+          onClose={() => setCalibratingLoan(false)}
         />
       )}
 
-      {/* Editable, matching how a credit card's logged lump payments appear — each overpayment is its own row, tappable to edit or delete, not just a rolled-up summary line. */}
-      <LoggedPaymentList payments={loan.overpayments} onUpdate={onUpdateOverpayment} onRemove={onRemoveOverpayment} />
-      {!loggingOverpayment ? (
-        <button onClick={() => setLoggingOverpayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-          + Log an overpayment
-        </button>
-      ) : (
-        <LoanOverpaymentForm
-          loan={{ ...loan, ...draft }}
-          initialAmount={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.amount : undefined}
-          initialDate={overpaymentPrefill?.mode === 'payoff' ? overpaymentPrefill.date : undefined}
-          onLog={(amount, date, note, recastMode) => {
-            onLogOverpayment(amount, date, note, recastMode)
-            setLoggingOverpayment(false)
+      {/* UAT 2026-09-08 (7-bug8.2-confirm-loans note) — picker-first list
+          of real upcoming payment dates, replacing the plain "changes
+          take effect from" calendar field, matching Bills/Pots.
+          Generalised 2026-09-09 to also cover a monthlyPayment change
+          (same shared component, same combined-in-one-flow convention
+          BillEditPanel uses when amount+location change together). */}
+      {changeKind && (
+        <EffectiveDatedChangeFlow
+          occurrences={recentAndUpcomingLoanPaymentDates(loan, new Date())}
+          dateStepDescription={
+            changeKind === 'monthlyPayment'
+              ? `${loan.name}'s payment is changing from £${formatCurrency(loan.monthlyPayment)} to £${formatCurrency(draft.monthlyPayment)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
+              : `${loan.name} is moving to ${loanLocationLabel(draft.location, draft.potId, pots)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
+          }
+          buildChanges={() => {
+            const changes: RecurringChangeField[] = []
+            if (changeKind === 'monthlyPayment') changes.push({ label: 'Monthly payment', from: `£${formatCurrency(loan.monthlyPayment)}`, to: `£${formatCurrency(draft.monthlyPayment)}` })
+            const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
+            if (locationChanged) changes.push({ label: 'Location', from: loanLocationLabel(loan.location, loan.potId, pots), to: loanLocationLabel(draft.location, draft.potId, pots) })
+            return changes
+          }}
+          affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
+          onCancelAll={cancelEverything}
+          onCommit={(effectiveFrom) => {
+            const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
+            if (changeKind === 'monthlyPayment') {
+              const paymentPatch = applyLoanMonthlyPaymentChange(loan, draft.monthlyPayment, effectiveFrom)
+              if (locationChanged) {
+                const { location: _l, potId: _p, ...rest } = draft
+                onSave({ ...rest, ...paymentPatch })
+                onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+              } else {
+                onSave({ ...draft, ...paymentPatch })
+              }
+            } else {
+              onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+              const { location: _l, potId: _p, ...rest } = draft
+              onSave(rest)
+            }
+            setChangeKind(null)
           }}
         />
       )}
 
-      <RecurringOverpaymentEditor loan={{ ...loan, ...draft }} value={draft.recurringOverpayment} onChange={(recurringOverpayment) => update({ recurringOverpayment })} />
-
-      {calibratingLoan && (
-        <CalibrationModal loanName={loan.name} existingLinesCount={loan.statementCalibrationLines?.length ?? 0} onCalibrate={onCalibrate} onClose={() => setCalibratingLoan(false)} />
-      )}
-
-      {loan.active ? (
-        <>
-          <button onClick={() => setSettlingLoan(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-            Settle this loan
-          </button>
-          {settlingLoan && (
-            <SettleLoanModal
-              loanName={loan.name}
-              estimatedSettlement={estimateSettlementFigure({ ...loan, ...draft })}
-              trueOutstandingBalance={previewSummary.remainingBalance}
-              onSettle={(amount, date, note) => {
-                onSettle(amount, date, note)
-                setSettlingLoan(false)
-              }}
-              onClose={() => setSettlingLoan(false)}
-            />
-          )}
+      <FormButtonRow
+        onCancel={onCancel}
+        saveDisabled={!dirty}
+        onSave={() => {
+          const monthlyPaymentChanged = draft.monthlyPayment !== loan.monthlyPayment
+          const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
+          const hasOccurrences = recentAndUpcomingLoanPaymentDates(loan, new Date()).length > 0
+          if (monthlyPaymentChanged && hasOccurrences) {
+            setChangeKind('monthlyPayment')
+            return
+          }
+          if (locationChanged && hasOccurrences) {
+            setChangeKind('location')
+            return
+          }
+          // No occurrences to anchor a date to yet — apply immediately,
+          // dated today, same "nothing to pick from" guard Bills.tsx uses.
+          if (locationChanged) {
+            onAssignLocation(draft.location, todayIso(), draft.location === 'pot' ? draft.potId : undefined)
+            const { location: _l, potId: _p, ...rest } = draft
+            onSave(rest)
+            return
+          }
+          onSave(draft)
+        }}
+      />
         </>
-      ) : (
-        <p className="text-xs text-[var(--color-ink-faint)]">
-          Settled for £{formatCurrency(loan.settledAmount ?? 0)}
-          {loan.closedDate ? ` on ${loan.closedDate}` : ''}
-        </p>
       )}
-
-      <button
-        onClick={() => onSave(draft)}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
-      </button>
     </div>
   )
 }
@@ -653,11 +1110,12 @@ function CreditCardEditPanel({
   categories,
   onAddCategory,
   onSave,
-  onUpdateLumpPayment,
-  onRemoveLumpPayment,
   onLogLumpPayment,
+  onClearBalance,
   overpaymentPrefill,
   onPrefillConsumed,
+  isOpen,
+  onCancel,
 }: {
   card: CreditCard // live — used for the derived-balance caption only
   storedCard: CreditCard // as persisted — what the draft is seeded from and saved back to
@@ -666,11 +1124,20 @@ function CreditCardEditPanel({
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>>) => void
-  onUpdateLumpPayment: (lumpPaymentId: string, amount: number, date: string, note?: string) => void
-  onRemoveLumpPayment: (lumpPaymentId: string) => void
   onLogLumpPayment: (amount: number, date: string, note?: string) => void
+  /** 2026-09-09 session — logs an overpayment for the FULL balance due on
+   * that date (not just that date's minimum), dated on it. Moved here
+   * from the (now minimum-charges-only) info modal, per Adam's spec. */
+  onClearBalance: (date: string, amount: number) => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
+  /** UAT 2026-09-08 (6-bug4-cards) — see LoanEditPanel's own comment on
+   * the identical prop. */
+  isOpen: boolean
+  /** UAT 2026-09-08 (7-bug8.2-confirm-loans note) — this fields form had
+   * no Cancel at all; collapses the card without saving, matching every
+   * other card's edit form. */
+  onCancel: () => void
 }) {
   // Seeded from the STORED card, never the live one. This distinction is
   // the whole point of the fix: the editable field is the stated anchor,
@@ -678,6 +1145,9 @@ function CreditCardEditPanel({
   // would re-anchor the card to a figure that already includes logged
   // payments, and the replay would then subtract them a second time.
   const [draft, setDraft] = useState<CreditCardDraft>(() => draftFromCard(storedCard))
+  // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): same dirty
+  // gate as LoanEditPanel's own Save button, just below.
+  const dirty = JSON.stringify(draft) !== JSON.stringify(draftFromCard(storedCard))
   // Matches LoanEditPanel's pattern (loggingOverpayment) — collapsed
   // behind a link by default, same as the loan's own "+ Log an
   // overpayment," confirmed as a real inconsistency otherwise: this form
@@ -691,12 +1161,54 @@ function CreditCardEditPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // UAT 2026-09-08 (6-bug4-cards) — see LoanEditPanel's identical comment.
+  useEffect(() => {
+    if (!isOpen) setDraft(draftFromCard(storedCard))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
+
   function update(patch: Partial<CreditCardDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
   }
 
   return (
     <div className="mt-4 flex flex-col gap-3">
+      {/* Batch 6 (2026-09-07 UAT): "+ Log a payment" moved above the
+          edit-form fields to match Joint Account's card ordering —
+          visible immediately on expand, not pushed below the fields grid.
+          2026-09-09 session — the past-payments list that used to sit
+          here moved to the Transactions page's Transfers tab, same
+          reasoning as LoanEditPanel's identical change just above. */}
+      {!loggingPayment ? (
+        <button onClick={() => setLoggingPayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
+          + Log a payment
+        </button>
+      ) : (
+        <OverpaymentForm
+          label="Log a payment"
+          initialAmount={overpaymentPrefill?.amount}
+          initialDate={overpaymentPrefill?.date}
+          onLog={(amount, date, note) => {
+            onLogLumpPayment(amount, date, note)
+            setLoggingPayment(false)
+          }}
+          onCancel={() => setLoggingPayment(false)}
+        />
+      )}
+
+      {isOpen && (
+        <>
+      {/* BUGFIX (2026-09-16, Adam-reported): same live-vs-stored confusion as
+          CreditCardLedgerModal above — `card` here is the LIVE variant (see this
+          component's own prop comment: "used for the derived-balance caption
+          only"), and buildCreditCardDueOverviewRows internally re-derives the
+          balance from real activity the same way buildCreditCardMinimumChargeRows
+          does, so it needs `storedCard` too or it double-counts every
+          transaction between the anchor and today — exactly what made "Clear"
+          log double the true balance due on an existing card with real
+          history. */}
+      <CreditCardDueSection card={storedCard} transactions={transactions} onClearBalance={onClearBalance} />
+
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Interest rate (% APR)" type="number" value={draft.interestRatePercent} onChange={(v) => update({ interestRatePercent: Number(v) })} />
@@ -708,7 +1220,31 @@ function CreditCardEditPanel({
           value={draft.paymentDayOfMonth}
           onChange={(v) => update({ paymentDayOfMonth: Math.max(1, Math.min(31, Number(v))) })}
         />
+        <EditField
+          label="Statement opens (day, optional)"
+          type="number"
+          value={draft.statementStartDay ?? ''}
+          onChange={(v) => update({ statementStartDay: v === '' ? undefined : Math.max(1, Math.min(31, Number(v))) })}
+        />
+        <EditField
+          label="Statement closes (day, optional)"
+          type="number"
+          value={draft.statementEndDay ?? ''}
+          onChange={(v) => update({ statementEndDay: v === '' ? undefined : Math.max(1, Math.min(31, Number(v))) })}
+        />
       </div>
+
+      {/* item e — a spend after this window's close doesn't count toward
+          the minimum due for the window that already closed; it rolls
+          into the NEXT one instead. Only shown once statementEndDay is
+          actually set, since the feature is otherwise entirely inert. */}
+      {draft.statementEndDay != null && (
+        <p className="text-xs text-[var(--color-ink-faint)] -mt-1">
+          Statement window{draft.statementStartDay != null ? ` ${ordinalSuffix(draft.statementStartDay)}–` : ' closing '}
+          {ordinalSuffix(draft.statementEndDay)} — spend after the {ordinalSuffix(draft.statementEndDay)} counts toward the
+          following window's minimum payment, not this one's, even though it still shows in the balance above straight away.
+        </p>
+      )}
 
       {/* Same statement-date idea as the Salary page's opening balance:
           the figure above is what the card owed on that date, and
@@ -748,30 +1284,103 @@ function CreditCardEditPanel({
         </label>
       )}
 
-      <LumpPaymentList payments={card.lumpPayments} onUpdate={onUpdateLumpPayment} onRemove={onRemoveLumpPayment} />
-      {!loggingPayment ? (
-        <button onClick={() => setLoggingPayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-          + Log a payment
-        </button>
-      ) : (
-        <OverpaymentForm
-          label="Log a payment"
-          initialAmount={overpaymentPrefill?.amount}
-          initialDate={overpaymentPrefill?.date}
-          onLog={(amount, date, note) => {
-            onLogLumpPayment(amount, date, note)
-            setLoggingPayment(false)
+      <FormButtonRow onCancel={onCancel} onSave={() => onSave(draft)} saveDisabled={!dirty} />
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * "Payment due" (2026-09-09 session, Adam-specified) — the most recent
+ * plus next 3 upcoming (or next 4 if there's no recent one) payment due
+ * dates and their balance due, styled after the Salary page's
+ * PayPeriodsSection ("Most recent pay" / "Upcoming pay"). No tap-to-
+ * expand — this is a plain read-only overview — the one interactive bit
+ * carried over is the same Clear button the (now minimum-charges-only)
+ * info modal used to show on a balance-due row.
+ */
+function CreditCardDueSection({
+  card,
+  transactions,
+  onClearBalance,
+}: {
+  card: CreditCard
+  transactions: Transaction[]
+  onClearBalance: (date: string, amount: number) => void
+}) {
+  const rows = buildCreditCardDueOverviewRows(card, transactions)
+  const past = rows.filter((r) => r.isPast)
+  const mostRecent = past.length > 0 ? past[past.length - 1] : null
+  const upcoming = rows.filter((r) => !r.isPast).slice(0, mostRecent ? 3 : 4)
+  // 2026-09-09 followup (Adam-requested) — Clear used to fire straight
+  // off the tap; now it stages the row here first so the confirm modal
+  // below can show what it's about to do, matching every other
+  // consequential action in the app (Settle, Delete, etc.) rather than
+  // being the one silent exception.
+  const [confirming, setConfirming] = useState<{ date: string; balanceDue: number } | null>(null)
+
+  if (!mostRecent && upcoming.length === 0) return null
+
+  return (
+    <div className="mb-1">
+      {mostRecent && (
+        <>
+          <h4 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Most recent due</h4>
+          <div className="flex flex-col gap-2 mb-3">
+            <CreditCardDueRow row={mostRecent} onRequestClear={setConfirming} />
+          </div>
+        </>
+      )}
+      {upcoming.length > 0 && (
+        <>
+          <h4 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Upcoming due</h4>
+          <div className="flex flex-col gap-2 mb-3">
+            {upcoming.map((row) => (
+              <CreditCardDueRow key={row.date} row={row} onRequestClear={setConfirming} />
+            ))}
+          </div>
+        </>
+      )}
+      {confirming && (
+        <ConfirmModal
+          title="Clear this balance?"
+          description={`Pays off the full £${formatCurrency(confirming.balanceDue)} owed as of ${confirming.date} in one go, dated on it — this zeroes off every minimum charge up to and including that date, and stops any further ones compounding against it.`}
+          confirmLabel="Save"
+          cancelLabel="Cancel"
+          onConfirm={() => {
+            onClearBalance(confirming.date, confirming.balanceDue)
+            setConfirming(null)
           }}
+          onCancel={() => setConfirming(null)}
         />
       )}
+    </div>
+  )
+}
 
-      <button
-        onClick={() => onSave(draft)}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
-      </button>
+function CreditCardDueRow({
+  row,
+  onRequestClear,
+}: {
+  row: { date: string; balanceDue: number; isPast: boolean }
+  onRequestClear: (row: { date: string; balanceDue: number }) => void
+}) {
+  return (
+    <div className="rounded-xl p-3 flex items-center justify-between gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="min-w-0">
+        <p className="text-sm text-[var(--color-ink)]">{row.date}</p>
+        <p className="text-xs text-[var(--color-ink-muted)]">£{formatCurrency(row.balanceDue)} balance due</p>
+      </div>
+      {!row.isPast && (
+        <button
+          onClick={() => onRequestClear({ date: row.date, balanceDue: row.balanceDue })}
+          className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
+          style={{ background: 'var(--color-coral)' }}
+        >
+          Clear
+        </button>
+      )}
     </div>
   )
 }
@@ -888,6 +1497,12 @@ function CreditCardLedgerModal({
   onUpdateMinimumCharge: (date: string, amount: number) => void
   onClose: () => void
 }) {
+  // 2026-09-09 session (Adam-specified) — this modal is now minimum
+  // charges ONLY. The balance-due-per-date row + Clear button that used
+  // to live here moved to the expanded credit card section on the
+  // Borrowing page (see CreditCardEditPanel's "Payment due" block below),
+  // styled like the Salary page's most-recent/upcoming list instead of a
+  // scrollable modal row.
   const rows = buildCreditCardMinimumChargeRows(card, transactions)
   const [editingDate, setEditingDate] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
@@ -915,37 +1530,41 @@ function CreditCardLedgerModal({
             <X size={20} />
           </button>
         </div>
-        <p className="text-xs text-[var(--color-ink-muted)] mb-3">Tap a payment to adjust it — past or future. Spend and other card activity are on the card's own page.</p>
+        <p className="text-xs text-[var(--color-ink-muted)] mb-3">Tap a minimum charge to adjust it — past or future. Spend and other card activity are on the card's own page.</p>
 
         <div className="overflow-y-auto flex-1 -mx-5 px-5 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
-          {rows.map((row) =>
-            editingDate === row.date ? (
-              <div key={row.date} className="py-2 flex items-center gap-2">
-                <span className="text-xs text-[var(--color-ink-muted)] flex-1">{row.date}</span>
-                <input
-                  type="number"
-                  autoFocus
-                  value={editValue}
-                  onChange={(e) => setEditValue(e.target.value)}
-                  className="w-24 bg-transparent border-b border-[var(--color-track)] py-1 text-right text-[var(--color-ink)] outline-none font-mono"
-                />
-                <button onClick={commitEdit} className="text-xs font-semibold px-2 py-1 rounded-lg text-white" style={{ background: 'var(--color-coral)' }}>
-                  Save
-                </button>
-                <button onClick={() => setEditingDate(null)} className="text-xs text-[var(--color-ink-muted)]">
-                  Cancel
-                </button>
+          {rows.map((row) => {
+            return (
+              <div key={row.date} className="flex flex-col">
+                {editingDate === row.date ? (
+                  <div className="py-2 flex items-center gap-2">
+                    <span className="text-xs text-[var(--color-ink-muted)] flex-1">{row.date} · Minimum charge</span>
+                    <input
+                      type="number"
+                      autoFocus
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      className="w-24 bg-transparent border-b border-[var(--color-track)] py-1 text-right text-[var(--color-ink)] outline-none font-mono"
+                    />
+                    <button onClick={commitEdit} className="text-xs font-semibold px-2 py-1 rounded-lg text-white" style={{ background: 'var(--color-coral)' }}>
+                      Save
+                    </button>
+                    <button onClick={() => setEditingDate(null)} className="text-xs text-[var(--color-ink-muted)]">
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button onClick={() => startEditing(row)} className="py-2 flex items-center justify-between text-left">
+                    <span className="text-xs text-[var(--color-ink)]">
+                      {row.date} · Minimum charge
+                      {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
+                    </span>
+                    <span className="text-xs font-mono text-[var(--color-ink)]">£{formatCurrency(row.amount)}</span>
+                  </button>
+                )}
               </div>
-            ) : (
-              <button key={row.date} onClick={() => startEditing(row)} className="py-2 flex items-center justify-between text-left">
-                <span className="text-xs text-[var(--color-ink)]">
-                  {row.date}
-                  {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
-                </span>
-                <span className="text-xs font-mono text-[var(--color-ink)]">£{formatCurrency(row.amount)}</span>
-              </button>
-            ),
-          )}
+            )
+          })}
           {rows.length === 0 && <p className="py-4 text-center text-xs text-[var(--color-ink-faint)]">No minimum charges yet.</p>}
         </div>
       </div>
@@ -1031,11 +1650,18 @@ function CalibrationModal({
   existingLinesCount,
   onCalibrate,
   onClose,
+  onCalibrated,
 }: {
   loanName: string
   existingLinesCount: number
   onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
   onClose: () => void
+  /** Batch 9 (2026-09-07, Bug 11) — fired when the modal closes AFTER a
+   * real calibration attempt (confident match or not — the statement
+   * lines themselves are saved either way), so the caller can flash
+   * "Calibration saved" on the loan card. NOT fired by the X button
+   * closing the modal before ever submitting anything. */
+  onCalibrated?: () => void
 }) {
   const [rows, setRows] = useState<{ date: string; capital: string; interest: string }[]>([{ date: todayIso(), capital: '', interest: '' }])
   const [result, setResult] = useState<CalibrationResult | null>(null)
@@ -1132,7 +1758,14 @@ function CalibrationModal({
                 + Add more lines
               </button>
             )}
-            <button onClick={onClose} className="w-full mt-2 py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
+            <button
+              onClick={() => {
+                onCalibrated?.()
+                onClose()
+              }}
+              className="w-full mt-2 py-2.5 rounded-full text-sm font-semibold text-white"
+              style={{ background: 'var(--color-coral)' }}
+            >
               Done
             </button>
           </div>
@@ -1161,11 +1794,18 @@ function LoanOverpaymentForm({
   initialAmount,
   initialDate,
   onLog,
+  onCancel,
 }: {
   loan: Loan
   initialAmount?: number
   initialDate?: string
   onLog: (amount: number, date: string, note: string | undefined, recastMode: 'reduce_term' | 'reduce_payment') => void
+  // UAT follow-up (2026-09-08) — same Batch 8/Bug 9.3 fix already applied
+  // to the credit card's OverpaymentForm, extended to this loan
+  // equivalent: no way to cancel out of logging an overpayment, and a
+  // bespoke small right-aligned "Continue" button instead of the shared
+  // Save/Cancel pair used everywhere else in the app.
+  onCancel: () => void
 }) {
   const [amount, setAmount] = useState(initialAmount != null ? String(initialAmount) : '')
   const [date, setDate] = useState(initialDate ?? todayIso())
@@ -1214,14 +1854,7 @@ function LoanOverpaymentForm({
         <EditField label="Date" type="date" value={date} onChange={setDate} />
       </div>
       <EditField label="Note (optional)" value={note} onChange={setNote} />
-      <button
-        disabled={!canContinue}
-        onClick={() => setStep('choose')}
-        className="self-end px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Continue
-      </button>
+      <FormButtonRow onCancel={onCancel} onSave={() => setStep('choose')} saveDisabled={!canContinue} saveLabel="Continue" />
     </div>
   )
 }
@@ -1231,11 +1864,18 @@ function OverpaymentForm({
   initialAmount,
   initialDate,
   onLog,
+  onCancel,
 }: {
   label?: string
   initialAmount?: number
   initialDate?: string
   onLog: (amount: number, date: string, note?: string) => void
+  // Batch 8 (2026-09-07, Bug 9.3, Adam-reported) — this form used to have
+  // no way to cancel out of it at all, and its own small right-aligned
+  // "Log" button didn't match the Save/Cancel pair used everywhere else
+  // in the app. Optional only because a caller mid-migration could omit
+  // it, but every current call site supplies one.
+  onCancel?: () => void
 }) {
   const [amount, setAmount] = useState(initialAmount != null ? String(initialAmount) : '')
   const [date, setDate] = useState(initialDate ?? todayIso())
@@ -1250,18 +1890,16 @@ function OverpaymentForm({
         <EditField label="Date" type="date" value={date} onChange={setDate} />
       </div>
       <EditField label="Note (optional)" value={note} onChange={setNote} />
-      <button
-        disabled={!(amountNumber > 0 && date)}
-        onClick={() => {
+      <FormButtonRow
+        onCancel={onCancel ?? (() => {})}
+        onSave={() => {
           onLog(amountNumber, date, note || undefined)
           setAmount('')
           setNote('')
         }}
-        className="self-end px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Log
-      </button>
+        saveDisabled={!(amountNumber > 0 && date)}
+        saveLabel="Log"
+      />
     </div>
   )
 }
@@ -1275,311 +1913,14 @@ function OverpaymentForm({
 // the new values; loan overpayments don't need that step since a loan's
 // balance is always derived fresh from its schedule, never stored. ──
 
-type LoggedPayment = { id: string; date: string; amount: number; note?: string }
-
-function LoggedPaymentList({
-  payments,
-  onUpdate,
-  onRemove,
-}: {
-  payments: LoggedPayment[]
-  onUpdate: (paymentId: string, amount: number, date: string, note?: string) => void
-  onRemove: (paymentId: string) => void
-}) {
-  const [editingId, setEditingId] = useState<string | null>(null)
-  if (payments.length === 0) return null
-
-  const sorted = payments.slice().sort((a, b) => b.date.localeCompare(a.date))
-  const total = payments.reduce((sum, p) => sum + p.amount, 0)
-
-  return (
-    <div className="rounded-xl p-3 flex flex-col gap-1.5" style={{ background: 'var(--color-bg-elevated)' }}>
-      <span className="text-xs font-medium text-[var(--color-ink)]">
-        {payments.length} payment{payments.length === 1 ? '' : 's'} logged, totalling £{formatCurrency(total)}
-      </span>
-      {sorted.map((p) => (
-        <div key={p.id} className="rounded-lg overflow-hidden" style={{ background: 'var(--color-surface)' }}>
-          <button onClick={() => setEditingId(editingId === p.id ? null : p.id)} className="w-full flex items-center justify-between px-2.5 py-2 text-left">
-            <div>
-              <p className="text-sm text-[var(--color-ink)]">{p.note || 'Payment'}</p>
-              <p className="text-[11px] text-[var(--color-ink-faint)]">{p.date}</p>
-            </div>
-            <span className="font-mono text-sm text-[var(--color-ink)]">£{formatCurrency(p.amount)}</span>
-          </button>
-          {editingId === p.id && (
-            <LoggedPaymentEditForm
-              payment={p}
-              onSave={(amount, date, note) => {
-                onUpdate(p.id, amount, date, note)
-                setEditingId(null)
-              }}
-              onDelete={() => {
-                onRemove(p.id)
-                setEditingId(null)
-              }}
-              onCancel={() => setEditingId(null)}
-            />
-          )}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-// Kept as an alias so the credit card call site below reads clearly.
-const LumpPaymentList = LoggedPaymentList
-
-function LoggedPaymentEditForm({
-  payment,
-  onSave,
-  onDelete,
-  onCancel,
-}: {
-  payment: LoggedPayment
-  onSave: (amount: number, date: string, note?: string) => void
-  onDelete: () => void
-  onCancel: () => void
-}) {
-  const [amount, setAmount] = useState(String(payment.amount))
-  const [date, setDate] = useState(payment.date)
-  const [note, setNote] = useState(payment.note ?? '')
-  const amountNumber = Number(amount)
-
-  return (
-    <div className="px-2.5 pb-2.5 flex flex-col gap-2 border-t" style={{ borderColor: 'var(--color-track)' }}>
-      <div className="grid grid-cols-2 gap-2 pt-2">
-        <EditField label="Amount (£)" type="number" value={amount} onChange={setAmount} />
-        <EditField label="Date" type="date" value={date} onChange={setDate} />
-      </div>
-      <EditField label="Note (optional)" value={note} onChange={setNote} />
-      <div className="flex items-center justify-between">
-        <button onClick={onDelete} className="text-xs" style={{ color: 'var(--color-negative)' }}>
-          Delete
-        </button>
-        <button onClick={onCancel} className="text-xs text-[var(--color-ink-muted)] px-2">
-          Cancel
-        </button>
-      </div>
-      <button
-        disabled={!(amountNumber > 0 && date)}
-        onClick={() => onSave(amountNumber, date, note || undefined)}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
-      </button>
-    </div>
-  )
-}
-
-// ── Recurring/standing overpayment — distinct from the one-off log above.
-// A real ongoing commitment ("an extra £100 every month", or "an extra 5%
-// of whatever's left, every month") folded into the regular monthly
-// payment amount, not its own separate ledger line. Toggling it on
-// starts with sensible defaults; toggling it off clears it entirely
-// (passes undefined, same as never having set one). ──
-
-function RecurringOverpaymentEditor({
-  loan,
-  value,
-  onChange,
-}: {
-  loan: Loan
-  value: LoanRecurringOverpayment | undefined
-  onChange: (v: LoanRecurringOverpayment | undefined) => void
-}) {
-  const [showEndDate, setShowEndDate] = useState(!!value?.endDate)
-  const [choosingRecast, setChoosingRecast] = useState(false)
-  // Held separately from `value` itself: the amount has to be chosen
-  // BEFORE a LoanRecurringOverpayment is created at all — confirmed as a
-  // real bug that the old flow skipped straight to the recast-choice
-  // screen with a silently-defaulted £50 fixed amount the person never
-  // actually saw or chose, because clicking "+ Add a recurring
-  // overpayment" created `value` (with that £50 default baked in) AND
-  // opened the recast screen in the very same click.
-  const [draftAmount, setDraftAmount] = useState<LoanRecurringOverpayment['amount'] | null>(null)
-
-  if (!value && !draftAmount) {
-    return (
-      <button onClick={() => setDraftAmount({ type: 'fixed', amount: 50 })} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
-        + Add a recurring overpayment
-      </button>
-    )
-  }
-
-  // The amount step now genuinely comes first — nothing is created or
-  // saved yet at this point, it's purely local draft state until
-  // "Continue" commits it and moves on to the recast choice.
-  if (!value && draftAmount) {
-    return (
-      <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-        <span className="text-xs font-medium text-[var(--color-ink)]">Recurring overpayment amount</span>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setDraftAmount(draftAmount.type === 'fixed' ? draftAmount : { type: 'fixed', amount: 50 })}
-            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-            style={{ background: draftAmount.type === 'fixed' ? 'var(--color-coral)' : 'var(--color-surface)', color: draftAmount.type === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
-          >
-            Fixed amount
-          </button>
-          <button
-            onClick={() => setDraftAmount(draftAmount.type === 'percent_of_balance' ? draftAmount : { type: 'percent_of_balance', percent: 5 })}
-            className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-            style={{
-              background: draftAmount.type === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-surface)',
-              color: draftAmount.type === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
-            }}
-          >
-            % of balance
-          </button>
-        </div>
-        {draftAmount.type === 'fixed' ? (
-          <EditField label="Amount (£)" type="number" value={draftAmount.amount} onChange={(v) => setDraftAmount({ type: 'fixed', amount: Number(v) || 0 })} />
-        ) : (
-          <EditField label="Percent" type="number" value={draftAmount.percent} onChange={(v) => setDraftAmount({ type: 'percent_of_balance', percent: Number(v) || 0 })} />
-        )}
-        <div className="flex justify-end gap-3 mt-1">
-          <button onClick={() => setDraftAmount(null)} className="text-xs text-[var(--color-ink-muted)]">
-            Cancel
-          </button>
-          <button
-            disabled={draftAmount.type === 'fixed' ? !(draftAmount.amount > 0) : !(draftAmount.percent > 0)}
-            onClick={() => {
-              onChange({ startDate: todayIso(), amount: draftAmount })
-              setDraftAmount(null)
-              setChoosingRecast(true)
-            }}
-            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-40"
-            style={{ background: 'var(--color-coral)' }}
-          >
-            Continue
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  if (!value) return null // unreachable — satisfies TS narrowing below
-
-  // D7's follow-up step (scope §9/§11.3 — recurring is in scope for the
-  // recast choice too, not one-off only): shown once, right after a
-  // recurring overpayment is first set up, with a real preview of each
-  // outcome computed via previewRecurringOverpaymentRecast. Reachable
-  // again later via the "Change" link below the live editor, so picking
-  // wrong at creation isn't a dead end.
-  if (choosingRecast) {
-    const preview = previewRecurringOverpaymentRecast(loan, value)
-    return (
-      <div className="rounded-xl p-3 flex flex-col gap-3" style={{ background: 'var(--color-bg-elevated)' }}>
-        <span className="text-xs font-medium text-[var(--color-ink)]">How should this recurring overpayment be applied?</span>
-        <button
-          onClick={() => {
-            onChange({ ...value, recastMode: 'reduce_payment' })
-            setChoosingRecast(false)
-          }}
-          className="rounded-lg p-3 text-left"
-          style={{ background: 'var(--color-surface)' }}
-        >
-          <p className="text-sm font-semibold text-[var(--color-ink)]">Keep the same length</p>
-          <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
-            New monthly payment: £{preview.reducePayment.newMonthlyPayment != null ? formatCurrency(preview.reducePayment.newMonthlyPayment) : '—'}
-          </p>
-        </button>
-        <button
-          onClick={() => {
-            onChange({ ...value, recastMode: 'reduce_term' })
-            setChoosingRecast(false)
-          }}
-          className="rounded-lg p-3 text-left"
-          style={{ background: 'var(--color-surface)' }}
-        >
-          <p className="text-sm font-semibold text-[var(--color-ink)]">Keep monthly payment the same</p>
-          <p className="text-xs text-[var(--color-ink-muted)] mt-0.5">
-            Ends {preview.reduceTerm.payoffDate ? formatMonthYear(preview.reduceTerm.payoffDate) : '—'} · estimated final repayment £
-            {preview.reduceTerm.finalPayment != null ? formatCurrency(preview.reduceTerm.finalPayment) : '—'}
-          </p>
-        </button>
-      </div>
-    )
-  }
-
-  return (
-    <div className="rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-[var(--color-ink)]">Recurring overpayment</span>
-        <button
-          onClick={() => {
-            onChange(undefined)
-            setShowEndDate(false)
-          }}
-          className="text-xs"
-          style={{ color: 'var(--color-negative)' }}
-        >
-          Remove
-        </button>
-      </div>
-      <div className="flex items-center justify-between -mt-1">
-        <p className="text-[11px] text-[var(--color-ink-faint)]">{value.recastMode === 'reduce_payment' ? 'Keeping the same length' : 'Keeping the monthly payment the same'}</p>
-        <button onClick={() => setChoosingRecast(true)} className="text-[11px] font-medium" style={{ color: 'var(--color-coral)' }}>
-          Change
-        </button>
-      </div>
-
-      <div className="flex gap-2">
-        <button
-          onClick={() => onChange({ ...value, amount: value.amount.type === 'fixed' ? value.amount : { type: 'fixed', amount: 50 } })}
-          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-          style={{ background: value.amount.type === 'fixed' ? 'var(--color-coral)' : 'var(--color-surface)', color: value.amount.type === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
-        >
-          Fixed amount
-        </button>
-        <button
-          onClick={() => onChange({ ...value, amount: value.amount.type === 'percent_of_balance' ? value.amount : { type: 'percent_of_balance', percent: 5 } })}
-          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-          style={{
-            background: value.amount.type === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-surface)',
-            color: value.amount.type === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
-          }}
-        >
-          % of remaining balance
-        </button>
-      </div>
-
-      {value.amount.type === 'fixed' ? (
-        <EditField label="Amount (£)" type="number" value={value.amount.amount} onChange={(v) => onChange({ ...value, amount: { type: 'fixed', amount: Number(v) } })} />
-      ) : (
-        <EditField
-          label="Percent (%)"
-          type="number"
-          value={value.amount.percent}
-          onChange={(v) => onChange({ ...value, amount: { type: 'percent_of_balance', percent: Number(v) } })}
-        />
-      )}
-
-      <div className="grid grid-cols-2 gap-2">
-        <EditField label="Payment date" type="date" value={value.startDate} onChange={(v) => onChange({ ...value, startDate: v })} />
-        {showEndDate ? (
-          <EditField label="End date" type="date" value={value.endDate ?? ''} onChange={(v) => onChange({ ...value, endDate: v || undefined })} />
-        ) : (
-          <button onClick={() => setShowEndDate(true)} className="self-end text-xs font-medium pb-1" style={{ color: 'var(--color-coral)' }}>
-            + Set an end date
-          </button>
-        )}
-      </div>
-      {showEndDate && value.endDate && (
-        <button
-          onClick={() => {
-            onChange({ ...value, endDate: undefined })
-            setShowEndDate(false)
-          }}
-          className="self-start text-xs text-[var(--color-ink-muted)]"
-        >
-          Clear end date (run indefinitely)
-        </button>
-      )}
-    </div>
-  )
-}
+// 2026-09-09 followup (Adam-reported) — the list/edit UI that used to
+// live here (LoggedPaymentList/LoggedPaymentEditForm) moved to
+// Expenses.tsx as OverpaymentRowItem/OverpaymentEditForm, styled to match
+// the rest of the Transactions page (swipe-to-delete) instead of this
+// page's own grouped-card-with-inline-Delete pattern. The shape stays
+// here since both loan overpayments and credit-card lump payments are
+// this exact {id, date, amount, note?} shape.
+export type LoggedPayment = { id: string; date: string; amount: number; note?: string }
 
 function MinimumPaymentEditor({ value, onChange }: { value: CreditCardMinimumPayment; onChange: (v: CreditCardMinimumPayment) => void }) {
   return (
@@ -1617,8 +1958,11 @@ function MinimumPaymentEditor({ value, onChange }: { value: CreditCardMinimumPay
 
 function LoanForm({
   people,
+  pots,
   categories,
   defaultOwnerId,
+  defaultLocation,
+  defaultPotId,
   initial,
   hasJointBills,
   canBeJoint,
@@ -1628,8 +1972,11 @@ function LoanForm({
   onCancel,
 }: {
   people: { id: string; name: string }[]
+  pots: Pot[]
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   defaultOwnerId: string
+  defaultLocation: BillLocation
+  defaultPotId?: string
   initial?: LoanPrefill
   hasJointBills: boolean
   canBeJoint: boolean
@@ -1661,8 +2008,9 @@ function LoanForm({
   const [advanceDate, setAdvanceDate] = useState(initial?.advanceDate ?? '')
   const [lender, setLender] = useState('')
   const [categoryId, setCategoryId] = useState(initial?.categoryId ?? (categories.some((c) => c.id === DEFAULT_LOAN_CATEGORY_ID) ? DEFAULT_LOAN_CATEGORY_ID : categories[0]?.id ?? ''))
-  const [location, setLocation] = useState<BillLocation>(initial?.location ?? 'personal')
+  const [location, setLocation] = useState<BillLocation>(initial?.location ?? defaultLocation)
   const [ownerId, setOwnerId] = useState(initial?.ownerId || defaultOwnerId)
+  const [potId, setPotId] = useState<string | undefined>(initial?.potId ?? defaultPotId)
   const [payee, setPayee] = useState(initial?.payee || (people[0]?.id ?? ''))
   const [payeeSharePercent, setPayeeSharePercent] = useState(initial?.payeeSharePercent ?? 50)
 
@@ -1729,27 +2077,28 @@ function LoanForm({
         </p>
       )}
       <CategoryPicker categories={categories} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
-      {(hasJointBills || location === 'joint') && (
+      {(hasJointBills || location === 'joint' || pots.some((p) => p.personId === ownerId) || location === 'pot') && (
         <LocationEditor
           people={people}
+          pots={pots}
           canBeJoint={canBeJoint}
           location={location}
           ownerId={ownerId}
+          potId={potId}
           payee={payee}
           payeeSharePercent={payeeSharePercent}
           onChange={(patch) => {
             setLocation(patch.location)
             if (patch.ownerId) setOwnerId(patch.ownerId)
+            setPotId(patch.potId)
             if (patch.payee) setPayee(patch.payee)
             if (patch.payeeSharePercent !== undefined) setPayeeSharePercent(patch.payeeSharePercent)
           }}
         />
       )}
-      <div className="flex gap-2 justify-end">
-        <button onClick={onCancel} className="px-3 py-1.5 rounded-lg text-sm text-[var(--color-ink-muted)]">
-          Cancel
-        </button>
-        <button
+      <div className="flex gap-2">
+        <CancelButton onClick={onCancel} />
+        <SaveButton
           disabled={!canSave}
           onClick={() =>
             onSave({
@@ -1763,18 +2112,16 @@ function LoanForm({
               lender: lender.trim() || undefined,
               categoryId,
               location,
-              ownerId: location === 'personal' ? ownerId : '',
+              ownerId: location === 'personal' || location === 'pot' ? ownerId : '',
+              potId: location === 'pot' ? potId : undefined,
               payee: location === 'joint' ? payee : '',
               payeeSharePercent: location === 'joint' ? payeeSharePercent : 100,
               active: true,
               ...(matchedProfile ?? {}),
             })
           }
-          className="px-3 py-1.5 rounded-lg text-sm font-medium text-white disabled:opacity-40"
-          style={{ background: 'var(--color-coral)' }}
-        >
-          Add loan
-        </button>
+          label="Add loan"
+        />
       </div>
     </div>
   )
@@ -1787,7 +2134,8 @@ function LoanForm({
 // the Home page's "group by category" view (see groupingCategoryId in
 // Home.tsx, and the long comment on CREDIT_CARD_CATEGORY_ID in
 // types/ledger.ts). Colour is auto-assigned round-robin, same idea as
-// Category auto-colour, from the separate CREDIT_CARD_COLORS palette.
+// Category auto-colour, from the separate SHARED_CARD_COLORS palette
+// (shared with pots/savings pots too — see that constant's own comment).
 
 function CreditCardForm({
   people,
@@ -1811,6 +2159,10 @@ function CreditCardForm({
   const [currentBalance, setCurrentBalance] = useState('')
   const [balanceAsOfDate, setBalanceAsOfDate] = useState(todayIso())
   const [paymentDayOfMonth, setPaymentDayOfMonth] = useState('1')
+  // item e — optional; a card left blank behaves exactly as before (no
+  // window gating on its minimum-payment generation).
+  const [statementStartDay, setStatementStartDay] = useState('')
+  const [statementEndDay, setStatementEndDay] = useState('')
   const [minimumPayment, setMinimumPayment] = useState<CreditCardMinimumPayment>({ type: 'percent_of_balance', percent: 5 })
   const [ownerId, setOwnerId] = useState(defaultOwnerId)
   const [categoryId, setCategoryId] = useState(CREDIT_CARD_CATEGORY_ID)
@@ -1831,6 +2183,10 @@ function CreditCardForm({
         <EditField label="...as of" type="date" value={balanceAsOfDate} onChange={setBalanceAsOfDate} />
       </div>
       <EditField label="Payment day of month" type="number" value={paymentDayOfMonth} onChange={setPaymentDayOfMonth} />
+      <div className="grid grid-cols-2 gap-3">
+        <EditField label="Statement opens (day, optional)" type="number" value={statementStartDay} onChange={setStatementStartDay} />
+        <EditField label="Statement closes (day, optional)" type="number" value={statementEndDay} onChange={setStatementEndDay} />
+      </div>
       <MinimumPaymentEditor value={minimumPayment} onChange={setMinimumPayment} />
       <CategoryPicker categories={categories} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
       {people.length > 1 && (
@@ -1849,11 +2205,9 @@ function CreditCardForm({
           </select>
         </label>
       )}
-      <div className="flex gap-2 justify-end">
-        <button onClick={onCancel} className="px-3 py-1.5 rounded-lg text-sm text-[var(--color-ink-muted)]">
-          Cancel
-        </button>
-        <button
+      <div className="flex gap-2">
+        <CancelButton onClick={onCancel} />
+        <SaveButton
           disabled={!canSave}
           onClick={() =>
             onSave({
@@ -1865,14 +2219,13 @@ function CreditCardForm({
               balanceAsOfDate,
               minimumPayment,
               paymentDayOfMonth: Number(paymentDayOfMonth),
+              statementStartDay: statementStartDay === '' ? undefined : Math.max(1, Math.min(31, Number(statementStartDay))),
+              statementEndDay: statementEndDay === '' ? undefined : Math.max(1, Math.min(31, Number(statementEndDay))),
               ownerId,
             })
           }
-          className="px-3 py-1.5 rounded-lg text-sm font-medium text-white disabled:opacity-40"
-          style={{ background: 'var(--color-coral)' }}
-        >
-          Add card
-        </button>
+          label="Add card"
+        />
       </div>
     </div>
   )

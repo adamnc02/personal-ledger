@@ -19,6 +19,7 @@
 import { addMonths } from 'date-fns'
 import { nanoid } from 'nanoid'
 import type { Loan, LoanOverpayment, LoanRecurringOverpayment, StatementCalibrationLine, Transaction } from '../types/ledger'
+import type { BillLocation } from '../types/models'
 import { backSolveMonthlyRate, calibrateRateAndConvention, flatMonthlyConvention, interestConventions, standardPayment, type InterestConvention } from './interestConventions'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -98,14 +99,181 @@ export interface LoanScheduleEntry {
 
 const MAX_SCHEDULE_ENTRIES = 720 // 60 years — generous safety cap, not a real limit
 
-/** The recurring overpayment amount for this exact payment date, given the balance remaining AFTER the scheduled payment and any one-off overpayment for that month — 0 if the loan has no recurring overpayment configured, or this date falls outside its start/end window. Percent-of-balance is deliberately computed fresh each period, never cached, same reasoning as a credit card's minimum payment: a fixed % of a shrinking balance shrinks in turn. */
-function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterScheduledAndOneOff: number): number {
+/**
+ * What a recurring overpayment's `amount` resolves to on a specific date,
+ * once an `amountOverrides`/`amountHistory` entry exists — an exact-date
+ * override wins outright (the "just a single payment" case), otherwise
+ * mirrors resolveMonthlyPayment/resolveTemplateAmount's history walk
+ * (later array index wins on an exact-date tie).
+ */
+export function resolveRecurringOverpaymentAmount(r: LoanRecurringOverpayment, dateIso: string): LoanRecurringOverpayment['amount'] {
+  const override = r.amountOverrides?.find((o) => o.date === dateIso)
+  if (override) return override.amount
+
+  const candidates: { effectiveFrom: string; amount: LoanRecurringOverpayment['amount'] }[] = [...(r.amountHistory ?? [])]
+  if (r.amountEffectiveFrom) candidates.push({ effectiveFrom: r.amountEffectiveFrom, amount: r.amount })
+  if (candidates.length === 0) return r.amount
+
+  const applicable = candidates
+    .map((c, index) => ({ ...c, index }))
+    .filter((c) => c.effectiveFrom <= dateIso)
+    .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom) || b.index - a.index)
+  return applicable[0]?.amount ?? r.amount
+}
+
+/**
+ * Builds the patch for a PERMANENT ("all future payments") recurring-
+ * overpayment amount change — preserves the old amount as a history
+ * entry, mirroring applyLoanMonthlyPaymentChange/applyTemplateAmountChange.
+ */
+// UAT 2026-09-09 (retest-bills-just-single/all-future-samedate) — same
+// fix as schedule.ts's applyTemplateAmountChange: a PERMANENT ("all
+// future") change also clears any amountOverrides entry dated on/after
+// `effectiveFrom`, so a prior single-occurrence override can't silently
+// outlive a later standing change that was meant to cover it too.
+// UAT 2026-09-09 (retest2-bills-single-before-allfuture-untouched) — same
+// fix as schedule.ts's applyTemplateAmountChange: DROPS every existing
+// candidate (amountHistory entries, and the current amount/
+// amountEffectiveFrom pair) whose OWN effectiveFrom is on/after the new
+// effectiveFrom, rather than just appending on top — otherwise a change
+// recorded further in the future than a new, earlier-effective edit kept
+// wrongly outranking it for any date on/after its own effectiveFrom. See
+// that function's own comment for the full repro and reasoning; applies
+// identically here.
+export function applyRecurringOverpaymentAmountChange(
+  r: LoanRecurringOverpayment,
+  newAmount: LoanRecurringOverpayment['amount'],
+  effectiveFrom: string,
+): Pick<LoanRecurringOverpayment, 'amount' | 'amountEffectiveFrom' | 'amountHistory' | 'amountOverrides'> {
+  const priorCandidates = [...(r.amountHistory ?? []), { effectiveFrom: r.amountEffectiveFrom ?? r.startDate, amount: r.amount }]
+  return {
+    amount: newAmount,
+    amountEffectiveFrom: effectiveFrom,
+    amountHistory: priorCandidates.filter((c) => c.effectiveFrom < effectiveFrom),
+    amountOverrides: (r.amountOverrides ?? []).filter((o) => o.date < effectiveFrom),
+  }
+}
+
+/**
+ * Builds the patch for a SINGLE-occurrence ("just a single payment")
+ * recurring-overpayment amount change — leaves the standing amount/
+ * amountHistory completely untouched, only recording a one-date override.
+ */
+export function applyRecurringOverpaymentSingleAmountOverride(
+  r: LoanRecurringOverpayment,
+  amount: LoanRecurringOverpayment['amount'],
+  date: string,
+): Pick<LoanRecurringOverpayment, 'amountOverrides'> {
+  const withoutExisting = (r.amountOverrides ?? []).filter((o) => o.date !== date)
+  return { amountOverrides: [...withoutExisting, { date, amount }] }
+}
+
+/** The recurring overpayment amount for this exact payment date, given the balance remaining AFTER the scheduled payment and any one-off overpayment for that month — 0 if the loan has no recurring overpayment configured, this date falls outside its start/end window, or it's one of the individually paused dates (Phase 4). Percent-of-balance is deliberately computed fresh each period, never cached, same reasoning as a credit card's minimum payment: a fixed % of a shrinking balance shrinks in turn. */
+export function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterScheduledAndOneOff: number): number {
   const r = loan.recurringOverpayment
   if (!r || balanceAfterScheduledAndOneOff <= 0) return 0
   if (dateIso < r.startDate) return 0
   if (r.endDate && dateIso > r.endDate) return 0
-  if (r.amount.type === 'fixed') return round2(Math.min(r.amount.amount, balanceAfterScheduledAndOneOff))
-  return round2((balanceAfterScheduledAndOneOff * r.amount.percent) / 100)
+  if (r.pausedDates?.includes(dateIso)) return 0
+  const amount = resolveRecurringOverpaymentAmount(r, dateIso)
+  if (amount.type === 'fixed') return round2(Math.min(amount.amount, balanceAfterScheduledAndOneOff))
+  return round2((balanceAfterScheduledAndOneOff * amount.percent) / 100)
+}
+
+/**
+ * Every date the recurring overpayment WOULD land on within
+ * [rangeStart, rangeEnd] if nothing were paused — same purpose as
+ * schedule.ts's scheduledTemplateDates: the pause picker needs to see a
+ * currently-paused date too, so it can be unticked. Walks the loan's own
+ * payment schedule (same monthly cadence buildLoanSchedule uses) and
+ * keeps only the dates inside the recurring overpayment's start/end
+ * window — deliberately ignoring pausedDates itself, unlike
+ * recurringOverpaymentForDate above.
+ */
+/**
+ * UAT 2026-09-09 (retest2-overpay-single-no-reamortise note) — used to
+ * return the LOAN's own schedule dates directly (`e.date`), same bug as
+ * recentAndUpcomingLoanRecurringOverpaymentDates fixed for the "which
+ * payment" picker: the "manage paused payments" window showed/paused the
+ * wrong day of the month whenever the overpayment's own real cadence
+ * differs from the loan's. Now returns both the REAL date (for display
+ * and for what the picker/pause-checklist UI should show) and the
+ * underlying `periodDate` (what pausedDates/recurringOverpaymentForDate
+ * actually compare against internally) — same duality as
+ * recentAndUpcomingLoanRecurringOverpaymentDates, see its own comment.
+ */
+export function scheduledLoanRecurringOverpaymentRealDates(loan: Loan, rangeStart: Date, rangeEnd: Date): { date: string; periodDate: string }[] {
+  const r = loan.recurringOverpayment
+  if (!r) return []
+  const schedule = buildLoanSchedule(loan)
+  const realDates = recurringOverpaymentRealDates(loan, schedule)
+  const rangeStartIso = toIso(rangeStart)
+  const rangeEndIso = toIso(rangeEnd)
+  return schedule
+    .filter((e) => e.date >= rangeStartIso && e.date <= rangeEndIso && e.date >= r.startDate && (!r.endDate || e.date <= r.endDate))
+    .map((e) => ({ date: realDates.get(e.date) ?? e.date, periodDate: e.date }))
+}
+
+/**
+ * What `loan.monthlyPayment` resolves to on a specific date, once a
+ * `monthlyPaymentHistory` entry exists — mirrors schedule.ts's
+ * resolveTemplateAmount exactly, including its tie-break-by-recording-
+ * order rule (the LATER array index wins on an exact-date collision,
+ * since a loan's first-ever payment edit routinely offers the loan's own
+ * startDate as the very first picker option, which is also the fallback
+ * "prior value" date applyLoanMonthlyPaymentChange records below — the
+ * same real, not-just-theoretical collision resolveTemplateAmount's own
+ * comment documents for Bills).
+ */
+export function resolveMonthlyPayment(loan: Loan, dateIso: string): number {
+  const candidates: { effectiveFrom: string; amount: number }[] = [...(loan.monthlyPaymentHistory ?? [])]
+  if (loan.monthlyPaymentEffectiveFrom) candidates.push({ effectiveFrom: loan.monthlyPaymentEffectiveFrom, amount: loan.monthlyPayment })
+  if (candidates.length === 0) return loan.monthlyPayment
+
+  const applicable = candidates
+    .map((c, index) => ({ ...c, index }))
+    .filter((c) => c.effectiveFrom <= dateIso)
+    .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom) || b.index - a.index)
+  return applicable[0]?.amount ?? loan.monthlyPayment
+}
+
+/**
+ * Builds the patch to apply when a loan's own standing monthlyPayment
+ * changes and the person has picked which payment it should take effect
+ * from (LoanEditPanel's "which payment does this apply from" step) —
+ * preserves the OLD amount as a history entry, exactly like
+ * schedule.ts's applyTemplateAmountChange. Falls back to `startDate` (a
+ * loan's own equivalent of a bill's anchorDate) for the very first edit's
+ * "prior value" entry.
+ */
+// UAT 2026-09-09 (retest2-bills-single-before-allfuture-untouched) — same
+// fix as schedule.ts's applyTemplateAmountChange (see its comment for the
+// full repro): DROPS every existing candidate whose OWN effectiveFrom is
+// on/after the new effectiveFrom, rather than just appending on top —
+// otherwise a payment change recorded further in the future than a new,
+// earlier-effective edit would keep wrongly outranking it for any date
+// on/after its own effectiveFrom. Proactively applied here too even
+// though not yet reported against this specific field — identical latent
+// flaw, same fix, per Adam's own instruction to apply this consistently.
+export function applyLoanMonthlyPaymentChange(
+  loan: Loan,
+  newAmount: number,
+  effectiveFrom: string,
+): Pick<Loan, 'monthlyPayment' | 'monthlyPaymentEffectiveFrom' | 'monthlyPaymentHistory'> {
+  const priorCandidates = [...(loan.monthlyPaymentHistory ?? []), { effectiveFrom: loan.monthlyPaymentEffectiveFrom ?? loan.startDate, amount: loan.monthlyPayment }]
+  return {
+    monthlyPayment: newAmount,
+    monthlyPaymentEffectiveFrom: effectiveFrom,
+    monthlyPaymentHistory: priorCandidates.filter((c) => c.effectiveFrom < effectiveFrom),
+  }
+}
+
+/** Reconciles pausedDates against a full desired-pause-set from the picker — same reconcile-the-whole-window logic as schedule.ts's setPausedTemplateOccurrences, just against a plain date list instead of RecurringOccurrenceOverride objects (Phase 4). */
+export function setPausedLoanRecurringOverpaymentDates(loan: Loan, windowDates: string[], pausedDates: string[]): LoanRecurringOverpayment | undefined {
+  if (!loan.recurringOverpayment) return undefined
+  const windowSet = new Set(windowDates)
+  const untouched = (loan.recurringOverpayment.pausedDates ?? []).filter((d) => !windowSet.has(d))
+  return { ...loan.recurringOverpayment, pausedDates: [...untouched, ...pausedDates] }
 }
 
 /**
@@ -124,7 +292,7 @@ function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterSc
  * doesn't day-weight (flat monthly) ignores that span's exact length,
  * one that does (daily simple) uses it precisely, stub period included.
  *
- * RECAST (scope §9): each overpayment (one-off or recurring) carries its
+ * RECAST (scope §9): a ONE-OFF overpayment (LoanOverpayment) carries its
  * own recastMode. 'reduce_term' (the default) needs no special handling
  * at all here — the payment just stays `loan.monthlyPayment` and the
  * loop naturally reaches zero sooner. 'reduce_payment' is what needs the
@@ -136,12 +304,39 @@ function recurringOverpaymentForDate(loan: Loan, dateIso: string, balanceAfterSc
  * re-derived from whatever payment happened to be in effect a moment
  * ago (that WAS the original approach, and it was a real bug — see the
  * inline comment at the call site for the runaway-feedback-loop failure
- * mode it caused). For a RECURRING reduce_payment overpayment this fires
- * again every single period it applies, so the effective payment can
- * genuinely change every month, not just once (scope §9's own
- * description of this combination) — but always still converges cleanly
- * on the loan's real final period, however many times it's recast.
+ * mode it caused).
+ *
+ * A RECURRING overpayment (LoanRecurringOverpayment) is ALWAYS treated as
+ * reduce_term here, regardless of what its own `recastMode` field says
+ * (UAT 2026-09-09, ed-overpay-just-single — Adam's own call, after a
+ * single one-off *occurrence override* on a recurring overpayment
+ * unexpectedly re-amortised every future contractual payment). Letting a
+ * recurring reduce_payment fire fresh every single period it applies is
+ * exactly the runaway-feedback-loop risk this comment already warned
+ * about for the one-off case, compounded by firing repeatedly rather than
+ * once — the UI no longer offers this choice for a recurring overpayment
+ * at all (LoanRecurringOverpaymentEditForm always writes reduce_term),
+ * and this ignores the field defensively for any already-persisted data
+ * that predates that change.
  */
+/**
+ * The most recent past scheduled payment (if any) and the next 3 upcoming
+ * ones — loan's own equivalent of schedule.ts's recentAndUpcomingOccurrences,
+ * for the same "which payment should this apply from" picker-first flow
+ * (UAT 2026-09-08, 7-bug8.2-confirm-loans note), reused for a pot's own
+ * checklist toggle when the item being moved is a loan rather than a bill.
+ */
+export function recentAndUpcomingLoanPaymentDates(loan: Loan, asOfDate: Date): { date: string; isPast: boolean }[] {
+  const schedule = buildLoanSchedule(loan)
+  const asOfIso = toIso(asOfDate)
+  const past = schedule.filter((s) => s.date <= asOfIso)
+  const upcoming = schedule.filter((s) => s.date > asOfIso)
+  const result: { date: string; isPast: boolean }[] = []
+  if (past.length > 0) result.push({ date: past[past.length - 1].date, isPast: true })
+  for (const s of upcoming.slice(0, 3)) result.push({ date: s.date, isPast: false })
+  return result
+}
+
 export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
   if (!(loan.monthlyPayment > 0) || !(loan.termMonths > 0) || !(loan.principal > 0)) return []
 
@@ -166,10 +361,18 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
   // dated on or before its own payment date, not just same-month matches.
   const overpayments = loan.overpayments.slice().sort((a, b) => a.date.localeCompare(b.date))
   let overpaymentIndex = 0
+  // Once a reduce_payment recast has ever fired for this loan, it fully
+  // owns the payment figure from that point on — a monthlyPaymentHistory
+  // entry describes a hypothetical standing payment the recast has
+  // already superseded with a real, computed re-amortisation, so it's
+  // deliberately never consulted again after this flips true (Adam's own
+  // call on the interaction between the two mechanisms).
+  let recastActive = false
 
   for (let i = 0; i < MAX_SCHEDULE_ENTRIES && balance > 0.005; i++) {
     const paymentDate = addMonths(start, i)
     const paymentDateIso = toIso(paymentDate)
+    if (!recastActive) currentPayment = resolveMonthlyPayment(loan, paymentDateIso)
 
     const interestApplied = round2(convention.interestForPeriod(balance, previousPeriodDate, paymentDate, monthlyRate, loan.principal))
     const balanceWithInterest = round2(balance + interestApplied)
@@ -214,7 +417,8 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
     balance = round2(Math.max(0, balance - overpaymentApplied))
 
     const recurringOverpaymentApplied = recurringOverpaymentForDate(loan, paymentDateIso, balance)
-    if (recurringOverpaymentApplied > 0 && loan.recurringOverpayment?.recastMode === 'reduce_payment') recastToReducePayment = true
+    // Deliberately never reads loan.recurringOverpayment?.recastMode —
+    // see this function's own doc comment above.
     balance = round2(Math.max(0, balance - recurringOverpaymentApplied))
 
     // If either kind of overpayment landing this period asked to recast
@@ -243,6 +447,7 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
     if (recastToReducePayment && balance > 0.005) {
       const periodsRemaining = Math.max(1, loan.termMonths - i)
       currentPayment = round2(standardPayment(balance, monthlyRate, periodsRemaining))
+      recastActive = true
     }
 
     schedule.push({
@@ -379,7 +584,7 @@ export interface LoanLedgerRow {
  * recurring-overpayment date inside the (previous period, this period]
  * window for any period where the aggregate is non-zero.
  */
-function recurringOverpaymentRealDates(loan: Loan, schedule: LoanScheduleEntry[]): Map<string, string> {
+export function recurringOverpaymentRealDates(loan: Loan, schedule: LoanScheduleEntry[]): Map<string, string> {
   const map = new Map<string, string>() // schedule entry date -> real recurring-overpayment date
   const r = loan.recurringOverpayment
   if (!r) return map
@@ -389,7 +594,20 @@ function recurringOverpaymentRealDates(loan: Loan, schedule: LoanScheduleEntry[]
   let iterations = 0
 
   for (const entry of schedule) {
-    if (entry.recurringOverpaymentApplied <= 0) {
+    // UAT 2026-09-09 (retest3-overpay-pause-still-works) — gate on the
+    // overpayment's own active DATE WINDOW (start/end), not on whether it
+    // actually applied that period. Confirmed as a real, reported bug:
+    // gating on `entry.recurringOverpaymentApplied > 0` meant a PAUSED
+    // period (which `recurringOverpaymentForDate` correctly zeroes out)
+    // got no real-date mapping at all, so callers fell back to the
+    // loan's own period date for that one row — pausing a date flipped
+    // its displayed date to the loan's, while every other (unpaused) row
+    // stayed correct. Same "ignore pausedDates entirely, a paused date
+    // still has to appear correctly so it can be unpaused" principle
+    // scheduledLoanRecurringOverpaymentRealDates's own date-window filter
+    // already follows — this is the other half of that same fix.
+    const inWindow = entry.date >= r.startDate && (!r.endDate || entry.date <= r.endDate)
+    if (!inWindow) {
       previousPeriodDate = new Date(entry.date)
       continue
     }
@@ -578,7 +796,16 @@ export function settleLoan(loan: Loan, actualAmountPaid: number, date: string, n
     paymentMethod: 'bank_transfer',
     status: 'cleared',
     type: 'loan_payment',
-    location: loan.location,
+    // A settlement is a one-off lump payoff, same as an overpayment
+    // (Adam-specified, 2026-09-03: "certainly not lump sums" — a pot
+    // never funds a one-off payment, only a loan's regular monthly
+    // payment or its recurring overpayment can be). Falls back to
+    // 'personal' when the loan's own location is 'pot'; a joint loan's
+    // own 'joint' location is unaffected (a real, splittable joint
+    // expense, unlike a pot-funded one which can't be split at all) —
+    // see applyLoanOverpayment's identical fallback just below for the
+    // full reasoning.
+    location: loan.location === 'pot' ? 'personal' : loan.location,
     ownerId: loan.ownerId,
     payee: loan.payee,
     payeeSharePercent: loan.payeeSharePercent,
@@ -817,6 +1044,7 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
         ownerId: loan.ownerId,
         payee: loan.payee,
         payeeSharePercent: loan.payeeSharePercent,
+        potId: loan.location === 'pot' ? loan.potId : undefined,
         sourceType: 'loan',
         sourceId: loan.id,
         // The loan's own name — without it, a row falls back to its
@@ -834,6 +1062,7 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
       // completely different day of the month.
       const realDate = recurringDates.get(e.date) ?? e.date
       if (realDate >= startIso && realDate <= endIso) {
+        const overpaymentSource = resolveRecurringOverpaymentSource(loan)
         results.push({
           date: realDate,
           amount: round2(e.recurringOverpaymentApplied),
@@ -842,10 +1071,11 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
           paymentMethod: 'direct_debit',
           status: 'pending',
           type: 'loan_payment',
-          location: loan.location,
+          location: overpaymentSource.location,
           ownerId: loan.ownerId,
-          payee: loan.payee,
-          payeeSharePercent: loan.payeeSharePercent,
+          payee: overpaymentSource.location === 'joint' ? loan.payee : '',
+          payeeSharePercent: overpaymentSource.location === 'joint' ? loan.payeeSharePercent : 100,
+          potId: overpaymentSource.potId,
           sourceType: 'loan_recurring_overpayment',
           sourceId: loan.id,
           note: `${loan.name} — recurring overpayment`,
@@ -855,6 +1085,106 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
   }
 
   return results
+}
+
+/**
+ * The most recent past REAL recurring-overpayment date (if any) and the
+ * next 3 upcoming ones — the recurring-overpayment counterpart to
+ * recentAndUpcomingLoanPaymentDates above, for the SAME "which payment
+ * does this apply from" picker-first flow, but for its own cadence rather
+ * than the loan's own regular payment dates. UAT 2026-09-09
+ * (retest-overpay-single-no-reamortise) — confirmed as a real bug: the
+ * recurring-overpayment editor's picker was reusing
+ * recentAndUpcomingLoanPaymentDates directly, which returns the LOAN's
+ * own schedule dates (e.g. the 2nd of each month), not the recurring
+ * overpayment's own real dates (which can land on a completely different
+ * day — see recurringOverpaymentRealDates's own comment). Reuses
+ * generateLoanPaymentTransactions directly (already resolves the real
+ * date via recurringOverpaymentRealDates internally) rather than
+ * re-deriving that mapping here a second time.
+ */
+/**
+ * `date` is the REAL calendar date to show the person (what
+ * generateLoanPaymentTransactions/the ledger itself displays this
+ * occurrence as) — `periodDate` is the underlying loan schedule entry's
+ * OWN date, which is what recurringOverpaymentForDate/
+ * resolveRecurringOverpaymentAmount actually key their date comparisons
+ * against internally (same basis as `r.startDate`/`r.endDate`/
+ * `pausedDates`, all of which compare against buildLoanSchedule's own
+ * per-period `dateIso`, never the real display date). A caller writing an
+ * amountHistory/amountOverrides entry MUST use `periodDate`, not `date`,
+ * or the entry will silently never match anything inside the engine.
+ */
+export function recentAndUpcomingLoanRecurringOverpaymentDates(loan: Loan, asOfDate: Date): { date: string; periodDate: string; isPast: boolean }[] {
+  const schedule = buildLoanSchedule(loan)
+  const realDates = recurringOverpaymentRealDates(loan, schedule)
+  const entries = schedule
+    .filter((e) => e.recurringOverpaymentApplied > 0)
+    .map((e) => ({ date: realDates.get(e.date) ?? e.date, periodDate: e.date }))
+    .sort((a, b) => a.date.localeCompare(b.date))
+  const asOfIso = toIso(asOfDate)
+  const past = entries.filter((e) => e.date <= asOfIso)
+  const upcoming = entries.filter((e) => e.date > asOfIso)
+  const result: { date: string; periodDate: string; isPast: boolean }[] = []
+  if (past.length > 0) result.push({ ...past[past.length - 1], isPast: true })
+  for (const e of upcoming.slice(0, 3)) result.push({ ...e, isPast: false })
+  return result
+}
+
+/**
+ * Where a loan's RECURRING overpayment is actually funded from —
+ * independent of the loan's own `location` (Adam-specified, 2026-09-03).
+ * See LoanRecurringOverpayment.location's own comment in types/ledger.ts
+ * for the full reasoning; this is purely the resolution step.
+ *
+ * Deliberately short-circuits to the loan's own location/potId whenever
+ * that location is 'joint' — a joint loan's recurring overpayment always
+ * follows the loan (never independently pot-funded), so
+ * generateJointContributionTransactions/computeJointSummary (which only
+ * ever call this generator for `location === 'joint'` loans, and split
+ * every returned row's amount by payee/payeeSharePercent) can keep
+ * assuming every row they get back is genuinely joint and genuinely
+ * splittable — a pot-funded amount can't be split between two people's
+ * personal ledgers, so letting `recurringOverpayment.location` override a
+ * JOINT loan would silently corrupt that split math. Confining the new
+ * independent choice to personal/pot-located loans (the only case Adam
+ * actually asked for) avoids that risk entirely rather than trying to
+ * solve "a joint loan's overpayment funded by one person's personal pot"
+ * as a real feature nobody's asked for yet.
+ */
+/**
+ * Rewrites every stored Transaction for a loan's RECURRING overpayment
+ * (sourceType 'loan_recurring_overpayment') dated on/after `effectiveFrom`
+ * to the new location/potId — cleared and pending alike, same "cleared
+ * ones included" rule Bills'/Loans' own location changes already follow
+ * (lib/locationChange.ts's reassignTransactionsForLocationChange, which
+ * this mirrors but scopes to this one distinct sourceType — never
+ * touching the loan's own regular 'loan'-sourced payments, which have
+ * their own independent location per LoanRecurringOverpayment.location's
+ * own comment). UAT 2026-09-09 (ed-overpay-scope-step) — a recurring
+ * overpayment's location previously had no such rewrite at all (a flat,
+ * non-effective-dated setting); Adam's own call reversed that: "Location
+ * should be treated the same as amount for recurring overpayments."
+ */
+export function reassignLoanRecurringOverpaymentTransactions(
+  transactions: Transaction[],
+  loanId: string,
+  effectiveFrom: string,
+  newLocation: BillLocation,
+  newPotId: string | undefined,
+): Transaction[] {
+  return transactions.map((t) => {
+    if (t.sourceType !== 'loan_recurring_overpayment' || t.sourceId !== loanId) return t
+    if (t.date < effectiveFrom) return t
+    return { ...t, location: newLocation, potId: newLocation === 'pot' ? newPotId : undefined }
+  })
+}
+
+export function resolveRecurringOverpaymentSource(loan: Loan): { location: BillLocation; potId?: string } {
+  if (loan.location === 'joint') return { location: 'joint' }
+  const explicit = loan.recurringOverpayment?.location
+  if (!explicit) return { location: loan.location, potId: loan.location === 'pot' ? loan.potId : undefined }
+  return { location: explicit, potId: explicit === 'pot' ? loan.recurringOverpayment?.potId : undefined }
 }
 
 /**
@@ -887,7 +1217,14 @@ export function applyLoanOverpayment(
     // or past the transaction's own date.
     status: date <= todayIso() ? 'cleared' : 'pending',
     type: 'loan_payment',
-    location: loan.location,
+    // Same "never pot-funded, falls back to personal" rule as settleLoan
+    // above — a one-off lump overpayment is always real cash out of
+    // personal or a genuine joint expense, never internal-to-a-pot
+    // (Adam-specified, 2026-09-03). A joint loan's 'joint' location is
+    // preserved unchanged (still a real, splittable expense) — only the
+    // 'pot' case is redirected, since that's the one location a lump
+    // payment structurally can't come from.
+    location: loan.location === 'pot' ? 'personal' : loan.location,
     ownerId: loan.ownerId,
     payee: loan.payee,
     payeeSharePercent: loan.payeeSharePercent,
