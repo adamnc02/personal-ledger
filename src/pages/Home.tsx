@@ -489,7 +489,6 @@ function SavingsPotDetail({
         <TrendPreview
           cardName={pot.name}
           color={pot.color}
-          headline={`£${formatCurrency(balance)}`}
           caption="Today's balance"
           savingsPot={{ buildSeries: (g) => buildSavingsPotTrendSeries(data, pot, g, new Date()) }}
         />
@@ -1875,14 +1874,12 @@ function dayDetailsForDay(transactions: Transaction[], categories: AppDataV2['ca
 function TrendPreview({
   cardName,
   color,
-  headline,
   caption,
   balanceSpend,
   savingsPot,
 }: {
   cardName: string
   color: string
-  headline: string
   caption: string
   balanceSpend?: { buildSeries: (granularity: BalanceSpendGranularity) => BalanceSpendTrendSeries | null; dayDetails?: (dateIso: string) => { icons: { key: string; node: ReactNode }[]; netAmount: number } }
   savingsPot?: { buildSeries: (granularity: SavingsPotPillGranularity) => SavingsPotTrendSeries }
@@ -1921,8 +1918,7 @@ function TrendPreview({
             View trends <TrendingUp size={13} />
           </span>
         </div>
-        <p className="text-lg font-mono font-semibold text-[var(--color-ink)]">{headline}</p>
-        <p className="text-xs text-[var(--color-ink-faint)] mb-2">{displayCaption}</p>
+        <p className="text-sm font-semibold text-[var(--color-ink)] mb-2">{displayCaption}</p>
         <div className="pointer-events-none">
           {previewSeries ? (
             <BalanceSpendChart series={previewSeries} view="balance" color={color} height={64} />
@@ -2788,7 +2784,6 @@ function PersonalDetail({
         <TrendPreview
           cardName="Personal"
           color="var(--color-coral)"
-          headline={`£${formatCurrency(projection.clearedBalance)}`}
           caption="Today's balance"
           balanceSpend={{
             buildSeries: (g) => buildPersonalTrendSeries(data, data.primaryPersonId, payCycle, g, new Date()),
@@ -3101,7 +3096,6 @@ function JointDetail({
                Joint's trend reads as visually distinct from Personal's
                coral, without inventing a brand-new colour token. */
             color="var(--color-positive)"
-            headline={`£${formatCurrency(jointProjection.clearedBalance)}`}
             caption="Today's balance"
             balanceSpend={{
               buildSeries: (g) => buildJointTrendSeries(data, g, new Date()),
@@ -3203,7 +3197,6 @@ function PotDetail({
         <TrendPreview
           cardName={pot.name}
           color={pot.color}
-          headline={`£${formatCurrency(projection.clearedBalance)}`}
           caption="Today's balance"
           balanceSpend={{
             buildSeries: (g) => buildPotTrendSeries(data, pot, g, new Date()),
@@ -3382,7 +3375,6 @@ function HouseholdDetail({
         <TrendPreview
           cardName="Household"
           color="var(--color-coral)"
-          headline={`£${formatCurrency(combinedClearedBalance)}`}
           caption="Combined balance today"
           balanceSpend={{
             buildSeries: (g) => buildHouseholdTrendSeries(data, g, new Date()),
@@ -3652,7 +3644,6 @@ function CreditCardDetail({
         <TrendPreview
           cardName={card.name}
           color={card.color}
-          headline={`£${formatCurrency(nowOwed)}`}
           caption="Owed today"
           balanceSpend={{
             buildSeries: (g) => buildCreditCardTrendSeries(data, storedCard, g, new Date()),
