@@ -481,5 +481,51 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
     }
   }
 
+  // Step 5 — materialize joint-location bill/loan occurrences (2026-09-15
+  // bugfix, Adam-reported — a joint bill re-added from scratch with a
+  // single-occurrence amount override stayed 'pending' in the Joint
+  // ledger past its own date). Root cause wasn't specific to that bill or
+  // its override at all: every OTHER recurring generator above (personal
+  // bills, pot bills, transfers) gets promoted from a preview into a
+  // real, cleared Transaction the moment its date arrives — a
+  // `location: 'joint'` bill/loan never did, because Step 2's per-person
+  // loop only ever looks at `location === 'personal'` templates/loans and
+  // Step 4 only ever looks at transfers. computeJointAccountProjection
+  // (jointAccountLedger.ts) generates joint bills/loans straight off
+  // generateTransactionsForTemplate/generateLoanPaymentTransactions, both
+  // of which always return `status: 'pending'` — with nothing here to
+  // ever flip a past-due one to 'cleared', EVERY joint-location bill/loan
+  // stayed pending forever regardless of date, not just this one.
+  // Scoped globally rather than per-person, since a joint-location item
+  // isn't owned by any one person's pay cycle — uses the joint account's
+  // own `openingBalanceDate` as the range start, the same visibility
+  // floor computeJointAccountProjection itself already applies.
+  if (result.jointAccount) {
+    const jointBillTemplates = result.recurringTemplates.filter((t) => t.location === 'joint')
+    const jointLoans = result.loans.filter((l) => l.location === 'joint' && l.active)
+    if (jointBillTemplates.length > 0 || jointLoans.length > 0) {
+      const jointRangeStart = new Date(result.jointAccount.openingBalanceDate)
+      if (jointRangeStart <= asOf) {
+        const jointCandidates: Omit<Transaction, 'id'>[] = []
+        for (const template of jointBillTemplates) {
+          jointCandidates.push(...generateTransactionsForTemplate(template, jointRangeStart, asOf, result.payCycles.find((pc) => pc.personId === result.primaryPersonId)))
+        }
+        for (const loan of jointLoans) {
+          jointCandidates.push(...generateLoanPaymentTransactions(loan, jointRangeStart, asOf))
+        }
+        for (const candidate of jointCandidates) {
+          if (candidate.date > asOfIso) continue
+          const key = dedupeKey(candidate)
+          if (key && globalExistingKeys.has(key)) continue
+
+          const real: Transaction = { ...candidate, id: nanoid(8), status: 'cleared' }
+          result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
+          if (key) globalExistingKeys.add(key)
+          changed = true
+        }
+      }
+    }
+  }
+
   return changed ? result : data
 }
