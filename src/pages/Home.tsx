@@ -5,7 +5,7 @@ import { toLocalIsoDate, todayIso } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
-import { averageAdHocSpendForCycle, forecastSpendForCycle, hasSpendHistory, type SpendScope } from '../lib/averageSpendForecast'
+import { averageAdHocSpendForCycle, daysOfSpendHistory, forecastSpendForCycle, hasAnyMatchingSpend, hasSpendHistory, MIN_SPEND_HISTORY_DAYS, type SpendScope } from '../lib/averageSpendForecast'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary, buildJointPersonGroups, type JointPersonGroup } from '../lib/jointLedger'
 import { computeJointAccountProjection, jointAccountSignedAmount, buildJointTrendSeries } from '../lib/jointAccountLedger'
@@ -1510,6 +1510,10 @@ function FiltersSheet({
   const averageSpendForecastScope: SpendScope | undefined =
     entry.kind === 'personal' ? { location: 'personal', ownerId: data.primaryPersonId } : entry.kind === 'joint' ? { location: 'joint' } : undefined
   const hasForecastHistory = averageSpendForecastScope ? hasSpendHistory(data, averageSpendForecastScope, data.primaryPersonId, new Date()) : false
+  // Distinguishes "no matching spend logged at all" from "some, just not the 2-week minimum
+  // yet" for the toggle's own help text — hasSpendHistory alone only tells you pass/fail.
+  const hasAnySpendAtAll = averageSpendForecastScope ? hasAnyMatchingSpend(data, averageSpendForecastScope) : false
+  const forecastHistoryDays = averageSpendForecastScope ? daysOfSpendHistory(data, averageSpendForecastScope, data.primaryPersonId, new Date()) : 0
   const averageSpendForecastApplicable = grouping === 'list' && order === 'date' && hasForecastHistory
   const isNonDefault = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection, averageSpendForecast).length > 0
 
@@ -1642,7 +1646,9 @@ function FiltersSheet({
                   ? 'Include a spend estimate at the end of each cycle'
                   : hasForecastHistory
                     ? 'Requires List grouping, Order by date'
-                    : 'No spend history yet to estimate from'
+                    : hasAnySpendAtAll
+                      ? `Needs ${MIN_SPEND_HISTORY_DAYS} days of spend history (${forecastHistoryDays} so far)`
+                      : 'No spend history yet to estimate from'
               }
               checked={averageSpendForecast}
               onChange={setAverageSpendForecast}

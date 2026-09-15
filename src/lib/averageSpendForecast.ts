@@ -86,6 +86,20 @@ function earliestMatchingSpendDateIso(data: AppDataV2, scope: SpendScope): strin
   return earliest
 }
 
+/**
+ * Whether ANY matching ad-hoc expense has ever been logged — "genuinely
+ * no history at all" is a different message than "some history, just
+ * not the 2-week minimum yet" (see `daysOfSpendHistory`'s own comment),
+ * and `daysOfSpendHistory` alone can't tell them apart: with zero
+ * matching transactions, `rawWindowStart` falls back to the natural
+ * ~90-day 3-cycles-back start (nothing to clamp to), so the raw day
+ * count would read as "plenty of history" even though none of it is
+ * real spend.
+ */
+export function hasAnyMatchingSpend(data: AppDataV2, scope: SpendScope): boolean {
+  return earliestMatchingSpendDateIso(data, scope) !== undefined
+}
+
 /** `earliestMatchingSpendDateIso`, parsed into a local Date the same "split YYYY-MM-DD into three numbers" way every other local-date construction in this app uses — never `new Date(isoString)` directly (parses as UTC midnight, not local). */
 function isoToLocalDate(iso: string): Date {
   const [y, m, d] = iso.split('-').map(Number)
@@ -101,12 +115,64 @@ function isoToLocalDate(iso: string): Date {
  * natural start (a new account, or one with only recent matching
  * history) — see this file's own header comment on why.
  */
-function windowStart(data: AppDataV2, scope: SpendScope, personId: string, asOfDate: Date): Date {
+function rawWindowStart(data: AppDataV2, scope: SpendScope, personId: string, asOfDate: Date): Date {
   const cycles = previousCycles(data, personId, 3, asOfDate)
   const naturalStart = cycles[cycles.length - 1].start
   const earliestIso = earliestMatchingSpendDateIso(data, scope)
   if (earliestIso === undefined || earliestIso <= toIso(naturalStart)) return naturalStart
   return isoToLocalDate(earliestIso)
+}
+
+/**
+ * Minimum span the lookback window must actually cover before a forecast
+ * is shown at all — 2 weeks. 2026-09-15 (Adam-reported, a real joint-
+ * account backup): the window used to be gated only on "does at least one
+ * matching transaction exist," which let a household that shops in a
+ * weekly burst (e.g. one big Saturday supermarket run) show a forecast
+ * built from as little as a single day's spend the moment that one shop
+ * happened — extrapolating a single weekend's total across a whole
+ * month. Two full weeks guarantees at least one complete weekly cycle
+ * (so a weekly shopper's actual rhythm is represented at all) is in the
+ * sample before any number is shown.
+ */
+export const MIN_SPEND_HISTORY_DAYS = 14
+
+/**
+ * How many days the lookback window would actually span right now (from
+ * `rawWindowStart` through `asOfDate`) — exposed so the UI can tell "no
+ * history at all" apart from "some history, just not 2 weeks of it yet"
+ * (two different messages for why the toggle is greyed out).
+ */
+export function daysOfSpendHistory(data: AppDataV2, scope: SpendScope, personId: string, asOfDate: Date): number {
+  return daysInclusive(rawWindowStart(data, scope, personId, asOfDate), asOfDate)
+}
+
+/**
+ * `rawWindowStart`, trimmed forward to the nearest date that makes the
+ * window an exact whole number of 7-day weeks (dropping only the
+ * OLDEST, partial leftover days — the end nearest `asOfDate` is never
+ * touched). A window that happens to end mid-week over- or under-
+ * represents whichever days-of-week it cuts off; anchoring to whole
+ * weeks means every day-of-week is covered the same number of times, so
+ * a weekly shopping pattern isn't systematically over- or under-counted
+ * depending on which day the window happens to start on. Only called
+ * once `hasSpendHistory` has already confirmed at least
+ * MIN_SPEND_HISTORY_DAYS (14) of raw span, so this never trims below a
+ * full 2 weeks.
+ */
+export function weekAlignedWindowStart(rawStart: Date, asOfDate: Date): Date {
+  const totalDays = daysInclusive(rawStart, asOfDate)
+  // Nothing meaningful to trim below a single week — guards against a
+  // caller passing a sub-week span (nothing in normal use does, since
+  // this is only ever called after hasSpendHistory's 14-day gate, but a
+  // remainder trim on a <7-day span would push the "start" past
+  // `asOfDate` entirely).
+  if (totalDays < 7) return rawStart
+  const remainder = totalDays % 7
+  if (remainder === 0) return rawStart
+  const trimmed = new Date(rawStart)
+  trimmed.setDate(trimmed.getDate() + remainder)
+  return trimmed
 }
 
 /**
@@ -125,27 +191,36 @@ function isFirstLoggedCycle(data: AppDataV2, scope: SpendScope, cycle: { start: 
 }
 
 /**
- * Whether there is at least one matching ad-hoc expense anywhere in the
- * lookback window (window start through `asOfDate`) — the gate for
- * whether a forecast can be shown at all. Adam-confirmed: "Only allow the
+ * Whether there is enough real history to show a forecast at all — two
+ * conditions, both required: (1) at least one matching ad-hoc expense
+ * anywhere in the lookback window, and (2) that window spans at least
+ * MIN_SPEND_HISTORY_DAYS (2 weeks). Adam-confirmed: "Only allow the
  * ability to display a forecast if there is at least one transaction to
- * create a history from" — distinct from `dailySpendRate` returning 0,
- * which can also mean "history exists but happens to be exactly £0."
+ * create a history from" — (1) is distinct from `dailySpendRate`
+ * returning 0, which can also mean "history exists but happens to be
+ * exactly £0." (2) is the 2026-09-15 addition — see
+ * MIN_SPEND_HISTORY_DAYS's own comment for why a single transaction
+ * alone isn't enough for a weekly-shopping household.
  */
 export function hasSpendHistory(data: AppDataV2, scope: SpendScope, personId: string, asOfDate: Date): boolean {
-  const start = toIso(windowStart(data, scope, personId, asOfDate))
+  if (daysOfSpendHistory(data, scope, personId, asOfDate) < MIN_SPEND_HISTORY_DAYS) return false
+  const start = toIso(rawWindowStart(data, scope, personId, asOfDate))
   const end = toIso(asOfDate)
   return data.transactions.some((t) => matchesSpendScope(t, scope) && t.date >= start && t.date <= end)
 }
 
 /**
  * The single daily ad-hoc-expense rate the whole forecast is built from:
- * total matching spend from the lookback window's start through
- * `asOfDate` (today), divided by that window's own inclusive day count.
- * Returns 0 when there's no matching spend in the window at all.
+ * total matching spend from the WEEK-ALIGNED lookback window's start
+ * (see `weekAlignedWindowStart`) through `asOfDate` (today), divided by
+ * that window's own inclusive day count. Returns 0 when there's no
+ * matching spend in the window at all. Callers are expected to have
+ * already checked `hasSpendHistory` — this doesn't re-check the 2-week
+ * minimum itself, it just always operates on a whole-week window once
+ * there's enough raw history for one to exist.
  */
 export function dailySpendRate(data: AppDataV2, scope: SpendScope, personId: string, asOfDate: Date): number {
-  const start = windowStart(data, scope, personId, asOfDate)
+  const start = weekAlignedWindowStart(rawWindowStart(data, scope, personId, asOfDate), asOfDate)
   const startIso = toIso(start)
   const endIso = toIso(asOfDate)
   const total = data.transactions.filter((t) => matchesSpendScope(t, scope) && t.date >= startIso && t.date <= endIso).reduce((sum, t) => sum + t.amount, 0)

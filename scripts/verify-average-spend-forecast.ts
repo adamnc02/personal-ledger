@@ -1,28 +1,47 @@
-// Verifies the "average spend forecast" feature — rewritten 2026-09-14
-// (see PROMPT-average-spend-forecast-current-cycle-2026-09-14.md) to a
-// single daily-rate methodology (totalMatchingSpend / window days, window
-// ending TODAY not the latest transaction's own date), scaled by each
-// cycle's own actual length, reaching into the current cycle as well as
-// future ones. Supersedes the 2026-09-13 "trailing 3-cycle mean of
-// non-empty cycles" version — see git history for that script's own
-// tests, several of which (specifically testing the old "only non-empty
-// cycles count" divisor behaviour) no longer apply under this method and
-// have been removed rather than forced to still pass.
+// Verifies the "average spend forecast" feature. Methodology history:
+// 2026-09-13 "trailing 3-cycle mean of non-empty cycles" -> 2026-09-14
+// single daily-rate (totalMatchingSpend / window days, window ending
+// TODAY not the latest transaction's own date, window-start clamped to
+// the earliest matching transaction for a new account) -> 2026-09-15
+// (Adam-reported, a real joint-account backup — see this file's own
+// "MINIMUM HISTORY GUARD" and "WEEK ALIGNMENT" sections below for why):
+// a household that shops in a weekly burst (one big Saturday run) could
+// get a forecast built from as little as a single day's real spend the
+// moment that one shop happened, extrapolating a single weekend's total
+// across a whole month. Two fixes, both required before a forecast shows
+// at all: (1) the window must span at least MIN_SPEND_HISTORY_DAYS (14)
+// raw days, not just contain one matching transaction; (2) the window
+// actually used to compute the rate is trimmed to a whole number of
+// 7-day weeks (dropping only the oldest partial days), so every
+// day-of-week is represented the same number of times regardless of
+// which day the window happens to start on.
 //
-// Still verifies, unchanged from 2026-09-13: the per-cycle reduction math
-// (forecastSpendForCycle), and — critically — that the window is NOT
-// bound by either ledger's own opening-balance date (Adam's own
-// rebalancing scenario).
+// Several 2026-09-14 tests that specifically exercised "a brand new
+// account with just a few days of history still gets a real, unclamped
+// rate" are REPLACED rather than kept passing — that's the exact
+// real-world scenario this session's fix exists to block. See git
+// history for the superseded versions.
 //
-// 2026-09-14 follow-up (Adam-reported, a real new-account backup) — also
-// verifies the window-start clamp (a new account's rate is built only
-// from days it actually has real history for, never diluted by days
-// before it existed) and the first-logged-cycle guard (a cycle never
-// forecasts against its own partial data reflected back onto itself).
+// Still verifies, unchanged since 2026-09-13: the per-cycle reduction
+// math (forecastSpendForCycle), and that the window is NOT bound by
+// either ledger's own opening-balance date (Adam's own rebalancing
+// scenario). Still verifies, unchanged since 2026-09-14: the
+// first-logged-cycle guard (a cycle never forecasts against its own
+// partial data reflected back onto itself).
 
 import { differenceInCalendarDays } from 'date-fns'
 import { previousCycles } from '../src/lib/projection'
-import { averageAdHocSpendForCycle, dailySpendRate, forecastSpendForCycle, hasSpendHistory, type SpendScope } from '../src/lib/averageSpendForecast'
+import {
+  averageAdHocSpendForCycle,
+  dailySpendRate,
+  daysOfSpendHistory,
+  forecastSpendForCycle,
+  hasAnyMatchingSpend,
+  hasSpendHistory,
+  MIN_SPEND_HISTORY_DAYS,
+  weekAlignedWindowStart,
+  type SpendScope,
+} from '../src/lib/averageSpendForecast'
 import { toLocalIsoDate as iso } from '../src/lib/date'
 import type { AppDataV2, PayCycleConfig, Transaction } from '../src/types/ledger'
 
@@ -90,11 +109,16 @@ function dataWith(transactions: Transaction[]): AppDataV2 {
 const asOf = new Date(2026, 9, 10) // 10 Oct 2026 — mid-cycle, well after openingBalanceDate
 const personalScope: SpendScope = { location: 'personal', ownerId: 'p1' }
 
-// The window this whole file's asOf/payCycle combination resolves to —
-// derived from previousCycles itself (not hand-computed calendar
-// arithmetic), same boundary dailySpendRate's own implementation uses.
+// The RAW window this whole file's asOf/payCycle combination resolves
+// to — derived from previousCycles itself (not hand-computed calendar
+// arithmetic), same boundary dailySpendRate's own implementation starts
+// from. `alignedWindowStart`/`windowDays` are what dailySpendRate
+// ACTUALLY computes the rate over, once trimmed to a whole number of
+// weeks — computed via the same exported `weekAlignedWindowStart` the
+// implementation itself uses, so these never drift apart.
 const windowStart = previousCycles(dataWith([]), 'p1', 3, asOf)[2].start
-const windowDays = differenceInCalendarDays(asOf, windowStart) + 1
+const alignedWindowStart = weekAlignedWindowStart(windowStart, asOf)
+const windowDays = differenceInCalendarDays(asOf, alignedWindowStart) + 1
 
 // ── 1. previousCycles: 3 cycles immediately before "now"'s, tiling with no gaps ──
 {
@@ -111,11 +135,11 @@ const windowDays = differenceInCalendarDays(asOf, windowStart) + 1
 // ── 2. dailySpendRate: total matching spend / inclusive window days (window start..today) ──
 {
   const data = dataWith([
-    expense('e1', iso(windowStart), 500, 'personal'), // right at the window's own start
+    expense('e1', iso(alignedWindowStart), 500, 'personal'), // right at the ACTUAL (week-aligned) window's own start
     expense('e2', '2026-08-10', 300, 'personal'),
   ])
   const rate = dailySpendRate(data, personalScope, 'p1', asOf)
-  check('dailySpendRate = totalMatchingSpend / window days (window start..today, inclusive)', round2(rate * windowDays), 800)
+  check('dailySpendRate = totalMatchingSpend / window days (week-aligned window start..today, inclusive)', round2(rate * windowDays), 800)
 }
 
 // ── 3. dailySpendRate is 0 with zero matching history in the window ──
@@ -130,7 +154,7 @@ const windowDays = differenceInCalendarDays(asOf, windowStart) + 1
   // would give days=1 and rate=100; the agreed correction is that every
   // no-spend day between then and today still counts, pulling the rate
   // DOWN towards (but never all the way to) 0.
-  const data = dataWith([expense('e1', iso(windowStart), 100, 'personal')])
+  const data = dataWith([expense('e1', iso(alignedWindowStart), 100, 'personal')])
   const rate = dailySpendRate(data, personalScope, 'p1', asOf)
   check("no-spend days since the last transaction pull the rate down — window end is TODAY, not the transaction's own date", round2(rate * windowDays), 100)
   assert('REGRESSION GUARD — rate is nowhere near 100/day (would be, under the superseded "max transaction date" wording)', rate < 100 / windowDays + 0.01 && rate > 0)
@@ -141,6 +165,48 @@ const windowDays = differenceInCalendarDays(asOf, windowStart) + 1
   assert('hasSpendHistory is false with zero matching transactions anywhere in the window', !hasSpendHistory(dataWith([]), personalScope, 'p1', asOf))
   const data = dataWith([expense('e1', iso(windowStart), 50, 'personal')])
   assert('hasSpendHistory is true once at least one matching transaction exists in the window', hasSpendHistory(data, personalScope, 'p1', asOf))
+}
+
+// ── 5b. MINIMUM HISTORY GUARD (2026-09-15, Adam-reported — a real joint
+// account with only a handful of days of history showed a forecast built
+// entirely from one weekend's shopping burst): hasSpendHistory now
+// requires the window to span at least MIN_SPEND_HISTORY_DAYS (14) raw
+// days, not just contain a single matching transaction. ──
+{
+  const daysAgo = (n: number) => iso(new Date(asOf.getFullYear(), asOf.getMonth(), asOf.getDate() - n))
+
+  const threeDays = dataWith([expense('e1', daysAgo(2), 300, 'personal')]) // history starts 3 days ago (inclusive)
+  assert('a 3-day-old account is blocked — well under the 14-day minimum', !hasSpendHistory(threeDays, personalScope, 'p1', asOf))
+
+  const thirteenDays = dataWith([expense('e1', daysAgo(12), 300, 'personal')]) // 13 days inclusive
+  assert('a 13-day-old account is still blocked — one day short of the minimum', !hasSpendHistory(thirteenDays, personalScope, 'p1', asOf))
+
+  const fourteenDays = dataWith([expense('e1', daysAgo(13), 300, 'personal')]) // exactly 14 days inclusive
+  assert('a 14-day-old account (exactly the minimum) is allowed', hasSpendHistory(fourteenDays, personalScope, 'p1', asOf))
+
+  // hasAnyMatchingSpend/daysOfSpendHistory distinguish "no history at all" from "some, just not
+  // enough yet" — the pair the toggle's own help text relies on to show the right message.
+  assert('hasAnyMatchingSpend is false with zero matching transactions', !hasAnyMatchingSpend(dataWith([]), personalScope))
+  assert('hasAnyMatchingSpend is true even when there is not yet enough history to forecast from', hasAnyMatchingSpend(threeDays, personalScope))
+  check('daysOfSpendHistory reports the actual raw span for a genuinely new account', daysOfSpendHistory(threeDays, personalScope, 'p1', asOf), 3)
+  assert(
+    'daysOfSpendHistory with ZERO matching transactions reports the natural (un-clamped) window span, not 0 — documented quirk, callers must check hasAnyMatchingSpend separately',
+    daysOfSpendHistory(dataWith([]), personalScope, 'p1', asOf) >= MIN_SPEND_HISTORY_DAYS,
+  )
+}
+
+// ── 5c. WEEK ALIGNMENT: weekAlignedWindowStart trims only the OLDEST partial days, never touches the asOfDate end, and is a no-op once the span is already a whole number of weeks ──
+{
+  const start = new Date(2026, 0, 1) // 1 Jan 2026
+  const endNotAWholeWeek = new Date(2026, 0, 20) // 20 days inclusive (1..20) — not a multiple of 7
+  const aligned = weekAlignedWindowStart(start, endNotAWholeWeek)
+  const alignedSpan = differenceInCalendarDays(endNotAWholeWeek, aligned) + 1
+  check('a non-whole-week span gets trimmed down to the nearest whole number of weeks', alignedSpan, 14)
+  assert('the trim moves the START forward (drops the oldest days) — the end nearest asOfDate is untouched', aligned.getTime() > start.getTime())
+
+  const wholeWeekEnd = new Date(2026, 0, 14) // 1..14 inclusive = 14 days, already a whole 2 weeks
+  const alignedWhole = weekAlignedWindowStart(start, wholeWeekEnd)
+  check('a span that is ALREADY a whole number of weeks is returned unchanged', iso(alignedWhole), iso(start))
 }
 
 // Every test below that isn't ITSELF about window-clamping (section 16)
@@ -201,7 +267,7 @@ function anchor(location: 'personal' | 'joint', ownerId = 'p1'): Transaction {
 
 // ── 10. averageAdHocSpendForCycle: the daily rate scaled by EACH cycle's own actual length ──
 {
-  const data = dataWith([expense('e1', iso(windowStart), windowDays, 'personal')]) // rate = 1/day exactly
+  const data = dataWith([expense('e1', iso(alignedWindowStart), windowDays, 'personal')]) // rate = 1/day exactly
   const shortCycle = { start: new Date(2026, 10, 1), end: new Date(2026, 10, 30) } // 30 days
   const longCycle = { start: new Date(2026, 10, 1), end: new Date(2026, 11, 1) } // 31 days
   check('averageAdHocSpendForCycle scales a 30-day cycle by 30', averageAdHocSpendForCycle(data, personalScope, 'p1', shortCycle, asOf), 30)
@@ -251,15 +317,18 @@ function anchor(location: 'personal' | 'joint', ownerId = 'p1'): Transaction {
 
 // ── 16. WINDOW CLAMP (Adam-reported, a real new-account backup): the window's start clamps to the earliest matching transaction when that's LATER than the natural 3-cycles-back start ──
 {
-  // Only 3 days of real history, well after the natural windowStart —
-  // simulates a genuinely new account. Under the old unclamped window,
-  // this same £300 would have been diluted across the FULL windowDays
-  // (mostly empty days that predate any real history), producing an
-  // artificially tiny rate.
-  const recentStart = new Date(2026, 9, 8) // 8 Oct — 3 days before asOf (10 Oct)
+  // 21 days (exactly 3 whole weeks — a no-op for week-alignment, keeping
+  // this test focused purely on the clamp) of real history, well after
+  // the natural windowStart, clears the 2026-09-15 minimum-history gate
+  // on its own — simulates an account that's a few weeks old, not brand
+  // new. Under an unclamped window, this same £300 would have been
+  // diluted across the FULL natural windowDays (mostly empty days that
+  // predate any real history), producing an artificially tiny rate.
+  const recentStart = new Date(2026, 8, 20) // 20 Sep — 21 days before asOf (10 Oct), inclusive
   const data = dataWith([expense('e1', iso(recentStart), 300, 'personal')])
+  assert('21 days of real history clears the minimum-history gate', hasSpendHistory(data, personalScope, 'p1', asOf))
   const rate = dailySpendRate(data, personalScope, 'p1', asOf)
-  const clampedWindowDays = differenceInCalendarDays(asOf, recentStart) + 1 // 3
+  const clampedWindowDays = differenceInCalendarDays(asOf, recentStart) + 1 // 21
   check("WINDOW CLAMP — rate is built only from the earliest matching transaction's own date forward", round2(rate * clampedWindowDays), 300)
   assert('WINDOW CLAMP REGRESSION GUARD — rate is meaningfully higher than the old (unclamped) full-window dilution would have given', rate > 300 / windowDays)
 }
@@ -267,7 +336,10 @@ function anchor(location: 'personal' | 'joint', ownerId = 'p1'): Transaction {
 // ── 17. FIRST-LOGGED-CYCLE GUARD (Adam-specified): a cycle whose own window is the very first with any matching history gets NO forecast at all — averaging that cycle's own partial data back onto its own remaining days would be circular ──
 {
   const currentCycle = { start: new Date(2026, 8, 25), end: new Date(2026, 9, 24) } // Sep25..Oct24, contains asOf
-  const data = dataWith([expense('e1', '2026-10-01', 300, 'personal')]) // the ONLY matching history, dated inside currentCycle itself
+  // 27 Sep — exactly 14 days (the new minimum) before asOf (10 Oct), and
+  // already a whole number of weeks, so week-alignment is a no-op and
+  // doesn't trim this fixture's own only transaction out of the window.
+  const data = dataWith([expense('e1', '2026-09-27', 300, 'personal')]) // the ONLY matching history, dated inside currentCycle itself
   assert('dailySpendRate is nonzero — real history genuinely exists', dailySpendRate(data, personalScope, 'p1', asOf) > 0)
   check(
     'FIRST-LOGGED-CYCLE GUARD — averageAdHocSpendForCycle is 0 for the cycle that IS the first one with any history, even though the daily rate itself is not',
@@ -293,7 +365,7 @@ function anchor(location: 'personal' | 'joint', ownerId = 'p1'): Transaction {
 {
   const currentCycle = { start: new Date(2026, 8, 25), end: new Date(2026, 9, 24) }
   const futureCycle = { start: new Date(2026, 9, 25), end: new Date(2026, 10, 24) }
-  const data = dataWith([expense('e1', '2026-10-01', 300, 'personal')]) // only within currentCycle
+  const data = dataWith([expense('e1', '2026-09-27', 300, 'personal')]) // only within currentCycle — see test 17's comment on this date
   check('the current cycle (the first-ever one) is blocked', averageAdHocSpendForCycle(data, personalScope, 'p1', currentCycle, asOf), 0)
   assert('a FUTURE cycle still gets a real, nonzero forecast', averageAdHocSpendForCycle(data, personalScope, 'p1', futureCycle, asOf) > 0)
 }
