@@ -263,17 +263,30 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
   const dragging = useRef(false)
 
   const points = series.points
-  const values = points.map((p) => p.endBalance)
-  const min = Math.min(0, ...values)
-  const max = Math.max(...values, min + 1)
-  const span = max - min || 1
   const padTop = 4
   const padBottom = interactive ? 18 : 2
+  const trackHeight = height - padTop - padBottom
   const barGap = 3
   const barWidth = points.length > 0 ? Math.max(2, WIDTH / points.length - barGap) : 4
 
-  function barHeight(v: number) {
-    return ((v - min) / span) * (height - padTop - padBottom)
+  // The background "track" behind every column is a fixed height — the
+  // reference scale for the whole chart — set by the single largest amount
+  // actually SAVED (a positive netChange) across the current granularity's
+  // points, per the reference screenshots (every track pill is identical
+  // height; only the coloured fill inside it varies). Each column's fill
+  // is then that period's own net movement (saved OR withdrawn) as a
+  // fraction of that scale, not the period's end-of-period balance — the
+  // running balance is shown as text in the callout above the chart
+  // instead, not encoded in bar height. Falls back to the largest
+  // magnitude of any kind when there's no positive period at all (e.g. a
+  // pot that's only ever been withdrawn from), so bars still have a
+  // meaningful scale rather than every one dividing by zero.
+  const netValues = points.map((p) => p.netChange)
+  const maxSaved = Math.max(0, ...netValues)
+  const scaleMax = maxSaved > 0 ? maxSaved : Math.max(1, ...netValues.map((v) => Math.abs(v)))
+
+  function fillHeight(v: number) {
+    return Math.min(trackHeight, (Math.abs(v) / scaleMax) * trackHeight)
   }
 
   // Cap x-axis LABELS at 4 even though every column still renders — per
@@ -330,12 +343,13 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
       style={{ touchAction: interactive ? 'none' : undefined, display: 'block', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}
     >
       {points.map((p, i) => {
-        const h = Math.max(2, barHeight(p.endBalance))
+        const h = Math.max(2, fillHeight(p.netChange))
         const x = i * (barWidth + barGap)
         const y = height - padBottom - h
         const isActive = activeIndex === i
         return (
           <g key={`${p.periodStart}-${i}`}>
+            <rect x={x} y={padTop} width={barWidth} height={trackHeight} rx={barWidth / 2} fill="var(--color-track)" opacity={0.4} />
             <rect x={x} y={y} width={barWidth} height={h} rx={barWidth / 2} fill={color} opacity={activeIndex === null || isActive ? 1 : 0.3} />
             {interactive && labelIndices.has(i) && (
               <text x={x + barWidth / 2} y={height - 4} fontSize={9} textAnchor="middle" fill="var(--color-ink-faint)">

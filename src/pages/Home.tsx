@@ -1911,13 +1911,12 @@ function TrendPreview({
 
   return (
     <>
+      {/* Whole section is the tap target ("the card is the button", per Adam's own
+          entry-point spec) — the "View trends" pill below the chart is a visual
+          affordance matching the reference mockup, not a second independent control,
+          so this stays a single <button> rather than nesting one inside the other. */}
       <button onClick={() => setOpen(true)} className="w-full text-left">
-        <div className="flex items-center justify-between mb-1">
-          <h3 className="font-body text-sm font-semibold text-[var(--color-ink)]">Trends</h3>
-          <span className="text-xs font-semibold flex items-center gap-1" style={{ color: 'var(--color-coral)' }}>
-            View trends <TrendingUp size={13} />
-          </span>
-        </div>
+        <h3 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-1">Trends</h3>
         <p className="text-xs text-[var(--color-ink-faint)] mb-2">{displayCaption}</p>
         <div className="pointer-events-none">
           {previewSeries ? (
@@ -1925,6 +1924,13 @@ function TrendPreview({
           ) : previewPillSeries ? (
             <SavingsPotPillChart series={previewPillSeries} color={color} height={48} />
           ) : null}
+        </div>
+        <div
+          className="w-full mt-3 flex items-center justify-center gap-1.5 text-xs font-semibold uppercase tracking-wide"
+          style={{ background: 'var(--color-bg-elevated)', color: 'var(--color-ink)', borderRadius: 12, padding: '9px 0' }}
+        >
+          <TrendingUp size={13} />
+          View trends
         </div>
       </button>
       {open && <TrendsModal cardName={cardName} color={color} balanceSpend={balanceSpend} savingsPot={savingsPot} onClose={() => setOpen(false)} />}
