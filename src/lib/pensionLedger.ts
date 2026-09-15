@@ -12,7 +12,7 @@
 // variant of "walk paydays forward" rather than sharing one.
 
 import { addMonths, addQuarters, addWeeks, addYears, addDays, startOfDay } from 'date-fns'
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 import { adjustToWorkingDay, cycleBoundsForDate } from './payCycle'
 import { INCOME_CATEGORY_ID } from '../types/ledger'
 import type { AppDataV2, PayCycleConfig, Pension, RecurrenceFrequency, RecurringOccurrenceOverride, Transaction } from '../types/ledger'
@@ -88,7 +88,7 @@ function walkPensionOccurrences(pension: Pension, rangeStart: Date, rangeEnd: Da
   if (!pension.active) return []
   if (rangeEnd < rangeStart) return []
 
-  const anchor = new Date(pension.anchorDate)
+  const anchor = parseLocalDate(pension.anchorDate)
   const anchorDay = anchor.getDate()
 
   let cursor = anchor
@@ -152,7 +152,7 @@ export function pensionOccurrencePreviews(pension: Pension, asOfDate: Date, coun
 /** Every calendar date the pension's frequency would land on, ignoring occurrenceOverrides entirely — same purpose as schedule.ts's scheduledTemplateDates (Phase 4), just against Pension's own recurrence rule. */
 export function scheduledPensionDates(pension: Pension, rangeStart: Date, rangeEnd: Date): string[] {
   if (rangeEnd < rangeStart) return []
-  const anchor = new Date(pension.anchorDate)
+  const anchor = parseLocalDate(pension.anchorDate)
   const anchorDay = anchor.getDate()
   let cursor = anchor
   let iterations = 0
@@ -307,7 +307,7 @@ export function pensionCycleBounds(referenceDate: Date, pension: Pension): { sta
   // window reasoning for the monthly case.
   const rangeStart = addYears(ref, -2)
   const rangeEnd = addYears(ref, 2)
-  const dates = walkPensionOccurrences(structural, rangeStart, rangeEnd).map((occ) => new Date(occ.date))
+  const dates = walkPensionOccurrences(structural, rangeStart, rangeEnd).map((occ) => parseLocalDate(occ.date))
   dates.sort((a, b) => a.getTime() - b.getTime())
 
   if (dates.length === 0) {

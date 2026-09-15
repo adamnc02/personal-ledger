@@ -1,6 +1,6 @@
 import type { Bill, Loan, LoanPayment } from '../types/models'
 import type { Loan as LedgerLoan, LoanOverpayment } from '../types/ledger'
-import { toLocalIsoDate, todayIso } from './date'
+import { toLocalIsoDate, todayIso, parseLocalDate } from './date'
 import {
   buildLoanSchedule as buildLedgerLoanSchedule,
   estimateSettlementFigure as estimateLedgerSettlementFigure,
@@ -69,7 +69,7 @@ export function buildLoanSchedule(loan: Loan): LoanPayment[] {
 
   const schedule: LoanPayment[] = []
   let balance = loan.totalAmount
-  const start = new Date(loan.firstPaymentDate)
+  const start = parseLocalDate(loan.firstPaymentDate)
 
   // Safety cap: never generate more than 600 months (50 years) of payments
   const MAX_PAYMENTS = 600
@@ -164,7 +164,7 @@ export function currentLoanMonthlyCost(loan: Loan, asOf: Date = new Date()): num
  * without needing a separate, manually-linked bill entry.
  */
 export function loanAsBill(loan: Loan, asOf: Date = new Date()): Bill {
-  const dueDay = new Date(loan.firstPaymentDate).getDate()
+  const dueDay = parseLocalDate(loan.firstPaymentDate).getDate()
   return {
     id: `loan:${loan.id}`,
     name: loan.name,

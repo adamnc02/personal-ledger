@@ -28,7 +28,7 @@ import { INCOME_CATEGORY_ID } from '../types/ledger'
 import type { Person, PayCycleConfig, SalarySnapshot, Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 
 /** The snapshot effective on `date` — the latest one with effectiveFrom on or before it, never a future one. */
 /**
@@ -252,7 +252,7 @@ export function upcomingPaydays(payCycle: PayCycleConfig, fromDate: Date, count:
  */
 export function closedPaydays(payCycle: PayCycleConfig, beforeDate: Date, count: number): Date[] {
   const results: Date[] = []
-  const openingBalanceDate = new Date(payCycle.openingBalanceDate)
+  const openingBalanceDate = parseLocalDate(payCycle.openingBalanceDate)
   const floorMonth = new Date(openingBalanceDate.getFullYear(), openingBalanceDate.getMonth(), 1)
   let cursor = new Date(beforeDate.getFullYear(), beforeDate.getMonth(), 1)
   let guard = 0

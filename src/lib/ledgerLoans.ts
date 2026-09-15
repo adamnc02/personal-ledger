@@ -23,7 +23,7 @@ import type { BillLocation } from '../types/models'
 import { backSolveMonthlyRate, calibrateRateAndConvention, flatMonthlyConvention, interestConventions, standardPayment, type InterestConvention } from './interestConventions'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
-import { toLocalIsoDate as toIso, todayIso } from './date'
+import { toLocalIsoDate as toIso, todayIso, parseLocalDate } from './date'
 const sameMonth = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()
 
 /**
@@ -345,8 +345,8 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
   const schedule: LoanScheduleEntry[] = []
   let balance = loan.principal
   let currentPayment = loan.monthlyPayment
-  const start = new Date(loan.startDate)
-  let previousPeriodDate = new Date(loan.advanceDate ?? loan.startDate)
+  const start = parseLocalDate(loan.startDate)
+  let previousPeriodDate = parseLocalDate(loan.advanceDate ?? loan.startDate)
   // Overpayments logged before the loan's first scheduled payment aren't
   // nonsensical at all — confirmed as a real, common case: a person
   // often makes a voluntary extra payment in the gap between the loan
@@ -408,7 +408,7 @@ export function buildLoanSchedule(loan: Loan): LoanScheduleEntry[] {
     let recastToReducePayment = false
     while (
       overpaymentIndex < overpayments.length &&
-      (sameMonth(new Date(overpayments[overpaymentIndex].date), paymentDate) || (i === 0 && new Date(overpayments[overpaymentIndex].date) <= paymentDate))
+      (sameMonth(parseLocalDate(overpayments[overpaymentIndex].date), paymentDate) || (i === 0 && parseLocalDate(overpayments[overpaymentIndex].date) <= paymentDate))
     ) {
       overpaymentApplied += overpayments[overpaymentIndex].amount
       if (overpayments[overpaymentIndex].recastMode === 'reduce_payment') recastToReducePayment = true
@@ -589,8 +589,8 @@ export function recurringOverpaymentRealDates(loan: Loan, schedule: LoanSchedule
   const r = loan.recurringOverpayment
   if (!r) return map
 
-  let cursor = new Date(r.startDate)
-  let previousPeriodDate = new Date(loan.advanceDate ?? loan.startDate)
+  let cursor = parseLocalDate(r.startDate)
+  let previousPeriodDate = parseLocalDate(loan.advanceDate ?? loan.startDate)
   let iterations = 0
 
   for (const entry of schedule) {
@@ -608,7 +608,7 @@ export function recurringOverpaymentRealDates(loan: Loan, schedule: LoanSchedule
     // already follows — this is the other half of that same fix.
     const inWindow = entry.date >= r.startDate && (!r.endDate || entry.date <= r.endDate)
     if (!inWindow) {
-      previousPeriodDate = new Date(entry.date)
+      previousPeriodDate = parseLocalDate(entry.date)
       continue
     }
     // Advance the recurring overpayment's own cadence until it lands
@@ -619,7 +619,7 @@ export function recurringOverpaymentRealDates(loan: Loan, schedule: LoanSchedule
       iterations++
     }
     map.set(entry.date, toIso(cursor))
-    previousPeriodDate = new Date(entry.date)
+    previousPeriodDate = parseLocalDate(entry.date)
   }
 
   return map

@@ -23,7 +23,7 @@ import { CREDIT_CARD_CATEGORY_ID, SHARED_CARD_COLORS, type AppDataV2, type Credi
 import { daysBetweenInclusive, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries, type DailyBalancePoint } from './runningBalance'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 
 // BUGFIX (Batch 8, 2026-09-07, Bug 9.2, Adam-reported): a percent_of_balance
 // minimum payment is mathematically a fraction of whatever's left, so a
@@ -197,7 +197,7 @@ export function cardBalanceAsOf(card: CreditCard, transactions: Transaction[], a
   // once a window is configured; empty otherwise, leaving non-window
   // cards on the exact `balanceEnteringCycle` mechanism they always used.
   const closeDates = hasStatementWindow
-    ? billingDates.map((d) => toIso(statementCloseDateForPaymentDate(card, new Date(d)))).filter((d) => d > anchorIso && d <= asOfIso)
+    ? billingDates.map((d) => toIso(statementCloseDateForPaymentDate(card, parseLocalDate(d)))).filter((d) => d > anchorIso && d <= asOfIso)
     : []
   const allDates = [...new Set([...billingDates, ...closeDates, ...activity.map((t) => t.date)])].sort()
 
@@ -295,8 +295,8 @@ export function cardBalanceAsOf(card: CreditCard, transactions: Transaction[], a
 /** Every paymentDayOfMonth occurrence strictly after `afterIso` and on or before `throughIso` — the dates a cycle's interest posts. Clamped to the length of each month, same rule generateMinimumPaymentTransactions uses. */
 function billingDatesBetween(paymentDayOfMonth: number, afterIso: string, throughIso: string): string[] {
   const results: string[] = []
-  const start = new Date(afterIso)
-  const end = new Date(throughIso)
+  const start = parseLocalDate(afterIso)
+  const end = parseLocalDate(throughIso)
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return results
   let cursor = new Date(start.getFullYear(), start.getMonth(), 1)
   let guard = 0
@@ -351,7 +351,7 @@ function statementCloseDateForPaymentDate(card: CreditCard, paymentDate: Date): 
  */
 function mostRecentStatementCloseOnOrBefore(card: CreditCard, dateIso: string): string | null {
   if (card.statementEndDay == null) return null
-  const d = new Date(dateIso)
+  const d = parseLocalDate(dateIso)
   let best: string | null = null
   for (let offset = -2; offset <= 2; offset++) {
     const year = d.getFullYear()
@@ -492,7 +492,7 @@ export function generateMinimumPaymentTransactions(
           .reduce((sum, t) => round2(sum + t.amount), 0)
       : 0
   let statementBalance =
-    statementOpeningCloseIso != null ? round2(cardBalanceAsOf(card, transactions, new Date(statementOpeningCloseIso)) - paymentsBetweenCloseAndRangeStart) : workingBalance
+    statementOpeningCloseIso != null ? round2(cardBalanceAsOf(card, transactions, parseLocalDate(statementOpeningCloseIso)) - paymentsBetweenCloseAndRangeStart) : workingBalance
   // Same cut, applied to logged lump payments: one dated on or before
   // rangeStart is already inside workingBalance above (its transaction
   // was replayed into it), so folding it in again here would
@@ -1001,7 +1001,7 @@ export function buildCreditCardTrendSeries(data: AppDataV2, card: CreditCard, gr
   const activity = [...data.transactions, ...dedupedGenerated]
 
   const balance: DailyBalancePoint[] = days.map((date) => {
-    const owed = cardBalanceAsOf(card, activity, new Date(date))
+    const owed = cardBalanceAsOf(card, activity, parseLocalDate(date))
     return { date, clearedBalance: owed, projectedBalance: owed }
   })
   const spend = buildDailySpendSeries(activity, days, isCardSpend(card.id))
@@ -1093,7 +1093,7 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   // own earliest real transaction (so anything actually there stays
   // editable) — a fresh card with none shows nothing before today at
   // all, rather than a year of rows that never happened.
-  const earliestStoredMs = stored.length > 0 ? Math.min(...stored.map((t) => new Date(t.date).getTime())) : asOfDate.getTime()
+  const earliestStoredMs = stored.length > 0 ? Math.min(...stored.map((t) => parseLocalDate(t.date).getTime())) : asOfDate.getTime()
   const rangeStart = new Date(Math.min(earliestStoredMs, asOfDate.getTime()))
   const rangeEnd = new Date(asOfDate.getFullYear() + 2, asOfDate.getMonth(), 1)
   // `transactions` MUST be passed through. Omitted, the generator falls
@@ -1121,13 +1121,13 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   ).filter((t) => !storedDates.has(t.date))
 
   const rows: CreditCardMinimumChargeRow[] = [
-    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true, projectedBalanceDue: cardBalanceAsOf(card, transactions, new Date(t.date)) })),
+    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true, projectedBalanceDue: cardBalanceAsOf(card, transactions, parseLocalDate(t.date)) })),
     ...generated.map((t) => ({
       date: t.date,
       amount: t.amount,
       status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const),
       materialized: false,
-      projectedBalanceDue: workingBalanceByDate.get(t.date) ?? cardBalanceAsOf(card, transactions, new Date(t.date)),
+      projectedBalanceDue: workingBalanceByDate.get(t.date) ?? cardBalanceAsOf(card, transactions, parseLocalDate(t.date)),
     })),
   ]
   return rows.sort((a, b) => a.date.localeCompare(b.date))

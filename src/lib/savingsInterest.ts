@@ -30,7 +30,7 @@
 
 import { formatCurrency } from './format'
 import { addMonths, addQuarters, addYears, differenceInCalendarDays } from 'date-fns'
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 import type { SavingsInterestMethod } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -69,7 +69,7 @@ export interface CreditingDate {
 /** Every crediting date for method 1 (aer_credited) between openingDate and rangeEnd, inclusive of rangeEnd. */
 export function walkCreditingDates(openingDate: string, creditingFrequency: 'monthly' | 'quarterly' | 'annual', rangeEnd: Date): CreditingDate[] {
   const results: CreditingDate[] = []
-  let periodStart = new Date(openingDate)
+  let periodStart = parseLocalDate(openingDate)
   let cursor = nextCreditingDate(periodStart, creditingFrequency)
   let iterations = 0
   while (cursor <= rangeEnd && iterations < 2000) {
@@ -107,8 +107,8 @@ export function dailyAccrualInterest(dailyBalances: { date: string; balance: num
 
   let total = 0
   for (let i = 0; i < dailyBalances.length; i++) {
-    const segmentStart = new Date(Math.max(new Date(dailyBalances[i].date).getTime(), periodStart.getTime()))
-    const segmentEndCandidate = i + 1 < dailyBalances.length ? new Date(dailyBalances[i + 1].date) : periodEnd
+    const segmentStart = new Date(Math.max(parseLocalDate(dailyBalances[i].date).getTime(), periodStart.getTime()))
+    const segmentEndCandidate = i + 1 < dailyBalances.length ? parseLocalDate(dailyBalances[i + 1].date) : periodEnd
     const segmentEnd = new Date(Math.min(segmentEndCandidate.getTime(), periodEnd.getTime()))
     const days = differenceInCalendarDays(segmentEnd, segmentStart)
     if (days <= 0 || dailyBalances[i].balance <= 0) continue
@@ -120,7 +120,7 @@ export function dailyAccrualInterest(dailyBalances: { date: string; balance: num
 /** Every monthly crediting window for method 2 between openingDate and rangeEnd — same shape as walkCreditingDates, kept separate since method 2 has no frequency choice. */
 export function walkMonthlyCreditingDates(openingDate: string, rangeEnd: Date): CreditingDate[] {
   const results: CreditingDate[] = []
-  let periodStart = new Date(openingDate)
+  let periodStart = parseLocalDate(openingDate)
   let cursor = addMonths(periodStart, 1)
   let iterations = 0
   while (cursor <= rangeEnd && iterations < 2000) {
@@ -184,7 +184,7 @@ export function buildExampleLedger(method: SavingsInterestMethod): ExampleLedger
   ]
   let balance = EXAMPLE_OPENING_BALANCE + 200
   for (const c of walkMonthlyCreditingDates(start, rangeEnd).slice(0, 3)) {
-    const interest = dailyAccrualInterest(dailyBalances, new Date(c.periodStart), new Date(c.periodEnd), method)
+    const interest = dailyAccrualInterest(dailyBalances, parseLocalDate(c.periodStart), parseLocalDate(c.periodEnd), method)
     balance = round2(balance + interest)
     rows.push({ date: c.date, label: 'Interest (daily accrual, credited monthly)', amount: interest, balanceAfter: balance })
     dailyBalances.length = 0

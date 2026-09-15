@@ -29,7 +29,7 @@ import { summarizeLoan as summarizeLedgerLoan, resolveLoanRateAndConvention } fr
 import { computeMinimumPaymentAmount, withLiveBalances } from './creditCards'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 
 function monthlyEquivalentCost(template: RecurringTemplate): number {
   switch (template.frequency) {
@@ -77,7 +77,7 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
         id: template.id,
         name: template.name,
         cost: monthlyEquivalentCost(template),
-        dueDay: new Date(template.anchorDate).getDate(),
+        dueDay: parseLocalDate(template.anchorDate).getDate(),
         location: template.location,
         payee: template.payee,
         payeeSharePercent: template.payeeSharePercent,

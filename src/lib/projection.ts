@@ -28,7 +28,7 @@ import { isLedgerTransaction, signedAmount, daysBetweenInclusive, buildDailyBala
 import type { AppDataV2, PayCycleConfig, Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 
 export type ProjectionHorizon = 'current_cycle' | 'three_cycles'
 
@@ -187,7 +187,7 @@ export function computeProjectionToDate(
   // Never generate anything before the opening balance date either, for
   // the same visibility-floor reason `stored` is filtered above.
   const cycleStart = resolveCycleBounds(data, personId, asOfDate).start
-  const rangeStart = cycleStart > new Date(payCycle.openingBalanceDate) ? cycleStart : new Date(payCycle.openingBalanceDate)
+  const rangeStart = cycleStart > parseLocalDate(payCycle.openingBalanceDate) ? cycleStart : parseLocalDate(payCycle.openingBalanceDate)
 
   const generated: Omit<Transaction, 'id'>[] = []
   for (const template of data.recurringTemplates.filter((t) => t.location === 'personal' && t.ownerId === personId)) {

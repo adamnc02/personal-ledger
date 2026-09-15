@@ -47,7 +47,7 @@ const FREQUENCY_LABELS: Record<RecurrenceFrequency, string> = {
   annual: 'Annual',
 }
 
-import { todayIso } from '../lib/date'
+import { todayIso, parseLocalDate } from '../lib/date'
 
 type BillPrefill = Partial<Omit<RecurringTemplate, 'id' | 'active'>>
 
@@ -190,7 +190,7 @@ export function Bills() {
   const visibleBills = data.recurringTemplates
     .slice()
     .filter((t) => locationFilter === 'all' || t.location === locationFilter)
-    .sort((a, b) => new Date(a.anchorDate).getDate() - new Date(b.anchorDate).getDate())
+    .sort((a, b) => parseLocalDate(a.anchorDate).getDate() - parseLocalDate(b.anchorDate).getDate())
 
   // Pots backlog item (2026-09 session) — the filter chip row only offers
   // a location that's actually in use anywhere, same "invisible until it

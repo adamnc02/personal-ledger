@@ -21,7 +21,7 @@ import { generateTransactionsForTemplate } from './schedule'
 import { generateLoanPaymentTransactions } from './ledgerLoans'
 import { dedupeKey, horizonCycles, previousCycles, THREE_CYCLES_AHEAD, type ProjectionHorizon } from './projection'
 import { jointTransferSignedAmount, transferTouchesJoint } from './transferLedger'
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 import { daysBetweenInclusive, buildDailyBalanceSeries, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries } from './runningBalance'
 import type { AppDataV2, Transaction } from '../types/ledger'
 
@@ -108,7 +108,7 @@ export function computeJointAccountProjection(
 
   // Visibility floor, same rule as a personal ledger's own opening
   // balance date (projection.ts) — nothing before it is shown or counted.
-  const openingDateObj = new Date(openingBalanceDate)
+  const openingDateObj = parseLocalDate(openingBalanceDate)
   const genStart = cycles[0].start > openingDateObj ? cycles[0].start : openingDateObj
 
   const stored = data.transactions.filter(
