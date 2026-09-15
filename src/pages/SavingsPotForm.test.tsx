@@ -17,6 +17,20 @@ import { SavingsPotForm } from './Salary'
 
 afterEach(() => cleanup())
 
+/**
+ * 2026-09-14 (Adam-specified): "Looks good, save" on the interest
+ * explanation no longer saves directly — it advances to a final "where
+ * does interest get paid" step with its OWN Save button, which is what
+ * actually commits. That step's button is also labelled "Save", so by
+ * the time it's clickable there are two "Save"-labelled buttons in the
+ * DOM (the form's own, still mounted behind the modal, and the step's) —
+ * always the LAST one.
+ */
+async function clickFinalSave(user: ReturnType<typeof userEvent.setup>) {
+  const saveButtons = screen.getAllByText('Save')
+  await user.click(saveButtons[saveButtons.length - 1])
+}
+
 describe('SavingsPotForm repro — 10000 becoming 9990 on save', () => {
   it('types field-by-field in top-to-bottom order and checks what actually gets saved', async () => {
     const user = userEvent.setup()
@@ -37,6 +51,7 @@ describe('SavingsPotForm repro — 10000 becoming 9990 on save', () => {
 
     await user.click(screen.getByText('Save'))
     await user.click(screen.getByText('Looks good, save'))
+    await clickFinalSave(user)
 
     expect(onSave).toHaveBeenCalledTimes(1)
     const [, fields] = onSave.mock.calls[0]
@@ -59,6 +74,7 @@ describe('SavingsPotForm repro — 10000 becoming 9990 on save', () => {
 
     await user.click(screen.getByText('Save'))
     await user.click(screen.getByText('Looks good, save'))
+    await clickFinalSave(user)
 
     const [, fields] = onSave.mock.calls[0]
     expect(fields.targetAmount).toBe(10000)
@@ -81,6 +97,7 @@ describe('SavingsPotForm repro — 10000 becoming 9990 on save', () => {
 
     await user.click(screen.getByText('Save'))
     await user.click(screen.getByText('Looks good, save'))
+    await clickFinalSave(user)
 
     const [, fields] = onSave.mock.calls[0]
     expect(fields.targetAmount).toBe(10000)
