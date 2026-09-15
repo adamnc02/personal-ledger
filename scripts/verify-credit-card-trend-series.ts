@@ -50,13 +50,34 @@ const data: AppDataV2 = {
 
 const asOfDate = new Date(2026, 8, 15)
 const series = buildCreditCardTrendSeries(data, card, 'this_cycle', asOfDate)
-check('days span the current calendar-month cycle', [series.days[0], series.days[series.days.length - 1]], ['2026-09-01', '2026-09-30'])
+// 2026-09-16 (Adam-reported): this window is the CARD's own due-date
+// period (paymentDayOfMonth 28, no statementEndDay so windowEnd === the
+// due date itself) — Aug 29 (the day after last month's 28th due date)
+// through Sep 28 — NOT the household's calendar-month pay cycle. Was
+// previously (wrongly) asserting the pay-cycle window; see this file's
+// own git history for the pre-fix expectation.
+check("days span this card's OWN due-date period (paymentDayOfMonth 28), not the household pay cycle", [series.days[0], series.days[series.days.length - 1]], ['2026-08-29', '2026-09-28'])
 check('Owed balance before any activity = the stated anchor (200)', series.balance[0].clearedBalance, 200)
 check('After the £50 spend (6 Sep), owed balance = 250', series.balance.find((b) => b.date === '2026-09-06')!.clearedBalance, 250)
 check('After the £30 payment (10 Sep), owed balance = 220', series.balance.find((b) => b.date === '2026-09-10')!.clearedBalance, 220)
 check('Balance chart carries the same figure in both cleared/projected fields (a card\'s owed balance is one continuous figure, not cleared-vs-pending)', series.balance.find((b) => b.date === '2026-09-10')!.projectedBalance, 220)
 check('Spend-to-date by 6 Sep counts only the credit_card_spend (£50), not the payment', series.spend.find((s) => s.date === '2026-09-06')!.spendToDate, 50)
 check('Spend-to-date does not increase again on the payment date (10 Sep)', series.spend.find((s) => s.date === '2026-09-10')!.spendToDate, 50)
+
+// 2026-09-16 — a card WITH a configured statement window: the window
+// (not the due date, and not the pay cycle) is what should bound the
+// trend chart, same as CreditCardDetail's own ledger already uses
+// (creditCardCyclePeriods). paymentDayOfMonth 14, statementEndDay 18 —
+// per statementCloseDateForPaymentDate, a payment due 14 Oct closes its
+// statement on 18 Sep, and the PRIOR period's close (18 Aug) + 1 day
+// (19 Aug) is where this period's own window starts.
+const cardWithStatement: CreditCard = { ...card, id: 'card-2', statementStartDay: 19, statementEndDay: 18 }
+const seriesWithStatement = buildCreditCardTrendSeries({ ...data, creditCards: [cardWithStatement] }, cardWithStatement, 'this_cycle', asOfDate)
+check(
+  "a card WITH a statement window uses ITS OWN statement close dates, not the due date and not the pay cycle",
+  [seriesWithStatement.days[0], seriesWithStatement.days[seriesWithStatement.days.length - 1]],
+  ['2026-08-19', '2026-09-18'],
+)
 
 if (failures > 0) {
   console.log(`\n${failures} check(s) FAILED.`)

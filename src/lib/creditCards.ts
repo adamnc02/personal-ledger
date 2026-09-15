@@ -21,7 +21,6 @@ import { nanoid } from 'nanoid'
 import { addDays } from 'date-fns'
 import { CREDIT_CARD_CATEGORY_ID, SHARED_CARD_COLORS, type AppDataV2, type CreditCard, type CreditCardLumpPayment, type Transaction } from '../types/ledger'
 import { daysBetweenInclusive, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries, type DailyBalancePoint } from './runningBalance'
-import { resolveCycleBounds } from './pensionLedger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 import { toLocalIsoDate as toIso } from './date'
@@ -915,34 +914,8 @@ export function pickNextSharedCardColor(data: Pick<AppDataV2, 'creditCards' | 'p
   return SHARED_CARD_COLORS[existingCount % SHARED_CARD_COLORS.length]
 }
 
-// ── Trends feature (2026-09-15 build) ──────────────────────────────────
-// Deliberately a LOCAL, near-copy of projection.ts's horizonCycles/
-// previousCycles rather than importing them — projection.ts already
-// imports generateMinimumPaymentTransactions FROM this file, so importing
-// projection.ts back here would create a circular module dependency.
-// Both tiny helpers are pure calendar/payday arithmetic via
-// resolveCycleBounds (pensionLedger.ts), same underlying primitive
-// projection.ts's own versions use, so they can't disagree with the real
-// ones — just a separate copy to keep the import graph acyclic.
+// ── Trends feature (2026-09-15 build; date-source fixed 2026-09-16) ─────
 const CC_THREE_CYCLES_AHEAD = 3
-
-function creditCardHorizonCycles(data: AppDataV2, personId: string, aheadCount: number, asOfDate: Date): { start: Date; end: Date }[] {
-  const cycles = [resolveCycleBounds(data, personId, asOfDate)]
-  for (let i = 0; i < aheadCount; i++) cycles.push(resolveCycleBounds(data, personId, addDays(cycles[cycles.length - 1].end, 1)))
-  return cycles
-}
-
-function creditCardPreviousCycles(data: AppDataV2, personId: string, n: number, asOfDate: Date): { start: Date; end: Date }[] {
-  const current = resolveCycleBounds(data, personId, asOfDate)
-  const cycles: { start: Date; end: Date }[] = []
-  let cursor = current.start
-  for (let i = 0; i < n; i++) {
-    const prev = resolveCycleBounds(data, personId, addDays(cursor, -1))
-    cycles.push(prev)
-    cursor = prev.start
-  }
-  return cycles
-}
 
 function isCardSpend(cardId: string) {
   return (t: Transaction) => t.type === 'credit_card_spend' && t.creditCardId === cardId
@@ -974,11 +947,16 @@ function isCardSpend(cardId: string) {
  * figure (no further growth assumed) rather than a fabricated rate.
  */
 export function buildCreditCardTrendSeries(data: AppDataV2, card: CreditCard, granularity: BalanceSpendGranularity, asOfDate: Date = new Date()): BalanceSpendTrendSeries {
-  const personId = card.ownerId
   const aheadCount = granularity === 'this_cycle' ? 0 : CC_THREE_CYCLES_AHEAD
-  const cycles = creditCardHorizonCycles(data, personId, aheadCount, asOfDate)
-  const periodStart = cycles[0].start
-  const periodEnd = cycles[cycles.length - 1].end
+  // 2026-09-16 (Adam-reported): this used to walk the household's pay
+  // cycle (creditCardHorizonCycles/creditCardPreviousCycles, since
+  // removed) — the exact mismatch creditCardCyclePeriods already exists
+  // to prevent for CreditCardDetail's own ledger. Now sourced from the
+  // SAME statement/due-date periods the ledger itself uses, so "This
+  // Cycle"/"Next 3 Cycles" here line up with what the card page shows.
+  const periods = creditCardCyclePeriods(card, asOfDate, aheadCount + 1)
+  const periodStart = periods[0].windowStart
+  const periodEnd = periods[periods.length - 1].windowEnd
   const days = daysBetweenInclusive(periodStart, periodEnd)
   const todayIso = toIso(asOfDate)
 
@@ -994,8 +972,8 @@ export function buildCreditCardTrendSeries(data: AppDataV2, card: CreditCard, gr
   const spend = buildDailySpendSeries(activity, days, isCardSpend(card.id))
 
   const cyclesBack = aheadCount === 0 ? 1 : CC_THREE_CYCLES_AHEAD + 1
-  const prevCyclesAsc = [...creditCardPreviousCycles(data, personId, cyclesBack, asOfDate)].reverse()
-  const prevDays = daysBetweenInclusive(prevCyclesAsc[0].start, prevCyclesAsc[prevCyclesAsc.length - 1].end)
+  const prevPeriodsAsc = [...creditCardPreviousCyclePeriods(card, asOfDate, cyclesBack)].reverse()
+  const prevDays = daysBetweenInclusive(prevPeriodsAsc[0].windowStart, prevPeriodsAsc[prevPeriodsAsc.length - 1].windowEnd)
   const previousPeriodSpend = buildDailySpendSeries(data.transactions, prevDays, isCardSpend(card.id))
 
   return { granularity, days, todayIso, balance, spend, previousPeriodSpend }
@@ -1223,6 +1201,15 @@ function creditCardDueDateForMonth(card: CreditCard, monthCursor: Date): Date {
  * THREE_CYCLES_AHEAD from projection.ts, which itself imports FROM this
  * file (generateMinimumPaymentTransactions) and would create a cycle.
  */
+/** Shared by `creditCardCyclePeriods`/`creditCardPreviousCyclePeriods` — one due date in, its full period (window bounds + the due date itself) out. Factored out so the 2026-09-16 backward-walking variant (for the Trends chart's previous-period comparison) can't drift from this forward-walking one's own window math. */
+function creditCardPeriodForDueDate(card: CreditCard, due: Date): { windowStart: Date; windowEnd: Date; dueDate: Date } {
+  const prevMonthCursor = new Date(due.getFullYear(), due.getMonth() - 1, 1)
+  const prevDue = creditCardDueDateForMonth(card, prevMonthCursor)
+  const windowEnd = card.statementEndDay != null ? statementCloseDateForPaymentDate(card, due) : due
+  const windowStart = card.statementEndDay != null ? addDays(statementCloseDateForPaymentDate(card, prevDue), 1) : addDays(prevDue, 1)
+  return { windowStart, windowEnd, dueDate: due }
+}
+
 export function creditCardCyclePeriods(card: CreditCard, asOfDate: Date, count: number): { windowStart: Date; windowEnd: Date; dueDate: Date }[] {
   const asOfIso = toIso(asOfDate)
 
@@ -1242,13 +1229,28 @@ export function creditCardCyclePeriods(card: CreditCard, asOfDate: Date, count: 
     dueDates.push(creditCardDueDateForMonth(card, cursor))
   }
 
-  return dueDates.map((due) => {
-    const prevMonthCursor = new Date(due.getFullYear(), due.getMonth() - 1, 1)
-    const prevDue = creditCardDueDateForMonth(card, prevMonthCursor)
-    const windowEnd = card.statementEndDay != null ? statementCloseDateForPaymentDate(card, due) : due
-    const windowStart = card.statementEndDay != null ? addDays(statementCloseDateForPaymentDate(card, prevDue), 1) : addDays(prevDue, 1)
-    return { windowStart, windowEnd, dueDate: due }
-  })
+  return dueDates.map((due) => creditCardPeriodForDueDate(card, due))
+}
+
+/**
+ * 2026-09-16 (Adam-reported — the Trends chart used the household's pay
+ * cycle instead of this card's own statement/due-date periods, the exact
+ * same bug `creditCardCyclePeriods` was built to prevent for the ledger
+ * itself). The backward-walking counterpart to `creditCardCyclePeriods` —
+ * `n` periods immediately BEFORE the current one, most-recent-first (same
+ * convention `creditCardPreviousCycles`/`previousCycles` already use for
+ * the pay-cycle case), for the Spend view's previous-period comparison
+ * line.
+ */
+export function creditCardPreviousCyclePeriods(card: CreditCard, asOfDate: Date, n: number): { windowStart: Date; windowEnd: Date; dueDate: Date }[] {
+  const [current] = creditCardCyclePeriods(card, asOfDate, 1)
+  const periods: { windowStart: Date; windowEnd: Date; dueDate: Date }[] = []
+  let cursor = new Date(current.dueDate.getFullYear(), current.dueDate.getMonth(), 1)
+  for (let i = 0; i < n; i++) {
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1)
+    periods.push(creditCardPeriodForDueDate(card, creditCardDueDateForMonth(card, cursor)))
+  }
+  return periods
 }
 
 export interface CreditCardCycleSection {
