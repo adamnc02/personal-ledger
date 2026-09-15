@@ -816,12 +816,26 @@ function EditEntryForm({
     PERSONAL_LOCATION_OPTION
   const [locationOption, setLocationOption] = useState<TransferLocationOption>(initialLocationOption)
 
+  // 2026-09-16 (Adam-reported — same fix as ExpenseForm's own Location
+  // step, see that component's comment on why Credit Card is kept local
+  // rather than added to TransferLocationOption/buildTransferLocationOptions).
+  // "Editing just loads the form, no flow" — Adam's own words — so this is
+  // a second dropdown that appears once Credit Card is chosen as the
+  // Location, not a second wizard step.
+  const initialIsCreditCardLocation = transaction.paymentMethod === 'card' && !!transaction.creditCardId
+  const [isCreditCardLocation, setIsCreditCardLocation] = useState(initialIsCreditCardLocation)
+  const [creditCardId, setCreditCardId] = useState<string | undefined>(transaction.creditCardId)
+  const creditCardLocationOffered = canEditLocation && transaction.type === 'expense' && data.creditCards.length > 0
+
   const amountNumber = Number(amount)
-  const canSave = name.trim() && amountNumber > 0 && date && categoryId
+  const canSave = name.trim() && amountNumber > 0 && date && categoryId && (!isCreditCardLocation || !!creditCardId)
   // credit_card_spend is always paid by card, by definition — don't offer
   // to change that here (changing the linked card itself isn't supported
   // from this form; delete and re-log against the right card instead).
-  const paymentMethodEditable = transaction.type !== 'credit_card_spend'
+  // Same reasoning applies once Credit Card is picked as the Location
+  // here — the Payment method pills would just be asking the same thing
+  // a second time, and possibly contradicting it.
+  const paymentMethodEditable = transaction.type !== 'credit_card_spend' && !isCreditCardLocation
   // UAT follow-up (2026-09-05, Adam-reported): dims Save when nothing's
   // actually changed, same rule every other edit panel in the app now
   // follows.
@@ -831,6 +845,8 @@ function EditEntryForm({
     date !== transaction.date ||
     categoryId !== transaction.categoryId ||
     (paymentMethodEditable && paymentMethod !== transaction.paymentMethod) ||
+    isCreditCardLocation !== initialIsCreditCardLocation ||
+    (isCreditCardLocation && creditCardId !== transaction.creditCardId) ||
     (canEditLocation && locationOption.key !== initialLocationOption.key)
 
   return (
@@ -846,12 +862,17 @@ function EditEntryForm({
           dropdown here, same as every other field on this form, not the
           picker-first LocationStep overlay ExpenseForm's creation wizard
           uses. Ordered above Payment method per Adam's own follow-up. */}
-      {canEditLocation && nonPersonalLocationOptions.length > 0 && (
+      {canEditLocation && (nonPersonalLocationOptions.length > 0 || creditCardLocationOffered) && (
         <label className="flex flex-col gap-1">
           <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
           <select
-            value={locationOption.key}
+            value={isCreditCardLocation ? 'credit_card' : locationOption.key}
             onChange={(e) => {
+              if (e.target.value === 'credit_card') {
+                setIsCreditCardLocation(true)
+                return
+              }
+              setIsCreditCardLocation(false)
               const next = [PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions].find((o) => o.key === e.target.value)
               if (next) setLocationOption(next)
             }}
@@ -860,6 +881,30 @@ function EditEntryForm({
             {[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions].map((o) => (
               <option key={o.key} value={o.key} style={{ color: '#000' }}>
                 {o.label}
+              </option>
+            ))}
+            {creditCardLocationOffered && (
+              <option value="credit_card" style={{ color: '#000' }}>
+                Credit Card
+              </option>
+            )}
+          </select>
+        </label>
+      )}
+      {isCreditCardLocation && (
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-[var(--color-ink-muted)]">Which card</span>
+          <select
+            value={creditCardId ?? ''}
+            onChange={(e) => setCreditCardId(e.target.value)}
+            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+          >
+            <option value="" disabled style={{ color: '#000' }}>
+              Choose a card
+            </option>
+            {data.creditCards.map((c) => (
+              <option key={c.id} value={c.id} style={{ color: '#000' }}>
+                {c.name}
               </option>
             ))}
           </select>
@@ -892,12 +937,13 @@ function EditEntryForm({
             amount: amountNumber,
             date,
             categoryId,
-            paymentMethod: paymentMethodEditable ? paymentMethod : transaction.paymentMethod,
+            paymentMethod: isCreditCardLocation ? 'card' : paymentMethodEditable ? paymentMethod : transaction.paymentMethod,
+            creditCardId: isCreditCardLocation ? creditCardId : undefined,
             note: name.trim(),
             ...(canEditLocation
               ? {
-                  location: (locationOption.location.type === 'joint' || locationOption.location.type === 'pot' ? locationOption.location.type : 'personal') as BillLocation,
-                  potId: locationOption.location.type === 'pot' ? locationOption.location.potId : undefined,
+                  location: (!isCreditCardLocation && (locationOption.location.type === 'joint' || locationOption.location.type === 'pot') ? locationOption.location.type : 'personal') as BillLocation,
+                  potId: !isCreditCardLocation && locationOption.location.type === 'pot' ? locationOption.location.potId : undefined,
                 }
               : {}),
           })
@@ -977,6 +1023,28 @@ function ExpenseForm({
   const nonPersonalLocationOptions = pickableLocationOptions.filter((o) => o.location.type !== 'personal')
   const [locationOption, setLocationOption] = useState<TransferLocationOption>(PERSONAL_LOCATION_OPTION)
 
+  // 2026-09-16 (Adam-reported — "location" bug): Credit Card is a genuine
+  // fourth location choice ("where did this money come from") alongside
+  // Personal/Joint/Pot, but it isn't a TransferLocationType (transfers
+  // don't have a card as an endpoint — see transferLedger.ts) so it can't
+  // just be added to buildTransferLocationOptions/TransferLocationOption
+  // without touching the shared Transfer wizard too, which this bug
+  // explicitly does NOT concern ("This ONLY affects transactions"). Kept
+  // entirely local to this component instead: picking "Credit Card" here
+  // reuses the exact same underlying representation the payment_method
+  // step's own "Credit Card" → "Which card" path already produces
+  // (paymentMethod: 'card', creditCardId set, location left as personal)
+  // — just reachable earlier, from Location, with the later Payment
+  // method step skipped once a card's already been picked this way (it'd
+  // otherwise ask the same question twice).
+  const [creditCardId, setCreditCardId] = useState<string | undefined>(undefined)
+  const [skipPaymentMethodStep, setSkipPaymentMethodStep] = useState(false)
+  // Which step "Which card" continues to once a card is tapped — Location
+  // (still early in the flow, continue to Date next) or Payment method
+  // (the pre-existing path, save immediately, unchanged).
+  const [cardStepOrigin, setCardStepOrigin] = useState<'location' | 'payment_method'>('payment_method')
+  const creditCardLocationOffered = type === 'expense' && data.creditCards.length > 0
+
   const amountNumber = Number(amount)
 
   // The payment-method step's own tap targets each commit and save
@@ -1030,7 +1098,7 @@ function ExpenseForm({
         <EditField key="expense-amount" label="Amount (£)" type="number" value={amount} onChange={setAmount} />
         <FormButtonRow
           onCancel={onCancel}
-          onSave={() => setStep(nonPersonalLocationOptions.length > 0 ? 'location' : 'date')}
+          onSave={() => setStep(nonPersonalLocationOptions.length > 0 || creditCardLocationOffered ? 'location' : 'date')}
           saveLabel="Continue"
           saveDisabled={!(amountNumber > 0)}
         />
@@ -1039,16 +1107,47 @@ function ExpenseForm({
   }
 
   if (step === 'location') {
+    // Not the shared LocationStep component here — Credit Card needs to
+    // sit in this exact same pill list (not a separate group below it),
+    // and it isn't a TransferLocationOption (see this component's own
+    // comment on why), so this renders LocationStep's own markup locally
+    // with one extra row appended.
     return (
-      <LocationStep
-        title="Location"
-        options={[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions]}
-        onPick={(o) => {
-          setLocationOption(o)
-          setStep('date')
-        }}
-        onCancel={onCancel}
-      />
+      <div className="rounded-2xl p-4 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-semibold text-[var(--color-ink-muted)]">Location</span>
+          <button onClick={onCancel} className="text-[var(--color-ink-faint)]">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          {[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions].map((o) => (
+            <button
+              key={o.key}
+              onClick={() => {
+                setLocationOption(o)
+                setStep('date')
+              }}
+              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+              style={{ background: 'var(--color-surface)' }}
+            >
+              {o.label}
+            </button>
+          ))}
+          {creditCardLocationOffered && (
+            <button
+              onClick={() => {
+                setCardStepOrigin('location')
+                setStep('card')
+              }}
+              className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
+              style={{ background: 'var(--color-surface)' }}
+            >
+              Credit Card
+            </button>
+          )}
+        </div>
+      </div>
     )
   }
 
@@ -1081,7 +1180,12 @@ function ExpenseForm({
           </button>
         </div>
         <CategoryPicker categories={visibleCategoriesFor(data)} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
-        <FormButtonRow onCancel={onCancel} onSave={() => setStep('payment_method')} saveLabel="Continue" saveDisabled={!categoryId} />
+        <FormButtonRow
+          onCancel={onCancel}
+          onSave={() => (skipPaymentMethodStep ? commitSave(type, 'card', creditCardId) : setStep('payment_method'))}
+          saveLabel="Continue"
+          saveDisabled={!categoryId}
+        />
       </div>
     )
   }
@@ -1099,7 +1203,20 @@ function ExpenseForm({
           {data.creditCards.map((c) => (
             <button
               key={c.id}
-              onClick={() => commitSave(type, 'card', c.id)}
+              onClick={() => {
+                // Reached from Location: the flow isn't done yet (Date/Name/Category
+                // still to come) — stash the card and continue, skipping the later
+                // Payment method step since it'd otherwise just ask the same thing
+                // again. Reached from Payment method (the pre-existing path): every
+                // other field is already answered, so save immediately, unchanged.
+                if (cardStepOrigin === 'location') {
+                  setCreditCardId(c.id)
+                  setSkipPaymentMethodStep(true)
+                  setStep('date')
+                } else {
+                  commitSave(type, 'card', c.id)
+                }
+              }}
               className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
               style={{ background: 'var(--color-surface)' }}
             >
@@ -1143,9 +1260,12 @@ function ExpenseForm({
             {PAYMENT_METHOD_LABELS[pm]}
           </button>
         ))}
-        {type === 'expense' && data.creditCards.length > 0 && (
+        {creditCardLocationOffered && (
           <button
-            onClick={() => setStep('card')}
+            onClick={() => {
+              setCardStepOrigin('payment_method')
+              setStep('card')
+            }}
             className="w-full text-left px-3 py-2 rounded-xl text-sm text-[var(--color-ink)]"
             style={{ background: 'var(--color-surface)' }}
           >
