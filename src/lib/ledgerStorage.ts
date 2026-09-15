@@ -131,14 +131,40 @@ export function saveLedgerData(data: AppDataV2): void {
   }
 }
 
-export function downloadLedgerBackup(data: AppDataV2): void {
+/**
+ * A plain `<a download>` click is what iOS Safari renders as its Quick
+ * Look preview screen (file icon, "Open in X" / "More..." only) rather
+ * than the native Share Sheet — reported 2026-09-15 (Adam: "I'd rather it
+ * take me straight to [the Share Sheet]"). `navigator.share` with a real
+ * `File` goes straight to the Share Sheet (AirDrop, Messages, Mail, Save
+ * to Files, etc.) on platforms that support file sharing. Falls back to
+ * the original Blob+anchor download wherever that isn't available
+ * (desktop browsers, older iOS/Android) — same resulting file either way.
+ */
+export async function downloadLedgerBackup(data: AppDataV2): Promise<void> {
   const json = JSON.stringify(data, null, 2)
   const date = toLocalIsoDate(new Date())
+  const filename = `finance-ledger-backup-${date}.json`
   const blob = new Blob([json], { type: 'application/json' })
+  const file = new File([blob], filename, { type: 'application/json' })
+
+  const nav = navigator as Navigator & { canShare?: (data?: ShareData) => boolean }
+  if (nav.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: filename })
+      return
+    } catch (err) {
+      // AbortError = the user dismissed the Share Sheet themselves — that's
+      // a normal cancel, not a failure, so don't also pop a download prompt.
+      if (err instanceof Error && err.name === 'AbortError') return
+      // Any other failure: fall through to the plain download below.
+    }
+  }
+
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `finance-ledger-backup-${date}.json`
+  a.download = filename
   a.click()
   URL.revokeObjectURL(url)
 }
