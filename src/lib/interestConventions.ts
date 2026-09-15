@@ -70,6 +70,7 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 import { differenceInCalendarDays } from 'date-fns'
+import { parseLocalDate } from './date'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 
@@ -234,11 +235,11 @@ export const dailySimpleConvention: InterestConvention = {
     // coefficient c_i = balance_i × days_i / 365), then convert the
     // fitted APR to the shared monthly figure at the end.
     let balance = startingBalance
-    let prevDate = new Date(advanceDateIso)
+    let prevDate = parseLocalDate(advanceDateIso)
     let num = 0
     let den = 0
     for (const line of lines) {
-      const periodEnd = new Date(line.date)
+      const periodEnd = parseLocalDate(line.date)
       const days = differenceInCalendarDays(periodEnd, prevDate)
       const c = (balance * days) / 365
       num += c * line.interest
@@ -319,11 +320,11 @@ export interface StatementLine {
  */
 export function totalAbsoluteError(convention: InterestConvention, monthlyRate: number, advanceDateIso: string, startingBalance: number, lines: StatementLine[]): number {
   let balance = startingBalance
-  let prevDate = new Date(advanceDateIso)
+  let prevDate = parseLocalDate(advanceDateIso)
   let totalError = 0
 
   for (const line of lines) {
-    const periodEnd = new Date(line.date)
+    const periodEnd = parseLocalDate(line.date)
     const predicted = convention.interestForPeriod(balance, prevDate, periodEnd, monthlyRate, startingBalance)
     totalError += Math.abs(round2(predicted - line.interest))
     balance = round2(balance - line.capital)

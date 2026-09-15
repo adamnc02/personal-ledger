@@ -8,7 +8,7 @@
 // pensionLedger.ts's walkPensionOccurrences closely on purpose.
 
 import { addDays, addMonths, addYears, startOfWeek } from 'date-fns'
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 import { periodThresholdsFor, type PayFrequency } from './tax'
 import { aerCreditedInterest, dailyAccrualInterest, walkCreditingDates, walkMonthlyCreditingDates } from './savingsInterest'
 import { generateTransactionsForTemplate } from './schedule'
@@ -93,7 +93,7 @@ function walkDepositOccurrences(pot: SavingsPot, rangeStart: Date, rangeEnd: Dat
   if (rangeEnd < rangeStart) return []
 
   const anchorDay = pot.recurringDepositDayOfMonth
-  let cursor = clampToAnchorDay(new Date(pot.recurringDepositStartDate), anchorDay)
+  let cursor = clampToAnchorDay(parseLocalDate(pot.recurringDepositStartDate), anchorDay)
   let iterations = 0
   while (cursor < rangeStart && iterations < MAX_OCCURRENCES) {
     cursor = clampToAnchorDay(addMonths(cursor, 1), anchorDay)
@@ -202,7 +202,7 @@ export function scheduledDepositDates(pot: SavingsPot, rangeStart: Date, rangeEn
   if (rangeEnd < rangeStart) return []
 
   const anchorDay = pot.recurringDepositDayOfMonth
-  let cursor = clampToAnchorDay(new Date(pot.recurringDepositStartDate), anchorDay)
+  let cursor = clampToAnchorDay(parseLocalDate(pot.recurringDepositStartDate), anchorDay)
   let iterations = 0
   while (cursor < rangeStart && iterations < MAX_OCCURRENCES) {
     cursor = clampToAnchorDay(addMonths(cursor, 1), anchorDay)
@@ -390,7 +390,7 @@ export function generateSavingsInterestTransactions(pot: SavingsPot, realActivit
     // dates >= rangeStart are actually returned to the caller below.
     for (const c of walkCreditingDates(pot.openingDate, method.creditingFrequency, rangeEnd)) {
       const override = pot.interestOverrides?.find((o) => o.date === c.date)
-      const balanceAtStart = savingsPotBalanceAsOf(pot, activityPlusGenerated(), new Date(c.periodStart))
+      const balanceAtStart = savingsPotBalanceAsOf(pot, activityPlusGenerated(), parseLocalDate(c.periodStart))
       const amount = override?.amount ?? aerCreditedInterest(balanceAtStart, method)
       const row: Omit<Transaction, 'id'> = {
         date: c.date,
@@ -418,8 +418,8 @@ export function generateSavingsInterestTransactions(pot: SavingsPot, realActivit
     if (override) {
       amount = override.amount
     } else {
-      const dailyBalances = dailyBalancesFor(pot, activityPlusGenerated(), new Date(c.periodStart), new Date(c.periodEnd))
-      amount = dailyAccrualInterest(dailyBalances, new Date(c.periodStart), new Date(c.periodEnd), method)
+      const dailyBalances = dailyBalancesFor(pot, activityPlusGenerated(), parseLocalDate(c.periodStart), parseLocalDate(c.periodEnd))
+      amount = dailyAccrualInterest(dailyBalances, parseLocalDate(c.periodStart), parseLocalDate(c.periodEnd), method)
     }
     const row: Omit<Transaction, 'id'> = {
       date: c.date,
@@ -475,7 +475,7 @@ function dailyBalancesFor(pot: SavingsPot, activity: Transaction[], periodStart:
 //   2+ months old → last 2 + next 12 (steady state)
 
 export function schedulePreviewWindow(pot: SavingsPot, asOfDate: Date): { start: Date; end: Date } {
-  const openingDate = new Date(pot.openingDate)
+  const openingDate = parseLocalDate(pot.openingDate)
   const monthsOld = Math.max(0, (asOfDate.getFullYear() - openingDate.getFullYear()) * 12 + (asOfDate.getMonth() - openingDate.getMonth()))
   const monthsBack = Math.min(2, monthsOld)
   const start = new Date(Math.max(addMonths(asOfDate, -monthsBack).getTime(), openingDate.getTime()))
@@ -626,12 +626,12 @@ export function buildSavingsPotTrendSeries(
 
   if (granularity === 'this_cycle') {
     const { start, end } = savingsPotCycleBounds(data, personId, asOfDate)
-    const rangeStart = new Date(Math.max(start.getTime(), new Date(pot.openingDate).getTime()))
+    const rangeStart = new Date(Math.max(start.getTime(), parseLocalDate(pot.openingDate).getTime()))
     const days = daysBetweenInclusive(rangeStart, end)
     const activity = savingsPotActivityForRange(pot, stored, rangeStart, end, transferTemplates, payCycle)
     let prevBalance = savingsPotBalanceAsOf(pot, activity, addDays(rangeStart, -1))
     const points: SavingsPotPillPoint[] = days.map((date) => {
-      const endBalance = savingsPotBalanceAsOf(pot, activity, new Date(date))
+      const endBalance = savingsPotBalanceAsOf(pot, activity, parseLocalDate(date))
       const netChange = round2(endBalance - prevBalance)
       prevBalance = endBalance
       return { periodStart: date, periodEnd: date, endBalance, netChange, axisLabel: shortDateLabel(date), tooltipLabel: shortDateLabel(date) }
@@ -643,7 +643,7 @@ export function buildSavingsPotTrendSeries(
     const current = savingsPotCycleBounds(data, personId, asOfDate)
     let cursor = current.start
     for (let i = 0; i < 5; i++) cursor = savingsPotCycleBounds(data, personId, addDays(cursor, -1)).start
-    const rangeStart = new Date(Math.max(cursor.getTime(), new Date(pot.openingDate).getTime()))
+    const rangeStart = new Date(Math.max(cursor.getTime(), parseLocalDate(pot.openingDate).getTime()))
     const rangeEnd = current.end
     const activity = savingsPotActivityForRange(pot, stored, rangeStart, rangeEnd, transferTemplates, payCycle)
 
@@ -678,7 +678,7 @@ export function buildSavingsPotTrendSeries(
   const cyclesDesc: { start: Date; end: Date }[] = [savingsPotCycleBounds(data, personId, asOfDate)]
   for (let i = 0; i < 11; i++) cyclesDesc.push(savingsPotCycleBounds(data, personId, addDays(cyclesDesc[cyclesDesc.length - 1].start, -1)))
   const cyclesAsc = [...cyclesDesc].reverse() // oldest..current
-  const rangeStart = new Date(Math.max(cyclesAsc[0].start.getTime(), new Date(pot.openingDate).getTime()))
+  const rangeStart = new Date(Math.max(cyclesAsc[0].start.getTime(), parseLocalDate(pot.openingDate).getTime()))
   const rangeEnd = cyclesAsc[cyclesAsc.length - 1].end
   const activity = savingsPotActivityForRange(pot, stored, rangeStart, rangeEnd, transferTemplates, payCycle)
   let prevBalance = savingsPotBalanceAsOf(pot, activity, addDays(cyclesAsc[0].start, -1))
@@ -707,7 +707,7 @@ const PAY_FREQUENCY_LABELS: Record<PayFrequency, string> = { monthly: 'month', f
 /** Info-only label content for targetDate: how much to save per pay period (the pot owner's currently-active salary frequency) to hit targetAmount... or a plain remaining-balance figure if no targetAmount is set (targetDate can exist alone). */
 export function amountNeededPerPayPeriod(pot: SavingsPot, currentBalance: number, payFrequency: PayFrequency, asOfDate: Date = new Date()): { amountPerPeriod: number; periodLabel: string } | null {
   if (!pot.targetDate) return null
-  const target = new Date(pot.targetDate)
+  const target = parseLocalDate(pot.targetDate)
   if (target <= asOfDate) return { amountPerPeriod: Math.max(0, round2((pot.targetAmount ?? 0) - currentBalance)), periodLabel: PAY_FREQUENCY_LABELS[payFrequency] }
 
   const periodsPerYear = periodThresholdsFor(payFrequency).periodsPerYear

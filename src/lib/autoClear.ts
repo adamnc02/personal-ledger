@@ -35,7 +35,7 @@ import { generateSavingsDepositTransactions, generateSavingsInterestTransactions
 import { generatePotDepositTransactions, generatePotOutgoingTransactions, resolvePotDepositOccurrenceAmount } from './potLedger'
 import { dedupeKey } from './projection'
 import { applyClearSideEffects } from './clearTransaction'
-import { toLocalIsoDate } from './date'
+import { toLocalIsoDate, parseLocalDate } from './date'
 import type { AppDataV2, Transaction } from '../types/ledger'
 
 /**
@@ -339,7 +339,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
     const payCycle = result.payCycles.find((pc) => pc.personId === person.id)
     if (!payCycle) continue
 
-    const rangeStart = new Date(payCycle.openingBalanceDate)
+    const rangeStart = parseLocalDate(payCycle.openingBalanceDate)
     if (rangeStart > asOf) continue // nothing before the visibility floor is ever due
 
     const candidates: Omit<Transaction, 'id'>[] = []
@@ -463,7 +463,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
   const nonPersonalTransferTemplates = result.recurringTemplates.filter((t) => t.kind === 'transfer' && t.active && t.location !== 'personal')
   if (nonPersonalTransferTemplates.length > 0) {
     const primaryPayCycle = result.payCycles.find((pc) => pc.personId === result.primaryPersonId)
-    const transferRangeStart = primaryPayCycle ? new Date(primaryPayCycle.openingBalanceDate) : new Date(0)
+    const transferRangeStart = primaryPayCycle ? parseLocalDate(primaryPayCycle.openingBalanceDate) : new Date(0)
     if (transferRangeStart <= asOf) {
       for (const template of nonPersonalTransferTemplates) {
         const candidates = generateTransactionsForTemplate(template, transferRangeStart, asOf, primaryPayCycle)
@@ -504,7 +504,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
     const jointBillTemplates = result.recurringTemplates.filter((t) => t.location === 'joint')
     const jointLoans = result.loans.filter((l) => l.location === 'joint' && l.active)
     if (jointBillTemplates.length > 0 || jointLoans.length > 0) {
-      const jointRangeStart = new Date(result.jointAccount.openingBalanceDate)
+      const jointRangeStart = parseLocalDate(result.jointAccount.openingBalanceDate)
       if (jointRangeStart <= asOf) {
         const jointCandidates: Omit<Transaction, 'id'>[] = []
         for (const template of jointBillTemplates) {

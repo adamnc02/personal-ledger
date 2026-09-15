@@ -78,7 +78,7 @@ const STUDENT_LOAN_LABELS: Record<StudentLoanPlan, string> = {
 }
 
 import { addDays, addMonths } from 'date-fns'
-import { todayIso, toLocalIsoDate } from '../lib/date'
+import { todayIso, toLocalIsoDate, parseLocalDate } from '../lib/date'
 
 function emptySalaryFields() {
   return {
@@ -2744,7 +2744,7 @@ export function Salary() {
                                 payCycle={payCycle}
                                 onSave={(fields, payCycleFields) => {
                                   const latest = latestSalarySnapshot(person)
-                                  const effectiveFrom = latest?.endDate ? toLocalIsoDate(addDays(new Date(latest.endDate), 1)) : todayIso()
+                                  const effectiveFrom = latest?.endDate ? toLocalIsoDate(addDays(parseLocalDate(latest.endDate), 1)) : todayIso()
                                   addSalarySnapshot(person.id, { ...fields, effectiveFrom })
                                   updatePayCycle(person.id, payCycleFields)
                                   setStartingNewJobFor(null)

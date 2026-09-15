@@ -7,6 +7,7 @@
 // here writes to `data`.
 
 import { addDays } from 'date-fns'
+import { parseLocalDate } from './date'
 import { cycleBoundsForDate } from './payCycle'
 import { upcomingPaydays } from './salaryLedger'
 import { generateTransactionsForTemplate } from './schedule'
@@ -58,7 +59,7 @@ export function hasSalarySortDestinations(data: AppDataV2): boolean {
 // 'budget_cycle' uses the person's actual configured cycle boundary
 // (cycleBoundsForDate), which may not coincide with payday at all.
 export function salarySortWindow(payCycle: PayCycleConfig, payDate: string): { start: Date; end: Date } {
-  const start = new Date(payDate)
+  const start = parseLocalDate(payDate)
   if (payCycle.salarySortBasis === 'budget_cycle') {
     return cycleBoundsForDate(start, payCycle)
   }
@@ -148,8 +149,8 @@ export function findOneOffTransferConflict(data: AppDataV2, date: string, locati
 
 /** An already-active RECURRING transfer template, from Current Account to this exact destination, whose next resolved occurrence lands on this exact payDate. Same guard as above, for the recurring case. Generates over a WIDER window than just `payDate` itself — a follows-payday/follows-cycle-start occurrence's NOMINAL (pre-resolution) date is usually earlier than its resolved one, so restricting generation to `payDate` alone would miss it; 40 days comfortably covers every supported frequency down to weekly. */
 export function findRecurringTransferConflict(data: AppDataV2, payCycle: PayCycleConfig, payDate: string, location: TransferLocation): RecurringTemplate | undefined {
-  const rangeStart = addDays(new Date(payDate), -40)
-  const rangeEnd = new Date(payDate)
+  const rangeStart = addDays(parseLocalDate(payDate), -40)
+  const rangeEnd = parseLocalDate(payDate)
   return data.recurringTemplates.find((t) => {
     if (t.kind !== 'transfer' || !t.active) return false
     if (t.transferFrom?.type !== 'personal' || !locationsEqual(t.transferTo, location)) return false

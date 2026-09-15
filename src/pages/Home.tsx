@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency } from '../lib/format'
-import { toLocalIsoDate, todayIso } from '../lib/date'
+import { toLocalIsoDate, todayIso, parseLocalDate } from '../lib/date'
 import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
@@ -2826,7 +2826,7 @@ function PersonalDetail({
             data={data}
             horizon={horizon}
             loans={data.loans.filter((l) => l.location === 'personal' && l.ownerId === data.primaryPersonId && l.active)}
-            horizonEndDate={new Date(projection.horizonEnd)}
+            horizonEndDate={parseLocalDate(projection.horizonEnd)}
           />
         </HomeSection>
       )}
@@ -3144,7 +3144,7 @@ function JointDetail({
           even though its specific enumeration list omitted Joint. */}
       {jointProjection && jointLoans.length > 0 && (
         <HomeSection>
-          <LoanProgressRingsSection data={data} horizon={horizon} loans={jointLoans} horizonEndDate={new Date(jointProjection.horizonEnd)} />
+          <LoanProgressRingsSection data={data} horizon={horizon} loans={jointLoans} horizonEndDate={parseLocalDate(jointProjection.horizonEnd)} />
         </HomeSection>
       )}
     </div>

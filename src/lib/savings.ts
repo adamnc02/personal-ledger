@@ -1,3 +1,4 @@
+import { parseLocalDate } from './date'
 import type { Person, SavingsEntry } from '../types/models'
 
 /**
@@ -26,7 +27,7 @@ export function totalMonthlySavingsForPerson(person: Person, asOf: Date = new Da
 }
 
 export function monthsUntil(targetDate: string, asOf: Date = new Date()): number {
-  const target = new Date(targetDate)
+  const target = parseLocalDate(targetDate)
   return Math.max(
     1,
     (target.getFullYear() - asOf.getFullYear()) * 12 + (target.getMonth() - asOf.getMonth()) + (target.getDate() >= asOf.getDate() ? 0 : -1)

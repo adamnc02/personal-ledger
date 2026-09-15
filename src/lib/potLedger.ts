@@ -18,7 +18,7 @@
 // category breakdown.
 
 import { addMonths } from 'date-fns'
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 import { generateTransactionsForTemplate } from './schedule'
 import { generateLoanPaymentTransactions } from './ledgerLoans'
 import { dedupeKey, horizonCycles, previousCycles, THREE_CYCLES_AHEAD, type ProjectionHorizon } from './projection'
@@ -76,7 +76,7 @@ function walkPotDepositOccurrences(pot: Pot, rangeStart: Date, rangeEnd: Date): 
   if (rangeEnd < rangeStart) return []
 
   const anchorDay = pot.recurringDepositDayOfMonth
-  let cursor = clampToAnchorDay(new Date(pot.recurringDepositStartDate), anchorDay)
+  let cursor = clampToAnchorDay(parseLocalDate(pot.recurringDepositStartDate), anchorDay)
   let iterations = 0
   while (cursor < rangeStart && iterations < MAX_OCCURRENCES) {
     cursor = clampToAnchorDay(addMonths(cursor, 1), anchorDay)
@@ -157,7 +157,7 @@ export function scheduledPotDepositDates(pot: Pot, rangeStart: Date, rangeEnd: D
   if (rangeEnd < rangeStart) return []
 
   const anchorDay = pot.recurringDepositDayOfMonth
-  let cursor = clampToAnchorDay(new Date(pot.recurringDepositStartDate), anchorDay)
+  let cursor = clampToAnchorDay(parseLocalDate(pot.recurringDepositStartDate), anchorDay)
   let iterations = 0
   while (cursor < rangeStart && iterations < MAX_OCCURRENCES) {
     cursor = clampToAnchorDay(addMonths(cursor, 1), anchorDay)
@@ -395,7 +395,7 @@ export function computePotProjection(data: AppDataV2, pot: Pot, horizon: Project
 
   // Visibility floor, same rule as a personal ledger's own opening
   // balance date (projection.ts) — nothing before it is shown or counted.
-  const openingDateObj = new Date(pot.openingDate)
+  const openingDateObj = parseLocalDate(pot.openingDate)
   const genStart = cycles[0].start > openingDateObj ? cycles[0].start : openingDateObj
 
   const stored = data.transactions.filter((t) => transactionTouchesPot(t, pot.id) && t.date >= pot.openingDate)
@@ -432,7 +432,7 @@ export function computePotProjection(data: AppDataV2, pot: Pot, horizon: Project
 // ── Ramp-up preview window — same "don't fabricate history" rule as SavingsPot's schedulePreviewWindow ──
 
 export function schedulePotPreviewWindow(pot: Pot, asOfDate: Date): { start: Date; end: Date } {
-  const openingDate = new Date(pot.openingDate)
+  const openingDate = parseLocalDate(pot.openingDate)
   const monthsOld = Math.max(0, (asOfDate.getFullYear() - openingDate.getFullYear()) * 12 + (asOfDate.getMonth() - openingDate.getMonth()))
   const monthsBack = Math.min(2, monthsOld)
   const start = new Date(Math.max(addMonths(asOfDate, -monthsBack).getTime(), openingDate.getTime()))

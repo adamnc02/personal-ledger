@@ -6,7 +6,7 @@ import { computeMinimumPaymentAmount, simulateCardPayoffMonths } from './creditC
 import { costForPerson } from './bills'
 import { calculateNetSalary } from './tax'
 import { monthlyAmountForEntry, monthsUntil } from './savings'
-import { todayIso, toLocalIsoDate } from './date'
+import { todayIso, toLocalIsoDate, parseLocalDate } from './date'
 
 export interface LoanImpact {
   // Despite the name (kept for minimal disruption to existing call sites),
@@ -266,7 +266,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
           const startDate = action.date || todayIso()
           const existingStart = firstOverpaymentDateByLoan.get(target.id)
           if (!existingStart || startDate < existingStart) firstOverpaymentDateByLoan.set(target.id, startDate)
-          const start = new Date(startDate)
+          const start = parseLocalDate(startDate)
           for (let i = 0; i < 600; i++) {
             addLoanEvent(target.id, { date: toLocalIsoDate(addMonths(start, i)), amount: action.value, recastMode: 'reduce_term' })
           }
@@ -307,7 +307,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
       // settlement PREMIUM (scope §13/handoff step 6), evaluated as of
       // THIS lump sum's own date — not the schedule's raw balanceAfter,
       // and not today's premium if the lump sum is dated in the future.
-      const settlementAsOfLump = estimateSettlementFigure(loan, new Date(lastLumpDateByLoan.get(id) ?? todayIso()))
+      const settlementAsOfLump = estimateSettlementFigure(loan, parseLocalDate(lastLumpDateByLoan.get(id) ?? todayIso()))
       const fullyPaidOff = lumpSum >= settlementAsOfLump
       // BUGFIX (Adam-reported, 2026-09 session — "lump sum was 2000,
       // remaining after shows 0", and no positive monthly-cash impact

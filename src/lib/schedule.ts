@@ -39,7 +39,7 @@ function nextOccurrence(current: Date, template: RecurringTemplate, anchorDay: n
   }
 }
 
-import { toLocalIsoDate as toIso } from './date'
+import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 
 // Sanity cap on iterations, independent of the date range — protects
 // against a pathological template (e.g. every_n_weeks with an
@@ -151,10 +151,10 @@ export interface RawOccurrence {
 export function resolveTemplateOccurrenceDate(rawDate: string, template: RecurringTemplate, payCycle?: PayCycleConfig): string {
   const isTransferKind = template.kind === 'transfer'
   if (isTransferKind && template.followsPayday && payCycle) {
-    return toIso(upcomingPaydays(payCycle, new Date(rawDate), 1)[0] ?? new Date(rawDate))
+    return toIso(upcomingPaydays(payCycle, parseLocalDate(rawDate), 1)[0] ?? parseLocalDate(rawDate))
   }
   if (isTransferKind && template.followsCycleStart && payCycle) {
-    return toIso(nextCycleStartAfter(new Date(rawDate), payCycle))
+    return toIso(nextCycleStartAfter(parseLocalDate(rawDate), payCycle))
   }
   return rawDate
 }
@@ -186,7 +186,7 @@ function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd
   if (!template.active) return []
   if (rangeEnd < rangeStart) return []
 
-  const anchor = new Date(template.anchorDate)
+  const anchor = parseLocalDate(template.anchorDate)
   const anchorDay = anchor.getDate()
 
   let cursor = anchor
@@ -332,7 +332,7 @@ export function scheduledTemplateDates(
   payCycle?: PayCycleConfig,
 ): { originalDate: string; date: string }[] {
   if (rangeEnd < rangeStart) return []
-  const anchor = new Date(template.anchorDate)
+  const anchor = parseLocalDate(template.anchorDate)
   const anchorDay = anchor.getDate()
   let cursor = anchor
   let iterations = 0
