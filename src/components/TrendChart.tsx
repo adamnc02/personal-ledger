@@ -233,6 +233,12 @@ export function BalanceSpendChart({ series, view, color, interactive = false, he
             <text x={WIDTH} y={height - 4} fontSize={11} fill="var(--color-ink-faint)" textAnchor="end">{shortDayLabel(days[days.length - 1])}</text>
             <text x={WIDTH + padRight - 2} y={padTop + 4} fontSize={11} fill="var(--color-ink-faint)" textAnchor="end">{formatAxisMoney(Math.max(...allValues))}</text>
             <text x={WIDTH + padRight - 2} y={height - padBottom} fontSize={11} fill={minValue < 0 ? 'var(--color-negative)' : 'var(--color-ink-faint)'} textAnchor="end">{formatAxisMoney(minValue)}</text>
+            {/* The £0 constant line only needs its own label when it sits somewhere between the
+                max/min labels above — if the balance never goes negative, minValue is already 0
+                and the bottom label above already reads "£0", so this would just duplicate it. */}
+            {view === 'balance' && minValue < 0 && (
+              <text x={WIDTH + padRight - 2} y={zeroY + 4} fontSize={11} fill="var(--color-ink-faint)" textAnchor="end">£0</text>
+            )}
           </>
         )}
       </svg>
