@@ -18,7 +18,6 @@
 // build self-contained without an extra install/lockfile step.
 
 import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { formatCurrency } from '../lib/format'
 import type { BalanceSpendTrendSeries, DailyBalancePoint } from '../lib/runningBalance'
 import type { SavingsPotPillPoint, SavingsPotTrendSeries } from '../lib/savingsPotLedger'
 
@@ -32,7 +31,7 @@ export function formatAxisMoney(n: number): string {
   return `${sign}£${Math.round(abs)}`
 }
 
-function shortDayLabel(iso: string): string {
+export function shortDayLabel(iso: string): string {
   const [, m, d] = iso.split('-').map(Number)
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
   return `${d} ${MONTHS[m - 1]}`
@@ -49,8 +48,8 @@ export interface BalanceSpendChartProps {
   /** Non-interactive small preview (Trends section, inline per card) vs the full interactive chart (TrendsModal) — no tap-and-hold/tooltip/axis labels in preview mode, per the prompt doc's own "small... non-interactive, no tap-and-hold/tooltip behaviour here" spec for the inline section. */
   interactive?: boolean
   height?: number
-  /** Icon-only tooltip content for transactions on a given day, e.g. category icons for that date — rendered by the caller, since only Home.tsx knows how to resolve a category to an icon component. */
-  dayIcons?: (dateIso: string) => { key: string; node: React.ReactNode }[]
+  /** Reports the active tap-and-hold point so the caller can render its own tooltip (with category-icon content, via its own dayIcons lookup) in the modal's callout area above the chart, instead of overlaying it on the chart itself — mirrors SavingsPotPillChart's onActivePointChange. */
+  onActivePointChange?: (point: { date: string; value: number } | null) => void
 }
 
 const WIDTH = 320
@@ -79,7 +78,7 @@ function areaPath(points: { x: number; y: number }[], baselineY: number): string
   return `${top} L${last.x.toFixed(1)},${baselineY.toFixed(1)} L${first.x.toFixed(1)},${baselineY.toFixed(1)} Z`
 }
 
-export function BalanceSpendChart({ series, view, color, interactive = false, height = 200, dayIcons }: BalanceSpendChartProps) {
+export function BalanceSpendChart({ series, view, color, interactive = false, height = 200, onActivePointChange }: BalanceSpendChartProps) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const dragging = useRef(false)
@@ -118,6 +117,10 @@ export function BalanceSpendChart({ series, view, color, interactive = false, he
 
   const baselineY = makeYScale(allValues, height, padTop, padBottom)(Math.min(0, ...allValues))
 
+  function valueAt(i: number): number {
+    return view === 'balance' ? (i <= splitIdx ? series.balance[i].clearedBalance : series.balance[i].projectedBalance) : (series.spend[i]?.spendToDate ?? 0)
+  }
+
   function hitTest(clientX: number) {
     const svg = svgRef.current
     if (!svg) return
@@ -134,10 +137,12 @@ export function BalanceSpendChart({ series, view, color, interactive = false, he
       }
     }
     setActiveIndex(closest)
+    onActivePointChange?.({ date: days[closest], value: valueAt(closest) })
   }
 
   function onPointerDown(e: ReactPointerEvent<SVGSVGElement>) {
     if (!interactive) return
+    e.preventDefault()
     dragging.current = true
     ;(e.target as Element).setPointerCapture?.(e.pointerId)
     hitTest(e.clientX)
@@ -149,33 +154,13 @@ export function BalanceSpendChart({ series, view, color, interactive = false, he
   function endGesture() {
     dragging.current = false
     setActiveIndex(null)
+    onActivePointChange?.(null)
   }
 
-  const activeDate = activeIndex !== null ? days[activeIndex] : null
-  const activeValue =
-    activeIndex !== null ? (view === 'balance' ? (activeIndex <= splitIdx ? series.balance[activeIndex].clearedBalance : series.balance[activeIndex].projectedBalance) : series.spend[activeIndex]?.spendToDate) : null
+  const minValue = Math.min(0, ...allValues)
 
   return (
-    <div style={{ position: 'relative' }}>
-      {interactive && activeIndex !== null && activeDate !== null && (
-        <div
-          className="absolute left-0 right-0 top-0 flex items-center justify-between px-3 py-2 rounded-2xl"
-          style={{ background: 'var(--color-bg-elevated)', zIndex: 2 }}
-          data-testid="trend-tooltip"
-        >
-          <div>
-            <p className="text-sm font-semibold text-[var(--color-ink)]">{shortDayLabel(activeDate)}</p>
-            {dayIcons && dayIcons(activeDate).length > 0 && (
-              <div className="flex items-center gap-1 mt-0.5">
-                {dayIcons(activeDate).map((ic) => (
-                  <span key={ic.key}>{ic.node}</span>
-                ))}
-              </div>
-            )}
-          </div>
-          <p className="text-lg font-mono font-semibold text-[var(--color-ink)]">£{formatCurrency(activeValue ?? 0)}</p>
-        </div>
-      )}
+    <div style={{ position: 'relative', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${WIDTH + padRight} ${height}`}
@@ -186,7 +171,8 @@ export function BalanceSpendChart({ series, view, color, interactive = false, he
         onPointerUp={endGesture}
         onPointerCancel={endGesture}
         onPointerLeave={endGesture}
-        style={{ touchAction: interactive ? 'none' : undefined, display: 'block' }}
+        onContextMenu={(e) => interactive && e.preventDefault()}
+        style={{ touchAction: interactive ? 'none' : undefined, display: 'block', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}
       >
         {interactive && (
           <>
@@ -228,7 +214,7 @@ export function BalanceSpendChart({ series, view, color, interactive = false, he
             <text x={0} y={height - 4} fontSize={11} fill="var(--color-ink-faint)">{shortDayLabel(days[0])}</text>
             <text x={WIDTH} y={height - 4} fontSize={11} fill="var(--color-ink-faint)" textAnchor="end">{shortDayLabel(days[days.length - 1])}</text>
             <text x={WIDTH + padRight - 2} y={padTop + 4} fontSize={11} fill="var(--color-ink-faint)" textAnchor="end">{formatAxisMoney(Math.max(...allValues))}</text>
-            <text x={WIDTH + padRight - 2} y={height - padBottom} fontSize={11} fill="var(--color-ink-faint)" textAnchor="end">{formatAxisMoney(Math.min(0, ...allValues))}</text>
+            <text x={WIDTH + padRight - 2} y={height - padBottom} fontSize={11} fill={minValue < 0 ? 'var(--color-negative)' : 'var(--color-ink-faint)'} textAnchor="end">{formatAxisMoney(minValue)}</text>
           </>
         )}
       </svg>
@@ -290,6 +276,7 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
 
   function onPointerDown(e: ReactPointerEvent<SVGSVGElement>) {
     if (!interactive) return
+    e.preventDefault()
     dragging.current = true
     ;(e.target as Element).setPointerCapture?.(e.pointerId)
     hitTest(e.clientX)
@@ -315,7 +302,8 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
       onPointerUp={endGesture}
       onPointerCancel={endGesture}
       onPointerLeave={endGesture}
-      style={{ touchAction: interactive ? 'none' : undefined, display: 'block' }}
+      onContextMenu={(e) => interactive && e.preventDefault()}
+      style={{ touchAction: interactive ? 'none' : undefined, display: 'block', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}
     >
       {points.map((p, i) => {
         const h = Math.max(2, barHeight(p.endBalance))

@@ -32,7 +32,7 @@ import { WalletStack } from '../components/WalletStack'
 import { BankCard } from '../components/BankCard'
 import { ProgressRing } from '../components/ProgressRing'
 import { CategoryIcon } from '../components/CategoryIcon'
-import { BalanceSpendChart, SavingsPotPillChart, type BalanceSpendView } from '../components/TrendChart'
+import { BalanceSpendChart, SavingsPotPillChart, shortDayLabel, type BalanceSpendView } from '../components/TrendChart'
 import { SAVINGS_CATEGORY_ID, CREDIT_CARD_CATEGORY_ID } from '../types/ledger'
 import { seededCategoryIdForIcon, DEFAULT_POT_CATEGORY_ICON, DEFAULT_POT_CATEGORY_ICON_COLOR } from '../lib/categories'
 import type { AppDataV2, CreditCard, Loan, Pot, SavingsPot, Transaction } from '../types/ledger'
@@ -1722,6 +1722,7 @@ function TrendsModal({
   const [spGranularity, setSpGranularity] = useState<SavingsPotPillGranularity>('this_cycle')
   const [view, setView] = useState<BalanceSpendView>('balance')
   const [activePillPoint, setActivePillPoint] = useState<SavingsPotPillPoint | null>(null)
+  const [activeBsPoint, setActiveBsPoint] = useState<{ date: string; value: number } | null>(null)
 
   const bsSeries = balanceSpend ? balanceSpend.buildSeries(bsGranularity) : null
   const spSeries = savingsPot ? savingsPot.buildSeries(spGranularity) : null
@@ -1751,9 +1752,6 @@ function TrendsModal({
 
           {balanceSpend && (
             <>
-              <div className="w-full flex items-center justify-between gap-2">
-                <SegmentedControl options={BALANCE_SPEND_GRANULARITY_OPTIONS} value={bsGranularity} onChange={setBsGranularity} />
-              </div>
               <div className="w-full flex items-center justify-between">
                 <SegmentedControl
                   options={[
@@ -1761,30 +1759,47 @@ function TrendsModal({
                     { value: 'spend' as const, label: 'Spend' },
                   ]}
                   value={view}
-                  onChange={setView}
+                  onChange={(v) => {
+                    setView(v)
+                    setActiveBsPoint(null)
+                  }}
                 />
-                {bsSeries && (
-                  <p className="text-lg font-mono font-semibold text-[var(--color-ink)]">
-                    £{formatCurrency(view === 'balance' ? bsSeries.balance[bsSeries.balance.length - 1]?.clearedBalance ?? 0 : bsSeries.spend[bsSeries.spend.length - 1]?.spendToDate ?? 0)}
-                  </p>
-                )}
               </div>
+
+              {/* Callout: card headline by default, swaps to the tap-and-hold point's own date/value/icons — kept off the chart itself so nothing clashes with the plotted area. */}
+              <div className="w-full rounded-2xl p-3 flex items-center justify-between gap-2" style={{ background: 'var(--color-bg)' }} data-testid="trend-tooltip">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-[var(--color-ink)]">{activeBsPoint ? shortDayLabel(activeBsPoint.date) : cardName}</p>
+                  {activeBsPoint && balanceSpend.dayIcons && balanceSpend.dayIcons(activeBsPoint.date).length > 0 && (
+                    <div className="flex items-center gap-1 mt-0.5">
+                      {balanceSpend.dayIcons(activeBsPoint.date).map((ic) => (
+                        <span key={ic.key}>{ic.node}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <p className="text-lg font-mono font-semibold text-[var(--color-ink)] shrink-0">
+                  £{formatCurrency(activeBsPoint ? activeBsPoint.value : view === 'balance' ? bsSeries?.balance[bsSeries.balance.length - 1]?.clearedBalance ?? 0 : bsSeries?.spend[bsSeries.spend.length - 1]?.spendToDate ?? 0)}
+                </p>
+              </div>
+
               <div className="w-full">
                 {bsSeries ? (
-                  <BalanceSpendChart series={bsSeries} view={view} color={color} interactive height={220} dayIcons={balanceSpend.dayIcons} />
+                  <BalanceSpendChart series={bsSeries} view={view} color={color} interactive height={220} onActivePointChange={setActiveBsPoint} />
                 ) : (
                   <p className="text-sm text-[var(--color-ink-muted)] text-center py-10">No data for this account yet.</p>
                 )}
+              </div>
+
+              <div className="w-full flex items-center justify-between gap-2">
+                <SegmentedControl options={BALANCE_SPEND_GRANULARITY_OPTIONS} value={bsGranularity} onChange={(g) => { setBsGranularity(g); setActiveBsPoint(null) }} />
               </div>
             </>
           )}
 
           {savingsPot && spSeries && (
             <>
-              <div className="w-full flex items-center justify-between gap-2">
-                <SegmentedControl options={SAVINGS_POT_GRANULARITY_OPTIONS} value={spGranularity} onChange={setSpGranularity} />
-              </div>
-              <div className="w-full rounded-2xl p-3" style={{ background: 'var(--color-bg)' }}>
+              <div className="w-full rounded-2xl p-3" style={{ background: 'var(--color-bg)' }} data-testid="trend-tooltip">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-semibold text-[var(--color-ink)]">{activePillPoint ? activePillPoint.tooltipLabel : cardName}</span>
                   <span className="text-lg font-mono font-semibold text-[var(--color-ink)]">
@@ -1797,8 +1812,13 @@ function TrendsModal({
                   </p>
                 )}
               </div>
+
               <div className="w-full">
                 <SavingsPotPillChart series={spSeries} color={color} interactive height={160} onActivePointChange={setActivePillPoint} />
+              </div>
+
+              <div className="w-full flex items-center justify-between gap-2">
+                <SegmentedControl options={SAVINGS_POT_GRANULARITY_OPTIONS} value={spGranularity} onChange={(g) => { setSpGranularity(g); setActivePillPoint(null) }} />
               </div>
             </>
           )}
