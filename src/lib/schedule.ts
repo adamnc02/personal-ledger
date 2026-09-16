@@ -7,9 +7,9 @@
 // this file only computes what SHOULD exist in the range, it doesn't
 // know what's already been generated.
 
-import { addMonths, addQuarters, addWeeks, addYears } from 'date-fns'
+import { addDays, addMonths, addQuarters, addWeeks, addYears, differenceInCalendarDays } from 'date-fns'
 import { nanoid } from 'nanoid'
-import type { PayCycleConfig, RecurringOccurrenceOverride, RecurringTemplate, Transaction } from '../types/ledger'
+import type { PayCycleConfig, RecurrenceFrequency, RecurringOccurrenceOverride, RecurringTemplate, Transaction } from '../types/ledger'
 import { upcomingPaydays } from './salaryLedger'
 import { nextCycleStartAfter } from './payCycle'
 import { categoryForTransfer } from './transferLedger'
@@ -532,4 +532,166 @@ export function newRecurringTemplate(
   input: Omit<RecurringTemplate, 'id' | 'active'>,
 ): RecurringTemplate {
   return { id: nanoid(8), active: true, ...input }
+}
+
+// ── Schedule change from a chosen payment (2026-09-16, Adam-reported) ──
+// Changing a recurring template's due date or frequency "for every payment
+// from then on" used to just overwrite `anchorDate`/`frequency`. The chosen
+// payment was ignored. Every occurrence is identified by its SLOT, the
+// anchor-walked date (APP-KNOWLEDGE §1.5a), so moving the anchor gave every
+// already-materialised row a slot the new schedule no longer produces, and
+// the generator materialised the whole history again on the new day:
+// mum's "Agria Pet Insurance - Pippa" 15th -> 16th left a cleared 15 Sep
+// AND a cleared 16 Sep. Same for 21 of her 29 bills, and for recurring
+// transactions/transfers, whose edit forms saved the change immediately.
+//
+// Now, from the chosen payment E:
+//  - payments before E keep their date and are never regenerated: the new
+//    anchor is the new-schedule slot nearest E, strictly after the last old
+//    slot before E, and nothing generates before an anchor;
+//  - every stored row and occurrenceOverride from E onwards is re-slotted
+//    k-th old slot -> k-th new slot, so the payment on E becomes the first
+//    payment on the new schedule rather than a second one. That includes a
+//    cleared row: the user chose that payment. A row moved into the future
+//    goes back to pending (§1.5b).
+
+export interface TemplateSchedule {
+  frequency: RecurrenceFrequency
+  intervalWeeks?: number
+  anchorDate: string
+}
+
+/** Raw anchor-walked slots (overrides ignored) on/after `fromIso`, up to `untilIso` or `count`. */
+function rawSlots(schedule: TemplateSchedule, fromIso: string, limit: { untilIso?: string; count?: number }): string[] {
+  const shape = schedule as RecurringTemplate
+  const anchor = parseLocalDate(schedule.anchorDate)
+  const anchorDay = anchor.getDate()
+  const out: string[] = []
+  let cursor = anchor
+  for (let i = 0; i < MAX_OCCURRENCES; i++) {
+    const iso = toIso(cursor)
+    if (limit.untilIso !== undefined && iso > limit.untilIso) break
+    if (limit.count !== undefined && out.length >= limit.count) break
+    if (iso >= fromIso) out.push(iso)
+    cursor = nextOccurrence(cursor, shape, anchorDay)
+  }
+  return out
+}
+
+function lastSlotBefore(schedule: TemplateSchedule, beforeIso: string): string | null {
+  const anchor = parseLocalDate(schedule.anchorDate)
+  const anchorDay = anchor.getDate()
+  let cursor = anchor
+  let last: string | null = null
+  for (let i = 0; i < MAX_OCCURRENCES && toIso(cursor) < beforeIso; i++) {
+    last = toIso(cursor)
+    cursor = nextOccurrence(cursor, schedule as RecurringTemplate, anchorDay)
+  }
+  return last
+}
+
+/**
+ * The slot on `next`'s schedule nearest to `targetIso`, strictly after
+ * `afterIso`. A day-of-month the month can't hold (31st in September) is
+ * avoided, because the anchor's own day becomes the schedule's day.
+ */
+function nearestSlot(next: TemplateSchedule, targetIso: string, afterIso: string | null): string {
+  const target = parseLocalDate(targetIso)
+  const anchor = parseLocalDate(next.anchorDate)
+  const day = anchor.getDate()
+  const candidates: Date[] = []
+  const monthStart = (k: number) => addMonths(new Date(target.getFullYear(), target.getMonth(), 1), k)
+  switch (next.frequency) {
+    case 'monthly':
+      for (let k = -2; k <= 2; k++) candidates.push(clampToAnchorDay(monthStart(k), day))
+      break
+    case 'quarterly':
+      for (let k = -5; k <= 5; k++) {
+        const m = monthStart(k)
+        if ((((m.getMonth() - anchor.getMonth()) % 3) + 3) % 3 === 0) candidates.push(clampToAnchorDay(m, day))
+      }
+      break
+    case 'annual':
+      for (let k = -1; k <= 2; k++) candidates.push(clampToAnchorDay(new Date(target.getFullYear() + k, anchor.getMonth(), 1), day))
+      break
+    default: {
+      const period = 7 * (next.frequency === 'every_n_weeks' ? Math.max(1, next.intervalWeeks ?? 1) : 1)
+      const offset = ((differenceInCalendarDays(target, anchor) % period) + period) % period
+      const base = addDays(target, -offset)
+      for (let k = -1; k <= 2; k++) candidates.push(addDays(base, k * period))
+    }
+  }
+  const eligible = candidates.map(toIso).filter((iso) => afterIso === null || iso > afterIso)
+  const clamped = (iso: string) => (next.frequency === 'weekly' || next.frequency === 'every_n_weeks' ? false : parseLocalDate(iso).getDate() !== day)
+  eligible.sort((a, b) => {
+    if (clamped(a) !== clamped(b)) return clamped(a) ? 1 : -1
+    const da = Math.abs(differenceInCalendarDays(parseLocalDate(a), target))
+    const db = Math.abs(differenceInCalendarDays(parseLocalDate(b), target))
+    return da !== db ? da - db : b.localeCompare(a) // tie → the later one
+  })
+  return eligible[0] ?? targetIso
+}
+
+/**
+ * Applies a due-date and/or frequency change to `template` from the payment
+ * the user picked (`effectiveFromDate`, as shown by
+ * recentAndUpcomingOccurrences). Returns the template patch and the
+ * rewritten transaction list. See the section comment above.
+ */
+export function applyTemplateScheduleChange(
+  template: RecurringTemplate,
+  transactions: Transaction[],
+  next: TemplateSchedule,
+  effectiveFromDate: string,
+  asOfIso: string,
+): { patch: Pick<RecurringTemplate, 'frequency' | 'intervalWeeks' | 'anchorDate' | 'occurrenceOverrides'>; transactions: Transaction[] } {
+  // The picker shows display dates; identity is the slot.
+  const pickerWindow = scheduledTemplateDates(template, addYears(parseLocalDate(effectiveFromDate), -1), addYears(parseLocalDate(effectiveFromDate), 1))
+  const pickedSlot = pickerWindow.find((o) => o.date === effectiveFromDate)?.originalDate ?? effectiveFromDate
+  // Snap onto the old schedule, so a date that isn't a slot (e.g. before
+  // the anchor) can't place the new anchor ahead of the real first slot.
+  const fromSlot = rawSlots(template, pickedSlot, { count: 1 })[0] ?? pickedSlot
+
+  const newAnchor = nearestSlot(next, fromSlot, lastSlotBefore(template, fromSlot))
+  const nextSchedule: TemplateSchedule = { frequency: next.frequency, intervalWeeks: next.intervalWeeks, anchorDate: newAnchor }
+
+  const isOwnRow = (t: Transaction) => t.sourceType === 'recurring_template' && t.sourceId === template.id
+  const slotOf = (t: Transaction) => t.occurrenceOriginalDate ?? t.date
+  const keys = [
+    ...transactions.filter(isOwnRow).map(slotOf),
+    ...(template.occurrenceOverrides ?? []).map((o) => o.originalDate),
+  ].filter((k) => k >= fromSlot)
+  const lastKey = keys.reduce((max, k) => (k > max ? k : max), fromSlot)
+
+  const oldSlots = rawSlots(template, fromSlot, { untilIso: lastKey })
+  const newSlots = rawSlots(nextSchedule, newAnchor, { count: oldSlots.length })
+  const slotMap = new Map(oldSlots.map((old, i) => [old, newSlots[i]] as const).filter(([, n]) => n !== undefined))
+
+  // An override whose `date` equals its own slot (a single-payment amount
+  // edit records one) is not a move, so it follows the slot; a genuine
+  // move keeps the date the user chose.
+  const overrides = template.occurrenceOverrides?.map((o) => {
+    const newSlot = slotMap.get(o.originalDate)
+    if (!newSlot) return o
+    return { ...o, originalDate: newSlot, ...(o.date !== undefined ? { date: o.date === o.originalDate ? newSlot : o.date } : {}) }
+  })
+
+  const rewritten = transactions.map((t) => {
+    if (!isOwnRow(t)) return t
+    const newSlot = slotMap.get(slotOf(t))
+    if (!newSlot) return t
+    const date = overrides?.find((o) => o.originalDate === newSlot)?.date ?? newSlot
+    const status: Transaction['status'] = t.status === 'cleared' && date > asOfIso ? 'pending' : t.status
+    return { ...t, occurrenceOriginalDate: newSlot, date, status }
+  })
+
+  return {
+    patch: {
+      frequency: next.frequency,
+      intervalWeeks: next.frequency === 'every_n_weeks' ? next.intervalWeeks : template.intervalWeeks,
+      anchorDate: newAnchor,
+      occurrenceOverrides: overrides,
+    },
+    transactions: rewritten,
+  }
 }
