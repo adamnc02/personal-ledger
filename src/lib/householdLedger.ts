@@ -46,7 +46,6 @@ export interface HouseholdPersonProjection {
   // exact set CycleGroupedList/DateOrderedList/etc. below fold over, so
   // this person's own section total can never disagree with what's shown.
   transactions: Transaction[]
-  cycles: { start: Date; end: Date }[] // this person's OWN cycle bounds — used when grouping by person + cycle-end totals
 }
 
 /**
@@ -87,7 +86,6 @@ export function computeHouseholdPersonProjection(
     projectedBalance,
     horizonEnd: projection.horizonEnd,
     transactions,
-    cycles: horizonCycles(data, personId, horizon, asOfDate),
   }
 }
 
@@ -96,6 +94,42 @@ export function computeHouseholdProjections(data: AppDataV2, horizon: Projection
   return data.people
     .map((p) => computeHouseholdPersonProjection(data, p.id, horizon, asOfDate))
     .filter((r): r is HouseholdPersonProjection => r !== null)
+}
+
+/** One person's pill inside a cycle on Household's "Group by Person" view. Same shape as jointLedger.ts's JointPersonGroup, so both render through Home.tsx's shared PersonPills. */
+export interface HouseholdPersonGroup {
+  id: string
+  name: string
+  transactions: Transaction[]
+}
+
+/**
+ * 2026-09-16 (PROMPT-03) — Household's "Group by Person" is now
+ * cycle-outer/person-inner, matching Joint: CycleGroupedList buckets the
+ * combined list into cycles, then calls this with ONE cycle's rows to
+ * split them per person.
+ *
+ * A row is attributed to the person whose projection it CAME FROM
+ * (object identity), not re-derived from `ownerId` — HouseholdDetail's
+ * combined list is literally `personProjections.flatMap(pp =>
+ * pp.transactions)`, so attributing by provenance means the per-person
+ * totals inside a cycle always sum to that cycle's ungrouped total, by
+ * construction. `ownerId` is only a fallback for a row passed in from
+ * somewhere else. Unlike Joint there's no share-splitting and no "Spend"
+ * bucket — every Household row is one person's own personal row.
+ *
+ * Every person with a projection is returned, in projection order, even
+ * when empty; PersonPills hides the empty ones, same as on Joint.
+ */
+export function buildHouseholdPersonGroups(personProjections: HouseholdPersonProjection[], rows: Transaction[]): HouseholdPersonGroup[] {
+  const sourceOf = new Map<Transaction, string>()
+  for (const pp of personProjections) for (const t of pp.transactions) sourceOf.set(t, pp.personId)
+  const byPerson = new Map<string, Transaction[]>(personProjections.map((pp) => [pp.personId, []]))
+  for (const t of rows) {
+    const personId = sourceOf.get(t) ?? t.ownerId
+    if (personId) byPerson.get(personId)?.push(t)
+  }
+  return personProjections.map((pp) => ({ id: pp.personId, name: pp.personName, transactions: byPerson.get(pp.personId) ?? [] }))
 }
 
 // ── Trends feature (2026-09-15 build) ──────────────────────────────────
