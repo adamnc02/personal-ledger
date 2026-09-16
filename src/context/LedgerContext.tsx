@@ -31,7 +31,7 @@ import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/credi
 import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, reassignLoanRecurringOverpaymentTransactions, type CalibrationResult } from '../lib/ledgerLoans'
 import { autoClearDuePayments } from '../lib/autoClear'
 import { reconcilePersonReferences } from '../lib/household'
-import { convertClearedSalaryToStandaloneIncome } from '../lib/salaryLedger'
+import { convertClearedSalaryToStandaloneIncome, nextRecordedSeq } from '../lib/salaryLedger'
 
 import { toLocalIsoDate as toIso } from '../lib/date'
 const todayIso = () => toIso(new Date())
@@ -209,7 +209,11 @@ interface LedgerContextValue {
   updatePayCycle: (personId: string, updates: Partial<Omit<PayCycleConfig, 'personId'>>) => void
 
   /** A "permanent" salary change — a new dated snapshot, effective going forward. See SalaryOverride for the "one-off" case. */
-  addSalarySnapshot: (personId: string, snapshot: Omit<SalarySnapshot, 'id' | 'personId'>) => string
+  // `recordedSeq` is omitted alongside id/personId deliberately: it is
+  // assigned here and only here (max(existing) + 1), so no caller can
+  // pass a stale, duplicate or hand-picked ordinal. See
+  // SalarySnapshot.recordedSeq and PROMPT-02.
+  addSalarySnapshot: (personId: string, snapshot: Omit<SalarySnapshot, 'id' | 'personId' | 'recordedSeq'>) => string
   updateSalarySnapshot: (personId: string, snapshotId: string, updates: Partial<Omit<SalarySnapshot, 'id' | 'personId'>>) => void
   removeSalarySnapshot: (personId: string, snapshotId: string) => void
   /**
@@ -769,7 +773,21 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     const id = nanoid(8)
     setDataState((prev) => ({
       ...prev,
-      people: prev.people.map((p) => (p.id === personId ? { ...p, salaryHistory: [...p.salaryHistory, { ...snapshot, id, personId }] } : p)),
+      people: prev.people.map((p) =>
+        p.id === personId
+          ? {
+              ...p,
+              // recordedSeq is max(existing) + 1, never the array length
+              // — after a middle deletion `length` collides with an
+              // ordinal still in use (see nextRecordedSeq's own comment).
+              // Appending (not inserting or sorting) keeps array order
+              // and recordedSeq in agreement, which is what lets the
+              // index fallback in findApplicableSnapshot stay correct.
+              // See SalarySnapshot.recordedSeq and PROMPT-02.
+              salaryHistory: [...p.salaryHistory, { ...snapshot, id, personId, recordedSeq: nextRecordedSeq(p.salaryHistory) }],
+            }
+          : p,
+      ),
     }))
     return id
   }

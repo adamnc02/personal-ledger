@@ -132,26 +132,74 @@ function reconcilePensionTransactions(data: AppDataV2): AppDataV2 {
  * the owning template itself is ever editable, so there's no hand-entered
  * figure here to trample. 2026-09-14: reconciles `date` the same way, for
  * the same reason — see this function's own comment on the date fix.
+ *
+ * 2026-09-16 (Adam-reported in UAT, all three surfaces): reconciles
+ * `status` too. Step 1 below only ever moves a row pending -> cleared
+ * when its date arrives; nothing did the reverse, so moving an
+ * already-cleared occurrence's date into the FUTURE left it counting as
+ * cleared money that had supposedly already left the account, on a date
+ * that has not happened yet. Repro: new bill due yesterday (clears), move
+ * it to today (fine), move it to tomorrow (still cleared, still in the
+ * cleared balance).
+ *
+ * Safe because a `recurring_template` row's cleared status is never
+ * hand-set: there is no "mark as cleared" path anywhere in the app —
+ * autoClearDuePayments is the only thing that clears anything — so for
+ * these rows `cleared` can only ever have meant "its date was on or
+ * before today". A cleared row dated in the future is therefore always
+ * wrong, whatever moved it there, which is why this corrects the state
+ * rather than only the transition: a row already stranded by this bug
+ * self-heals on the next load, with no migration. The pending -> cleared
+ * direction deliberately stays with Step 1, which runs after every
+ * reconciler and already handles a date moved back into the past.
+ *
+ * No side effect needs unwinding: applyClearSideEffects only acts on
+ * savings_contribution/savings_entry rows, which are never sourced from a
+ * RecurringTemplate. Savings-pot and credit-card balances are derived
+ * from the transactions themselves, so flipping the status back to
+ * pending is the whole of the correction there too.
  */
-function reconcileRecurringTemplateTransactions(data: AppDataV2): AppDataV2 {
+function reconcileRecurringTemplateTransactions(data: AppDataV2, asOfIso: string): AppDataV2 {
   let changed = false
   const transactions = data.transactions.map((t) => {
     if (t.sourceType !== 'recurring_template' || !t.sourceId) return t
     const template = data.recurringTemplates.find((tpl) => tpl.id === t.sourceId)
     if (!template) return t
-    // Matched by EITHER the occurrence's natural originalDate (a
-    // materialized row that predates the override, or whose date has
-    // never been moved) OR its current resolved date (a row already
-    // reconciled onto a moved date on some earlier pass) — checking both
-    // makes the match idempotent regardless of which side of a date move
-    // this runs on.
-    const override = template.occurrenceOverrides?.find((o) => o.originalDate === t.date || o.date === t.date)
+    // WHICH occurrence this row is. 2026-09-16 (Adam-reported, single-
+    // occurrence date move) — this used to be derived purely from the
+    // row's CURRENT date, matching either end of a single move
+    // (`o.originalDate === t.date || o.date === t.date`), with a comment
+    // claiming that made the match idempotent "regardless of which side
+    // of a date move this runs on". It is idempotent for exactly ONE
+    // move. Move the same occurrence twice (1 Jul -> 5 Jul -> 9 Jul) and
+    // the row sits at 5 Jul while the override reads
+    // {originalDate: 1 Jul, date: 9 Jul} — neither branch matches,
+    // because the intermediate date is recorded nowhere. The row was
+    // then stranded forever AND the generator re-materialized the same
+    // occurrence at 9 Jul (dedupeKey is keyed on the date too), leaving
+    // two cleared rows both counting against the balance. Confirmed for
+    // bills, recurring transactions AND recurring transfers — one shared
+    // generator, one shared bug. Moving back to the original date
+    // duplicated as well, so "undo it" was not a workaround either.
+    //
+    // The slot now comes from the row's own stamp when it has one, so it
+    // survives any number of moves. The date match is kept ONLY to
+    // derive the slot for a row materialized before that field existed —
+    // such a row can by definition only have been through the one-move
+    // case the old code handled, so this reads it correctly — and that
+    // row is then stamped below so it never needs deriving again.
+    const slot = t.occurrenceOriginalDate ?? template.occurrenceOverrides?.find((o) => o.originalDate === t.date || o.date === t.date)?.originalDate ?? t.date
+    const override = template.occurrenceOverrides?.find((o) => o.originalDate === slot)
     // A deleted occurrence has no live amount/date to reconcile against —
     // that already-materialized row is a separate, pre-existing gap
     // (deleting a future occurrence doesn't retroactively un-clear a past
     // one), not this fix's concern.
-    if (override?.deleted) return t
-    const amount = override?.amount !== undefined ? override.amount : resolveOccurrenceAmount(template, override?.originalDate ?? t.date)
+    //
+    // Still stamped on the way out when it's missing, so a paused
+    // occurrence that is later unpaused is already slot-identified
+    // rather than falling back to the date derivation again.
+    if (override?.deleted) return stamp(t, slot)
+    const amount = override?.amount !== undefined ? override.amount : resolveOccurrenceAmount(template, slot)
     // 2026-09-14 (Adam-reported, joint account bill date change) — this
     // used to only reconcile amount, never date. A per-occurrence date
     // move (applyTemplateSingleOccurrenceDateChange) correctly redirected
@@ -164,13 +212,36 @@ function reconcileRecurringTemplateTransactions(data: AppDataV2): AppDataV2 {
     // actually moved to today-or-earlier. Now reconciles both fields in
     // one pass, same "materialized rows are never hand-edited, so this is
     // always safe" reasoning the amount fix already relied on.
-    const date = override?.date ?? t.date
-    if (amount <= 0) return t
-    if (amount === t.amount && date === t.date) return t
+    const date = override?.date ?? slot
+    // See this function's comment: a generated row dated in the future
+    // can never legitimately be cleared. Checked against the resolved
+    // `date`, not `t.date`, so the move and the un-clear land in the same
+    // pass — and checked as STATE rather than as a transition, so a row
+    // already stranded by this bug is corrected even on a pass where its
+    // date doesn't change.
+    const status: Transaction['status'] = t.status === 'cleared' && date > asOfIso ? 'pending' : t.status
+    if (amount <= 0) return stamp(t, slot)
+    if (amount === t.amount && date === t.date && status === t.status) return stamp(t, slot)
     changed = true
-    return { ...t, amount, date }
+    return { ...stamp(t, slot), amount, date, status }
   })
   return changed ? { ...data, transactions } : data
+
+  /**
+   * Backfills Transaction.occurrenceOriginalDate onto a row that predates
+   * the field, using the slot derived above. Deliberately done here on
+   * first sight rather than in migrateLedgerData: this reconciler is the
+   * one place that already has the owning template to hand, it runs on
+   * every load before anything is materialized, and it only ever ADDS a
+   * field — no date, amount or status is touched, so it can't disturb an
+   * already-cleared row (APP-KNOWLEDGE.md §1.1). Idempotent: once stamped,
+   * this returns the row untouched forever after.
+   */
+  function stamp(t: Transaction, slot: string): Transaction {
+    if (t.occurrenceOriginalDate === slot) return t
+    changed = true
+    return { ...t, occurrenceOriginalDate: slot }
+  }
 }
 
 /**
@@ -287,7 +358,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
   // that's drifted from its computed value should be corrected whether
   // or not there's also something new coming due this pass.
   const reconciled = reconcilePotTransactions(
-    reconcileSavingsPotTransactions(reconcileLoanTransactions(reconcileRecurringTemplateTransactions(reconcilePensionTransactions(reconcileSalaryTransactions(data))))),
+    reconcileSavingsPotTransactions(reconcileLoanTransactions(reconcileRecurringTemplateTransactions(reconcilePensionTransactions(reconcileSalaryTransactions(data)), asOfIso))),
   )
   if (reconciled !== data) {
     result = reconciled

@@ -336,6 +336,34 @@ export interface Transaction {
     // table anywhere.
     | 'salary_sort'
   sourceId?: string
+  // WHICH occurrence of that source this row is — the natural,
+  // anchor-walked date of its slot, i.e. exactly the `originalDate` key
+  // `RecurringTemplate.occurrenceOverrides` uses. Set only on rows
+  // generated from a RecurringTemplate (sourceType 'recurring_template').
+  //
+  // 2026-09-16 (Adam-reported, single-occurrence date move) — `date`
+  // alone cannot identify a materialized occurrence, because a
+  // per-occurrence date move CHANGES it. reconcileRecurringTemplateTransactions
+  // used to re-find its row by matching either end of a single move
+  // (`o.originalDate === t.date || o.date === t.date`); after a SECOND
+  // move there are three dates in play and the intermediate one is
+  // recorded nowhere, so the stored row was stranded at a date that no
+  // longer corresponded to any occurrence, and the generator — whose
+  // dedupeKey is also keyed on the date — then materialized the same
+  // occurrence a second time. Two cleared rows, both counting against
+  // the balance. This field makes the slot explicit so identity no
+  // longer depends on a mutable value. Same class of bug as
+  // SalarySnapshot.recordedSeq (see DATA-MODEL-REVIEW-2026-09-15.md
+  // §11.7a and PROMPT-02): identity keyed off something that moves.
+  //
+  // Optional because rows materialized before this field existed don't
+  // carry it. They are NOT migrated in ledgerStorage — instead
+  // reconcileRecurringTemplateTransactions stamps each one the first
+  // time it sees it, deriving the slot from the same two-way date match
+  // that worked for a single move, which is all a pre-existing row can
+  // have been through. Treat "absent" as "derive it, then stamp it",
+  // never as "this row has no slot".
+  occurrenceOriginalDate?: string
   // Required when type is 'credit_card_spend' or 'credit_card_payment' —
   // which card this is against. See TransactionType above for how each
   // type does or doesn't affect the ledger balance / Personal card list.
@@ -1030,6 +1058,44 @@ export interface SalarySnapshot {
   // already cleared (today or earlier) is unaffected by setting or
   // changing this.
   endDate?: string
+  // The order this snapshot was RECORDED in, increasing per person. This
+  // is the tie-break when two snapshots share an effectiveFrom: the
+  // highest recordedSeq wins, i.e. the edit made most recently.
+  //
+  // The guarantee is that a newly recorded snapshot's ordinal is greater
+  // than every ordinal currently held by that person's other snapshots —
+  // NOT that a number is never reused across the person's whole history.
+  // Deleting the most recent snapshot does free its number again, which
+  // is harmless: ordinals are only ever compared within the live array.
+  // See nextRecordedSeq in salaryLedger.ts.
+  //
+  // It exists because that tie-break used to be the snapshot's ARRAY
+  // POSITION, and array position cannot survive a relational migration.
+  // `salaryHistory` becomes a real `salary_snapshots` table (it is the
+  // one order-dependent history array that does — the other five stay
+  // jsonb, which preserves order), and `SELECT * FROM salary_snapshots
+  // WHERE person_id = ?` has no inherent row order. Whatever order the
+  // local SQLite happened to return would become the tie-break, and two
+  // devices holding identical rows could legitimately resolve DIFFERENT
+  // salaries — a wrong net-pay figure with nothing indicating a fault.
+  //
+  // This is not hypothetical: Adam's own person in
+  // finance-ledger-backup-2026-09-15.json already has two snapshots both
+  // dated 2026-09-30 (£62,500 and £62,400). See
+  // DATA-MODEL-REVIEW-2026-09-15.md §11.7a and PROMPT-02.
+  //
+  // Required, backfilled by migrateLedgerData in array order for anything
+  // persisted before this field existed — the same convention as
+  // Loan.active/Loan.principal and SavingsPot.color. Backfilling in array
+  // order is what makes it behaviour-preserving: it writes down the order
+  // that was already being used, rather than changing it. findApplicableSnapshot
+  // still falls back to array index if it ever sees a snapshot without
+  // one, since runtime data can always violate the type.
+  //
+  // ⚠️ This ADDS information; it does not reorder or de-duplicate
+  // anything. Duplicate effectiveFrom entries are deliberate and stay —
+  // see §11.7b, decided 2026-09-15, and do not revisit it.
+  recordedSeq: number
 }
 
 export interface SalaryOverride {
