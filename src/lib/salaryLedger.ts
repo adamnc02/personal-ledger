@@ -41,16 +41,31 @@ import { toLocalIsoDate as toIso, parseLocalDate } from './date'
  * for a genuine tie preserves original array order — since newly-added
  * snapshots are appended to the end of the array, that would silently
  * keep the OLDER edit as "applicable" and make the newer one invisible.
- * The explicit index tie-break below is what prevents that.
+ * The explicit tie-break below is what prevents that.
+ *
+ * 2026-09-16 (PROMPT-02) — that tie-break is now `recordedSeq`, an
+ * explicit per-person ordinal, rather than the snapshot's ARRAY INDEX.
+ * Same resolution, same winner, but it no longer depends on array
+ * position: `salaryHistory` becomes a real `salary_snapshots` table in
+ * the Supabase migration, and a SELECT has no inherent row order, so two
+ * devices holding identical rows could otherwise resolve different
+ * salaries. See SalarySnapshot.recordedSeq and
+ * DATA-MODEL-REVIEW-2026-09-15.md §11.7a.
+ *
+ * The array index is kept ONLY as a fallback for a snapshot with no
+ * recordedSeq, which migrateLedgerData's backfill should make impossible
+ * — but runtime data can always violate the type, and falling back to
+ * the old behaviour is strictly better than sorting undefined. Note the
+ * array is never sorted or de-duplicated to achieve this (§11.7b).
  */
 export function findApplicableSnapshot(person: Person, date: string): SalarySnapshot | null {
   const applicable = person.salaryHistory
-    .map((s, index) => ({ s, index }))
+    .map((s, index) => ({ s, seq: s.recordedSeq ?? index }))
     .filter(({ s }) => s.effectiveFrom <= date)
     .sort((a, b) => {
       const byDate = b.s.effectiveFrom.localeCompare(a.s.effectiveFrom)
       if (byDate !== 0) return byDate
-      return b.index - a.index // tie: prefer the one added later (a more recent edit)
+      return b.seq - a.seq // tie: prefer the one recorded later (a more recent edit)
     })
   const resolved = applicable[0]?.s ?? null
   // If the snapshot that would otherwise govern `date` has an end date,
@@ -75,12 +90,49 @@ export function findApplicableSnapshot(person: Person, date: string): SalarySnap
  * that case, since "no longer governs today" is precisely what it just
  * got told to mean. Returns null only when the person has no salary
  * history at all yet.
+ *
+ * 2026-09-16 (PROMPT-02) — this had the SAME array-order dependency
+ * findApplicableSnapshot did, just less visibly: `>=` meant that on a tie
+ * each equal-dated snapshot replaced the previous one as it was iterated,
+ * so the LAST one in the array won. Correct today, arbitrary once the
+ * rows come back from a table in no particular order. Now broken by
+ * recordedSeq explicitly, with the same index fallback, so it and
+ * findApplicableSnapshot agree on which of two same-dated snapshots is
+ * "the latest" by the same rule rather than by coincidence.
  */
 export function latestSalarySnapshot(person: Person): SalarySnapshot | null {
-  return person.salaryHistory.reduce<SalarySnapshot | null>(
-    (latest, s) => (!latest || s.effectiveFrom >= latest.effectiveFrom ? s : latest),
-    null,
-  )
+  return person.salaryHistory
+    .map((s, index) => ({ s, seq: s.recordedSeq ?? index }))
+    .reduce<{ s: SalarySnapshot; seq: number } | null>((latest, cur) => {
+      if (!latest) return cur
+      const byDate = cur.s.effectiveFrom.localeCompare(latest.s.effectiveFrom)
+      if (byDate !== 0) return byDate > 0 ? cur : latest
+      return cur.seq > latest.seq ? cur : latest
+    }, null)?.s ?? null
+}
+
+/**
+ * The recordedSeq to give the NEXT snapshot recorded for this person:
+ * max(existing) + 1, starting at 0.
+ *
+ * The invariant is "greater than every ordinal CURRENTLY in the array",
+ * which is all that matters — ordinals are only ever compared against
+ * other snapshots in the same live array. Deleting the newest snapshot
+ * does free its number for reuse, and that is harmless, because the
+ * snapshot it belonged to is gone.
+ *
+ * Deliberately NOT `salaryHistory.length`, which breaks that invariant:
+ * delete a MIDDLE snapshot from [0, 1, 2] and length is 2, colliding with
+ * the live snapshot that already holds 2. A tie between two equal
+ * ordinals falls back to whatever `.sort()` does with a 0 comparison —
+ * i.e. array order, the exact dependency recordedSeq exists to remove.
+ *
+ * Ignores any snapshot missing the field (pre-backfill data) rather than
+ * letting an undefined poison the max. See SalarySnapshot.recordedSeq.
+ */
+export function nextRecordedSeq(salaryHistory: SalarySnapshot[]): number {
+  const seqs = salaryHistory.map((s) => s.recordedSeq).filter((n): n is number => typeof n === 'number')
+  return seqs.length === 0 ? 0 : Math.max(...seqs) + 1
 }
 
 function snapshotToSalaryInput(snapshot: SalarySnapshot): SalaryInput {

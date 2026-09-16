@@ -44,7 +44,24 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
 
   const backfilled: AppDataV2 = {
     ...data,
-    people: data.people ?? [],
+    // `recordedSeq` on each SalarySnapshot is backfilled in CURRENT ARRAY
+    // ORDER (0, 1, 2 …), which is precisely what makes this
+    // behaviour-preserving: array position was already the tie-break for
+    // two snapshots sharing an effectiveFrom, so writing that same order
+    // down changes nothing today while making it survive the move to a
+    // real `salary_snapshots` table, where row order does not exist. See
+    // SalarySnapshot.recordedSeq's own comment and
+    // DATA-MODEL-REVIEW-2026-09-15.md §11.7a.
+    //
+    // ⚠️ The array is NOT sorted, reordered or de-duplicated here, and
+    // must never be — duplicate effectiveFrom entries are deliberate and
+    // sorting would reassign the very indices this reads (§11.7/§11.7b,
+    // decided 2026-09-15). `??` not `||`, so an already-backfilled
+    // recordedSeq of 0 is kept rather than silently recomputed.
+    people: (data.people ?? []).map((person) => ({
+      ...person,
+      salaryHistory: (person.salaryHistory ?? []).map((snapshot, index) => ({ ...snapshot, recordedSeq: snapshot.recordedSeq ?? index })),
+    })),
     categories: [...categories, ...missingBuiltIns],
     recurringTemplates: data.recurringTemplates ?? [],
     // `active` was introduced by the amortisation-engine work (scope §7),
