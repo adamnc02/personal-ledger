@@ -16,6 +16,7 @@ import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 import { adjustToWorkingDay, cycleBoundsForDate } from './payCycle'
 import { INCOME_CATEGORY_ID } from '../types/ledger'
 import type { AppDataV2, PayCycleConfig, Pension, RecurrenceFrequency, RecurringOccurrenceOverride, Transaction } from '../types/ledger'
+import { planReschedule, recentAndUpcomingFrom, redateStoredPayments, type ScheduleOccurrence } from './scheduleChange'
 
 const MAX_OCCURRENCES = 2000
 
@@ -102,7 +103,8 @@ function walkPensionOccurrences(pension: Pension, rangeStart: Date, rangeEnd: Da
   while (cursor <= rangeEnd && iterations < MAX_OCCURRENCES) {
     const originalDate = toIso(cursor)
     const override = pension.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
-    if (!override?.deleted) {
+    // Before scheduleFrom is stored history from an earlier schedule — see Pension.scheduleFrom.
+    if (!override?.deleted && !(pension.scheduleFrom && originalDate < pension.scheduleFrom)) {
       // Weekend/bank-holiday adjustment applies to the NOMINAL schedule
       // position, same as salary's resolvePayday — originalDate itself
       // stays the pure, unadjusted anchor (the override system's key),
@@ -162,7 +164,7 @@ export function scheduledPensionDates(pension: Pension, rangeStart: Date, rangeE
   }
   const results: string[] = []
   while (cursor <= rangeEnd && iterations < MAX_OCCURRENCES) {
-    results.push(toIso(cursor))
+    if (!(pension.scheduleFrom && toIso(cursor) < pension.scheduleFrom)) results.push(toIso(cursor))
     cursor = nextOccurrence(cursor, pension.frequency, pension.intervalWeeks, anchorDay)
     iterations++
   }
@@ -376,4 +378,81 @@ export function resolveCycleBounds(data: AppDataV2, personId: string, referenceD
     // — fall through to the salary/fixed path below rather than throw.
   }
   return cycleBoundsForDate(referenceDate, fallbackSpec)
+}
+
+// ── Schedule change from a chosen payment (2026-09-16) — see lib/scheduleChange.ts ──
+
+export type PensionSchedule = Pick<Pension, 'frequency' | 'intervalWeeks' | 'anchorDate' | 'adjustForNonWorkingDay'>
+
+/** Whether an edit changes when a pension's payments fall (and so needs the "from which payment" step). */
+export function pensionScheduleChanged(pension: Pension, next: PensionSchedule): boolean {
+  return (
+    pension.frequency !== next.frequency ||
+    pension.anchorDate !== next.anchorDate ||
+    pension.adjustForNonWorkingDay !== next.adjustForNonWorkingDay ||
+    (next.frequency === 'every_n_weeks' && (pension.intervalWeeks ?? 1) !== (next.intervalWeeks ?? 1))
+  )
+}
+
+/** The "which payment" picker: most recent past payment and the next 3. */
+export function recentAndUpcomingPensionDates(pension: Pension, asOfDate: Date): { date: string; isPast: boolean }[] {
+  return recentAndUpcomingFrom(
+    walkPensionOccurrences(pension, addYears(asOfDate, -1), addYears(asOfDate, 1)).map((o) => o.date),
+    toIso(asOfDate),
+  )
+}
+
+/** Every slot (overrides ignored) with the date a stored payment for it carries. */
+function pensionSlots(pension: Pension, start: Date, end: Date, respectScheduleFrom: boolean): ScheduleOccurrence[] {
+  const anchor = parseLocalDate(pension.anchorDate)
+  const anchorDay = anchor.getDate()
+  const out: ScheduleOccurrence[] = []
+  let cursor = anchor
+  for (let i = 0; i < MAX_OCCURRENCES && cursor <= end; i++) {
+    const key = toIso(cursor)
+    if (cursor >= start && !(respectScheduleFrom && pension.scheduleFrom && key < pension.scheduleFrom)) {
+      out.push({ key, date: pension.adjustForNonWorkingDay ? toIso(adjustToWorkingDay(cursor)) : key })
+    }
+    cursor = nextOccurrence(cursor, pension.frequency, pension.intervalWeeks, anchorDay)
+  }
+  return out
+}
+
+export function applyPensionScheduleChange(
+  pension: Pension,
+  transactions: Transaction[],
+  next: PensionSchedule,
+  pickedDate: string,
+  asOfIso: string,
+): { patch: Partial<Pension>; transactions: Transaction[] } | null {
+  const picked = parseLocalDate(pickedDate)
+  const pickedKey = walkPensionOccurrences(pension, addYears(picked, -1), addYears(picked, 1)).find((o) => o.date === pickedDate)?.originalDate ?? pickedDate
+  const belongs = (t: Transaction) => t.sourceType === 'pension' && t.sourceId === pension.id
+  const keyed = [
+    ...transactions.filter(belongs).map((t) => t.date),
+    ...(pension.occurrenceOverrides ?? []).map((o) => o.originalDate),
+    ...(pension.amountHistory ?? []).map((h) => h.effectiveFrom),
+    ...(pension.amountEffectiveFrom ? [pension.amountEffectiveFrom] : []),
+  ]
+  const lastKeyed = keyed.reduce((max, k) => (k > max ? k : max), pickedDate)
+  const start = addYears(picked, -2)
+  const end = addYears(parseLocalDate(lastKeyed), 2)
+  const plan = planReschedule(pensionSlots(pension, start, end, true), pensionSlots({ ...pension, ...next, scheduleFrom: undefined }, start, end, false), pickedKey)
+  if (!plan) return null
+
+  const occurrenceOverrides = pension.occurrenceOverrides?.map((o) => {
+    const newKey = plan.keyMap.get(o.originalDate)
+    if (!newKey) return o
+    return { ...o, originalDate: newKey, ...(o.date !== undefined ? { date: o.date === o.originalDate ? newKey : o.date } : {}) }
+  })
+  return {
+    patch: {
+      ...next,
+      scheduleFrom: plan.firstNew.key,
+      occurrenceOverrides,
+      amountEffectiveFrom: pension.amountEffectiveFrom ? plan.boundary(pension.amountEffectiveFrom) : undefined,
+      amountHistory: pension.amountHistory?.map((h) => ({ ...h, effectiveFrom: plan.boundary(h.effectiveFrom) })),
+    },
+    transactions: redateStoredPayments(transactions, belongs, plan, asOfIso),
+  }
 }

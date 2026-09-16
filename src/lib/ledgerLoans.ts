@@ -24,6 +24,7 @@ import { backSolveMonthlyRate, calibrateRateAndConvention, flatMonthlyConvention
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 import { toLocalIsoDate as toIso, todayIso, parseLocalDate } from './date'
+import { planReschedule, redateStoredPayments, type ReschedulePlan, type ScheduleOccurrence } from './scheduleChange'
 const sameMonth = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()
 
 /**
@@ -212,6 +213,7 @@ export function scheduledLoanRecurringOverpaymentRealDates(loan: Loan, rangeStar
   return schedule
     .filter((e) => e.date >= rangeStartIso && e.date <= rangeEndIso && e.date >= r.startDate && (!r.endDate || e.date <= r.endDate))
     .map((e) => ({ date: realDates.get(e.date) ?? e.date, periodDate: e.date }))
+    .filter((e) => !(r.scheduleFrom && e.date < r.scheduleFrom))
 }
 
 /**
@@ -327,7 +329,7 @@ export function setPausedLoanRecurringOverpaymentDates(loan: Loan, windowDates: 
  * checklist toggle when the item being moved is a loan rather than a bill.
  */
 export function recentAndUpcomingLoanPaymentDates(loan: Loan, asOfDate: Date): { date: string; isPast: boolean }[] {
-  const schedule = buildLoanSchedule(loan)
+  const schedule = buildLoanSchedule(loan).filter((s) => !(loan.scheduleFrom && s.date < loan.scheduleFrom))
   const asOfIso = toIso(asOfDate)
   const past = schedule.filter((s) => s.date <= asOfIso)
   const upcoming = schedule.filter((s) => s.date > asOfIso)
@@ -1036,7 +1038,8 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
   // period-mate's recurring overpayment can legitimately fall on
   // opposite sides of a window boundary.
   for (const e of fullSchedule) {
-    if (e.scheduledPayment > 0 && e.date >= startIso && e.date <= endIso) {
+    // Before scheduleFrom is stored history from an earlier schedule — see Loan.scheduleFrom.
+    if (e.scheduledPayment > 0 && e.date >= startIso && e.date <= endIso && !(loan.scheduleFrom && e.date < loan.scheduleFrom)) {
       results.push({
         date: e.date,
         amount: round2(e.scheduledPayment),
@@ -1066,7 +1069,8 @@ export function generateLoanPaymentTransactions(loan: Loan, rangeStart: Date, ra
       // had deliberately set the recurring overpayment to a
       // completely different day of the month.
       const realDate = recurringDates.get(e.date) ?? e.date
-      if (realDate >= startIso && realDate <= endIso) {
+      const beforeOverpaymentScheduleFrom = !!loan.recurringOverpayment?.scheduleFrom && realDate < loan.recurringOverpayment.scheduleFrom
+      if (realDate >= startIso && realDate <= endIso && !beforeOverpaymentScheduleFrom) {
         const overpaymentSource = resolveRecurringOverpaymentSource(loan)
         results.push({
           date: realDate,
@@ -1126,6 +1130,7 @@ export function recentAndUpcomingLoanRecurringOverpaymentDates(loan: Loan, asOfD
   const entries = schedule
     .filter((e) => e.recurringOverpaymentApplied > 0)
     .map((e) => ({ date: realDates.get(e.date) ?? e.date, periodDate: e.date }))
+    .filter((e) => !(loan.recurringOverpayment?.scheduleFrom && e.date < loan.recurringOverpayment.scheduleFrom))
     .sort((a, b) => a.date.localeCompare(b.date))
   const asOfIso = toIso(asOfDate)
   const past = entries.filter((e) => e.date <= asOfIso)
@@ -1238,4 +1243,97 @@ export function applyLoanOverpayment(
     note,
   }
   return { updatedLoan, transaction, overpayment }
+}
+
+// ── Schedule changes from a chosen payment (2026-09-16) — see lib/scheduleChange.ts ──
+
+const FAR_PAST = new Date(1970, 0, 1)
+const FAR_FUTURE = new Date(2200, 0, 1)
+
+function loanPaymentOccurrences(loan: Loan, respectScheduleFrom: boolean): ScheduleOccurrence[] {
+  return buildLoanSchedule(loan)
+    .filter((e) => e.scheduledPayment > 0 && !(respectScheduleFrom && loan.scheduleFrom && e.date < loan.scheduleFrom))
+    .map((e) => ({ key: e.date, date: e.date }))
+}
+
+/** Recurring-overpayment occurrences keyed on their loan period (what pausedDates/amountOverrides key on), dated on their real date. */
+function overpaymentOccurrences(loan: Loan): ScheduleOccurrence[] {
+  return scheduledLoanRecurringOverpaymentRealDates(loan, FAR_PAST, FAR_FUTURE).map((o) => ({ key: o.periodDate, date: o.date }))
+}
+
+function withoutScheduleFrom(loan: Loan): Loan {
+  return { ...loan, scheduleFrom: undefined, recurringOverpayment: loan.recurringOverpayment ? { ...loan.recurringOverpayment, scheduleFrom: undefined } : undefined }
+}
+
+function remapOverpaymentKeys(r: LoanRecurringOverpayment, keyMap: Map<string, string>, boundary: (iso: string) => string): LoanRecurringOverpayment {
+  return {
+    ...r,
+    pausedDates: r.pausedDates?.map((d) => keyMap.get(d) ?? d),
+    amountOverrides: r.amountOverrides?.map((o) => ({ ...o, date: keyMap.get(o.date) ?? o.date })),
+    amountEffectiveFrom: r.amountEffectiveFrom ? boundary(r.amountEffectiveFrom) : undefined,
+    amountHistory: r.amountHistory?.map((h) => ({ ...h, effectiveFrom: boundary(h.effectiveFrom) })),
+  }
+}
+
+/**
+ * A loan's first payment date changed, from a chosen payment. Its regular
+ * payments are re-dated from there, and so are its recurring overpayment's,
+ * whose real dates are worked out against the loan's own periods and can
+ * shift with them.
+ */
+export function applyLoanStartDateChange(loan: Loan, transactions: Transaction[], newStartDate: string, pickedDate: string, asOfIso: string): { patch: Partial<Loan>; transactions: Transaction[] } | null {
+  const moved = withoutScheduleFrom({ ...loan, startDate: newStartDate })
+  const plan = planReschedule(loanPaymentOccurrences(loan, true), loanPaymentOccurrences(moved, false), pickedDate)
+  if (!plan) return null
+
+  let rewritten = redateStoredPayments(transactions, (t) => t.sourceType === 'loan' && t.sourceId === loan.id, plan, asOfIso)
+  let recurringOverpayment = loan.recurringOverpayment
+  if (recurringOverpayment) {
+    const oldByPeriod = new Map(overpaymentOccurrences(loan).map((o) => [o.key, o.date]))
+    const newByPeriod = new Map(overpaymentOccurrences(moved).map((o) => [o.key, o.date]))
+    const dateMap = new Map<string, string>()
+    for (const [oldPeriod, newPeriod] of plan.keyMap) {
+      const oldReal = oldByPeriod.get(oldPeriod)
+      const newReal = newByPeriod.get(newPeriod)
+      if (oldReal && newReal) dateMap.set(oldReal, newReal)
+    }
+    const firstNewReal = [...dateMap.values()].sort()[0]
+    rewritten = redateStoredPayments(rewritten, (t) => t.sourceType === 'loan_recurring_overpayment' && t.sourceId === loan.id, { ...plan, dateMap } as ReschedulePlan, asOfIso)
+    recurringOverpayment = {
+      ...remapOverpaymentKeys(recurringOverpayment, plan.keyMap, plan.boundary),
+      scheduleFrom: firstNewReal ?? recurringOverpayment.scheduleFrom,
+    }
+  }
+
+  return {
+    patch: {
+      startDate: newStartDate,
+      scheduleFrom: plan.firstNew.date,
+      monthlyPaymentEffectiveFrom: loan.monthlyPaymentEffectiveFrom ? plan.boundary(loan.monthlyPaymentEffectiveFrom) : undefined,
+      monthlyPaymentHistory: loan.monthlyPaymentHistory?.map((h) => ({ ...h, effectiveFrom: plan.boundary(h.effectiveFrom) })),
+      recurringOverpayment,
+    },
+    transactions: rewritten,
+  }
+}
+
+/** A recurring overpayment's start date changed, from a chosen overpayment (`pickedDate` is its real date). */
+export function applyRecurringOverpaymentStartDateChange(
+  loan: Loan,
+  transactions: Transaction[],
+  newStartDate: string,
+  pickedDate: string,
+  asOfIso: string,
+): { patch: Partial<Loan>; transactions: Transaction[] } | null {
+  const r = loan.recurringOverpayment
+  if (!r) return null
+  const oldOccurrences = overpaymentOccurrences(loan)
+  const pickedKey = oldOccurrences.find((o) => o.date === pickedDate)?.key ?? pickedDate
+  const moved = withoutScheduleFrom({ ...loan, recurringOverpayment: { ...r, startDate: newStartDate } })
+  const plan = planReschedule(oldOccurrences, overpaymentOccurrences(moved), pickedKey)
+  if (!plan) return null
+  return {
+    patch: { recurringOverpayment: { ...remapOverpaymentKeys({ ...r, startDate: newStartDate }, plan.keyMap, plan.boundary), scheduleFrom: plan.firstNew.date } },
+    transactions: redateStoredPayments(transactions, (t) => t.sourceType === 'loan_recurring_overpayment' && t.sourceId === loan.id, plan, asOfIso),
+  }
 }
