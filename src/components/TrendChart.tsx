@@ -297,24 +297,19 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
   const barGap = Math.min(3, stride / 3)
   const barWidth = stride - barGap
 
-  // The background "track" behind every column is a fixed height — the
-  // reference scale for the whole chart — set by the single largest amount
-  // actually SAVED (a positive netChange) across the current granularity's
-  // points, per the reference screenshots (every track pill is identical
-  // height; only the coloured fill inside it varies). Each column's fill
-  // is then that period's own net movement (saved OR withdrawn) as a
-  // fraction of that scale, not the period's end-of-period balance — the
-  // running balance is shown as text in the callout above the chart
-  // instead, not encoded in bar height. Falls back to the largest
-  // magnitude of any kind when there's no positive period at all (e.g. a
-  // pot that's only ever been withdrawn from), so bars still have a
-  // meaningful scale rather than every one dividing by zero.
-  const netValues = points.map((p) => p.netChange)
-  const maxSaved = Math.max(0, ...netValues)
-  const scaleMax = maxSaved > 0 ? maxSaved : Math.max(1, ...netValues.map((v) => Math.abs(v)))
+  // Column heights (Adam, 2026-09-16 — corrects the first build): every
+  // column's background track is full height and stands for the highest
+  // balance the pot reaches anywhere in this view (series.peakBalance,
+  // including a peak inside a single day); the coloured fill is that
+  // period's END BALANCE against it — the original Trends spec's "each
+  // column is the pot's end-of-period balance". The first build drew the
+  // fill from |netChange| instead, so on Adam's pot the only tall column
+  // was the day he withdrew £242, and the day it held £242.85 was flat.
+  // The net saved/withdrawn figure lives in the tooltip, not in bar height.
+  const scaleMax = series.peakBalance > 0 ? series.peakBalance : 1
 
-  function fillHeight(v: number) {
-    return Math.min(trackHeight, (Math.abs(v) / scaleMax) * trackHeight)
+  function fillHeight(balance: number) {
+    return Math.min(trackHeight, (Math.max(0, balance) / scaleMax) * trackHeight)
   }
 
   // Cap x-axis LABELS at 4 even though every column still renders — per
@@ -371,7 +366,7 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
       style={{ touchAction: interactive ? 'none' : undefined, display: 'block', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}
     >
       {points.map((p, i) => {
-        const h = Math.max(2, fillHeight(p.netChange))
+        const h = Math.max(2, fillHeight(p.endBalance))
         const x = i * stride
         const y = height - padBottom - h
         const isActive = activeIndex === i

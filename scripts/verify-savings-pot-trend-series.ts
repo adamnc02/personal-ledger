@@ -120,6 +120,28 @@ const boundaryWeeks = buildSavingsPotTrendSeries(boundaryData, pot, 'last_6_cycl
 assertFlowsReconcile('Week boundary (Sun 13 / Mon 14 Sep)', boundaryWeeks)
 check('Sunday 13 Sep lands in w/c 7 Sep, Monday 14 Sep in w/c 14 Sep', ['2026-09-07', '2026-09-14'].map((d) => boundaryWeeks.points.find((p) => p.periodStart === d)?.moneyIn), [10, 20])
 
+// ---- Column scale (Adam, 2026-09-16): fill = endBalance, full height = peak balance in the view ----
+for (const [label, series] of [['This Cycle', thisCycle], ['Last 6 Cycles', last6], ['Year', year]] as const) {
+  check(`${label}: peakBalance is the highest balance in the view (1000 opening + 100 deposit)`, series.peakBalance, 1100)
+  check(`${label}: no column's end balance exceeds the peak`, series.points.every((p) => p.endBalance <= series.peakBalance), true)
+}
+// Adam's example: £500 + £500 in on one day, £300 out the same day — the day closes at £700 but the pot held £1,000.
+const peakData: AppDataV2 = {
+  ...data,
+  savingsPots: [{ ...pot, openingBalance: 0 }],
+  transactions: [
+    { id: 'p1', date: '2026-09-08', amount: 500, direction: 'out', categoryId: 'category-savings', paymentMethod: 'bank_transfer', status: 'cleared', type: 'savings_deposit', location: 'personal', ownerId: 'me', savingsPotId: 'sp-1' },
+    { id: 'p2', date: '2026-09-08', amount: 300, direction: 'in', categoryId: 'category-savings', paymentMethod: 'bank_transfer', status: 'cleared', type: 'savings_withdrawal', location: 'personal', ownerId: 'me', savingsPotId: 'sp-1' },
+    { id: 'p3', date: '2026-09-08', amount: 500, direction: 'out', categoryId: 'category-savings', paymentMethod: 'bank_transfer', status: 'cleared', type: 'savings_deposit', location: 'personal', ownerId: 'me', savingsPotId: 'sp-1' },
+  ],
+}
+for (const granularity of ['this_cycle', 'last_6_cycles', 'year'] as const) {
+  const series = buildSavingsPotTrendSeries(peakData, { ...pot, openingBalance: 0 }, granularity, asOfDate)
+  check(`Intraday peak (${granularity}): £500 + £500 in, £300 out same day → peak £1,000, not the £700 close`, series.peakBalance, 1000)
+}
+const peakDay = buildSavingsPotTrendSeries(peakData, { ...pot, openingBalance: 0 }, 'this_cycle', asOfDate).points.find((p) => p.periodStart === '2026-09-08')!
+check('Intraday peak: that day\'s column still fills to its £700 end balance', peakDay.endBalance, 700)
+
 // ---- Adam's real backup — the acceptance case for Bug B ----
 // His `Savings` pot (3W_cgSam) opened 2026-09-12 with £242.85; `uhyY_plA` moved £242 out to personal
 // on 2026-09-13. That is the drop he described; its period must name it as £242 out on every granularity.
@@ -131,6 +153,9 @@ try {
   console.log(`(skipped real-backup checks — ${backupPath} not found)`)
 }
 if (backup) {
+  const realPot0 = backup.savingsPots.find((p) => p.id === '3W_cgSam')!
+  const realDays = buildSavingsPotTrendSeries(backup, realPot0, 'this_cycle', new Date(2026, 8, 16)).points
+  check('Real backup (this_cycle): 12 Sep is a FULL column (£242.85), 13 Sep a near-empty one (£0.85)', realDays.slice(0, 2).map((p) => [p.periodStart, p.endBalance]), [['2026-09-12', 242.85], ['2026-09-13', 0.85]])
   const realPot = backup.savingsPots.find((p) => p.id === '3W_cgSam')!
   const realAsOf = new Date(2026, 8, 16)
   for (const [granularity, periodStart] of [['this_cycle', '2026-09-13'], ['last_6_cycles', '2026-09-07'], ['year', '2026-08-28']] as const) {
@@ -138,6 +163,7 @@ if (backup) {
     assertFlowsReconcile(`Real backup (${granularity})`, series)
     const drop = series.points.find((p) => p.periodStart === periodStart)
     check(`Real backup (${granularity}): the period holding 13 Sep shows £242 withdrawn, £242 out, £0 in`, drop && [drop.netChange, drop.moneyOut, drop.moneyIn], [-242, 242, 0])
+    check(`Real backup (${granularity}): full column height = £242.85, the most the pot held`, series.peakBalance, 242.85)
   }
 }
 

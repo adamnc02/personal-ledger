@@ -333,6 +333,38 @@ function savingsPotActivityDelta(t: Transaction, savingsPotId: string): number {
   return 0
 }
 
+/**
+ * Highest balance the pot holds at any point across [startIso, endIso]
+ * (Adam, 2026-09-16): the balance entering the range, and within each day
+ * that day's money IN applied before its money OUT — so £500 + £500 in and
+ * £300 out on one day peaks at £1,000, not the £700 it closes at. Rows carry
+ * no time of day, so in-before-out is the stated convention, not a
+ * measurement. One sorted pass rather than savingsPotBalanceAsOf per day,
+ * since the modal rebuilds its series on every drag re-render.
+ */
+function savingsPotPeakBalance(pot: SavingsPot, activity: Transaction[], startIso: string, endIso: string): number {
+  const relevant = activity
+    .filter((t) => transactionTouchesSavingsPot(t, pot.id) && t.date >= pot.openingDate && t.date <= endIso)
+    .sort((a, b) => a.date.localeCompare(b.date))
+  let balance = pot.openingBalance
+  let i = 0
+  for (; i < relevant.length && relevant[i].date < startIso; i++) balance += savingsPotActivityDelta(relevant[i], pot.id)
+  let peak = balance
+  while (i < relevant.length) {
+    const date = relevant[i].date
+    let dayIn = 0
+    let dayOut = 0
+    for (; i < relevant.length && relevant[i].date === date; i++) {
+      const delta = savingsPotActivityDelta(relevant[i], pot.id)
+      if (delta > 0) dayIn += delta
+      else dayOut -= delta
+    }
+    peak = Math.max(peak, balance + dayIn)
+    balance += dayIn - dayOut
+  }
+  return round2(Math.max(0, peak))
+}
+
 /** Money in and out of the pot across [startIso, endIso] inclusive, from the same rows and filter savingsPotBalanceAsOf folds — so for any period, moneyIn - moneyOut equals the change in balance across it. The opening balance is not a flow. */
 function savingsPotFlowsBetween(pot: SavingsPot, activity: Transaction[], startIso: string, endIso: string): { moneyIn: number; moneyOut: number } {
   let moneyIn = 0
@@ -588,6 +620,8 @@ export interface SavingsPotPillPoint {
 export interface SavingsPotTrendSeries {
   granularity: SavingsPotPillGranularity
   points: SavingsPotPillPoint[] // ascending by period
+  /** Highest balance the pot reaches anywhere across the whole view, including a peak inside a single period (see savingsPotPeakBalance) — the full-height reference every column's endBalance is drawn against. */
+  peakBalance: number
 }
 
 function savingsPotCycleBounds(data: AppDataV2, personId: string, asOfDate: Date): { start: Date; end: Date } {
@@ -656,7 +690,7 @@ export function buildSavingsPotTrendSeries(
       prevBalance = endBalance
       return { periodStart: date, periodEnd: date, endBalance, netChange, ...savingsPotFlowsBetween(pot, activity, date, date), axisLabel: shortDateLabel(date), tooltipLabel: shortDateLabel(date) }
     })
-    return { granularity, points }
+    return { granularity, points, peakBalance: savingsPotPeakBalance(pot, activity, days[0] ?? toIso(rangeStart), toIso(end)) }
   }
 
   if (granularity === 'last_6_cycles') {
@@ -692,7 +726,7 @@ export function buildSavingsPotTrendSeries(
         tooltipLabel: `w/c ${shortDateLabel(startIso)} · w/e ${shortDateLabel(endIso)}`,
       }
     })
-    return { granularity, points }
+    return { granularity, points, peakBalance: savingsPotPeakBalance(pot, activity, toIso(weekStarts[0] ?? rangeStart), toIso(rangeEnd)) }
   }
 
   // 'year' — one column per pay cycle, current + 11 before it, offset-labelled.
@@ -720,7 +754,7 @@ export function buildSavingsPotTrendSeries(
       tooltipLabel: `${MONTH_ABBR[cycle.start.getMonth()]} ${cycle.start.getFullYear()}`,
     }
   })
-  return { granularity, points }
+  return { granularity, points, peakBalance: savingsPotPeakBalance(pot, activity, toIso(cyclesAsc[0].start), toIso(rangeEnd)) }
 }
 
 // ── Goal helpers — two independent triggers, per Adam's spec ─────────
