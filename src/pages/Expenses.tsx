@@ -27,6 +27,7 @@ import {
   scheduleDiffers,
   type RawOccurrence,
   type TemplateSchedule,
+  occurrenceSlotForDate,
 } from '../lib/schedule'
 import { transferLocationLabel, buildTransferLocationOptions, transferLocationKey, locationsEqual, type TransferLocationOption } from '../lib/transferLedger'
 import { LocationStep, FrequencyStep, DateStep, TransferFrequencySelect, TRANSFER_FREQUENCY_LABELS, type TransferFrequencyChoice, resolveTransferFrequencyChoice, transferFrequencyChoiceFor } from '../components/TransferSteps'
@@ -2858,13 +2859,13 @@ function TransferRecurringRow({
               const amountPatch = !amountDirty
                 ? {}
                 : scope === 'single'
-                  ? applyTemplateSingleOccurrenceAmountChange(template, Number(amount), effectiveFrom)
-                  : applyTemplateAmountChange(template, Number(amount), effectiveFrom)
+                  ? applyTemplateSingleOccurrenceAmountChange(template, Number(amount), occurrenceSlotForDate(template, effectiveFrom))
+                  : applyTemplateAmountChange(template, Number(amount), occurrenceSlotForDate(template, effectiveFrom))
               // Same split as Bills.tsx: a single-payment date move is an
               // override; any other slot change re-slots via
               // changeRecurringTemplateSchedule, after this update.
               const singleDateMove = dateOnlyChange && scope === 'single'
-              const datePatch = singleDateMove ? applyTemplateSingleOccurrenceDateChange({ ...template, ...amountPatch }, nextSchedule.anchorDate, effectiveFrom) : {}
+              const datePatch = singleDateMove ? applyTemplateSingleOccurrenceDateChange({ ...template, ...amountPatch }, nextSchedule.anchorDate, occurrenceSlotForDate(template, effectiveFrom)) : {}
               const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...amountPatch, ...datePatch, ...freqPatch() }
               if (locationsDirty && transferFrom && transferTo) {
                 updates.transferFrom = transferFrom
@@ -3423,14 +3424,14 @@ function RecurringTransactionEditPanel({
           let working = template
           let patch: Partial<Omit<RecurringTemplate, 'id'>> = {}
           if (amountChanged) {
-            const amountPatch = scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(working, draft.amount, effectiveFrom) : applyTemplateAmountChange(working, draft.amount, effectiveFrom)
+            const amountPatch = scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(working, draft.amount, occurrenceSlotForDate(template, effectiveFrom)) : applyTemplateAmountChange(working, draft.amount, occurrenceSlotForDate(template, effectiveFrom))
             working = { ...working, ...amountPatch }
             patch = { ...patch, amount: scope === 'single' ? template.amount : draft.amount, ...amountPatch }
           }
           // Same split as Bills.tsx: a single-payment date move is an
           // override; anything else re-slots via changeRecurringTemplateSchedule.
           const singleDateMove = dateOnlyChange && scope === 'single'
-          if (singleDateMove) patch = { ...patch, ...applyTemplateSingleOccurrenceDateChange(working, draft.anchorDate, effectiveFrom) }
+          if (singleDateMove) patch = { ...patch, ...applyTemplateSingleOccurrenceDateChange(working, draft.anchorDate, occurrenceSlotForDate(template, effectiveFrom)) }
           if (scheduleChanged) patch = { ...patch, anchorDate: template.anchorDate, frequency: template.frequency, intervalWeeks: template.intervalWeeks }
           onSave({ ...draft, ...patch })
           if (scheduleChanged && !singleDateMove) {

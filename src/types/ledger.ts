@@ -428,6 +428,15 @@ export interface RecurringTemplate {
   // weekday and cadence both come from this date; for 'quarterly'/'annual'
   // it's the first occurrence.
   anchorDate: string // ISO date
+  // 2026-09-16 (Adam-specified) — the intended day of month for a
+  // monthly/quarterly/annual schedule, when it differs from anchorDate's
+  // own day. Set only when a schedule change has to anchor on a month too
+  // short for the chosen day (a "31st" bill re-anchored in September is
+  // stored as 30 Sep): each occurrence then falls on this day, or the
+  // month's last day when the month is shorter, so it's the 31st again in
+  // October. Absent = anchorDate's own day, as every template before this.
+  // Cleared whenever anchorDate itself is edited.
+  anchorDayOfMonth?: number
   location: BillLocation
   ownerId: string
   payee: string

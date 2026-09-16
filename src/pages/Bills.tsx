@@ -29,6 +29,7 @@ import {
   setPausedTemplateOccurrences,
   resolveOccurrenceAmount,
   templateOccurrencePreviews,
+  occurrenceSlotForDate,
 } from '../lib/schedule'
 import { addMonths } from 'date-fns'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
@@ -750,7 +751,7 @@ function BillEditPanel({
           let patch: Partial<Omit<RecurringTemplate, 'id'>> = {}
           if (changeKind === 'amount') {
             const amountPatch =
-              scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(workingTemplate, draft.amount, effectiveFrom) : applyTemplateAmountChange(workingTemplate, draft.amount, effectiveFrom)
+              scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(workingTemplate, draft.amount, occurrenceSlotForDate(template, effectiveFrom)) : applyTemplateAmountChange(workingTemplate, draft.amount, occurrenceSlotForDate(template, effectiveFrom))
             workingTemplate = { ...workingTemplate, ...amountPatch }
             patch = { ...patch, amount: scope === 'single' ? template.amount : draft.amount, ...amountPatch }
           }
@@ -762,7 +763,7 @@ function BillEditPanel({
           // anchorDate here, duplicating every stored payment.
           const singleDateMove = dateChanged && !freqChanged && scope === 'single'
           if (singleDateMove) {
-            const datePatch = applyTemplateSingleOccurrenceDateChange(workingTemplate, draft.anchorDate, effectiveFrom)
+            const datePatch = applyTemplateSingleOccurrenceDateChange(workingTemplate, draft.anchorDate, occurrenceSlotForDate(template, effectiveFrom))
             workingTemplate = { ...workingTemplate, ...datePatch }
             patch = { ...patch, ...datePatch }
           }

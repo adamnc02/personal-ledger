@@ -646,7 +646,16 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     return id
   }
   const updateRecurringTemplate: LedgerContextValue['updateRecurringTemplate'] = (id, updates) => {
-    setDataState((prev) => ({ ...prev, recurringTemplates: prev.recurringTemplates.map((t) => (t.id === id ? { ...t, ...updates } : t)) }))
+    setDataState((prev) => ({
+      ...prev,
+      recurringTemplates: prev.recurringTemplates.map((t) => {
+        if (t.id !== id) return t
+        // Editing the date directly makes it the intended day again — see
+        // RecurringTemplate.anchorDayOfMonth.
+        const anchorEdited = updates.anchorDate !== undefined && updates.anchorDate !== t.anchorDate && updates.anchorDayOfMonth === t.anchorDayOfMonth
+        return anchorEdited ? { ...t, ...updates, anchorDayOfMonth: undefined } : { ...t, ...updates }
+      }),
+    }))
   }
   const changeRecurringTemplateSchedule: LedgerContextValue['changeRecurringTemplateSchedule'] = (id, next, effectiveFromDate) => {
     setDataState((prev) => {

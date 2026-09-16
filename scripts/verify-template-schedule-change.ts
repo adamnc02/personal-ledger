@@ -20,7 +20,7 @@
 import { readFileSync } from 'node:fs'
 import { defaultLedgerData, defaultPayCycleConfig, parseLedgerBackupJson } from '../src/lib/ledgerStorage'
 import { autoClearDuePayments } from '../src/lib/autoClear'
-import { applyTemplateScheduleChange, recentAndUpcomingOccurrences, type TemplateSchedule } from '../src/lib/schedule'
+import { applyTemplateAmountChange, applyTemplateScheduleChange, generateTransactionsForTemplate, recentAndUpcomingOccurrences, scheduledTemplateDates, type TemplateSchedule } from '../src/lib/schedule'
 import { parseLocalDate } from '../src/lib/date'
 import type { AppDataV2, RecurringTemplate, Transaction } from '../src/types/ledger'
 
@@ -115,9 +115,9 @@ const on16th: TemplateSchedule = { frequency: 'monthly', anchorDate: '2025-01-16
   const rows = rowsOf(weekly, 'bill')
   check('monthly → weekly: no phantom weekly payments in the past history', rows.filter((t) => t.date < '2026-09-01'), history.slice(0, 20))
   const september = rows.filter((t) => t.date >= '2026-09-01')
-  // The anchor (15 Jan 2025) is a Wednesday, so the weekly run is on
-  // Wednesdays: Tuesday 15 Sep's payment moves to the nearest, 16 Sep.
-  check('monthly → weekly: the Sep payment moves to the nearest weekly day (Wed 16 Sep), nothing duplicated', dates(september), ['2026-09-16:cleared'])
+  // Only the frequency changed, so the chosen payment starts the weekly run.
+  check('monthly → weekly from 15 Sep: that payment stays on 15 Sep and starts the weekly run, nothing duplicated', dates(september), ['2026-09-15:cleared'])
+  check('...next weekly payments 22 Sep, 29 Sep', generateTransactionsForTemplate(weekly.recurringTemplates[0], parseLocalDate('2026-09-16'), parseLocalDate('2026-09-30')).map((o) => o.date), ['2026-09-22', '2026-09-29'])
   check('...and it is the SAME row, re-slotted', september[0].id, history.at(-1)!.id)
 
   const weeklyBill: RecurringTemplate = { ...bill, id: 'weekly', frequency: 'weekly', anchorDate: '2026-06-02' }
@@ -126,7 +126,8 @@ const on16th: TemplateSchedule = { frequency: 'monthly', anchorDate: '2025-01-16
   const toMonthly = change(weeklyData, 'weekly', { frequency: 'monthly', anchorDate: '2026-06-02' }, '2026-09-15')
   const monthlyRows = rowsOf(toMonthly, 'weekly')
   check('weekly → monthly from 15 Sep: earlier weekly payments untouched', monthlyRows.filter((t) => t.date < '2026-09-15'), weeklyRows.filter((t) => t.date < '2026-09-15'))
-  check('weekly → monthly: the 15 Sep payment becomes the first monthly one, no duplicate', dates(monthlyRows.filter((t) => t.date >= '2026-09-15')), ['2026-10-02:pending'])
+  check('weekly → monthly from 15 Sep: that payment is the first monthly one, no duplicate', dates(monthlyRows.filter((t) => t.date >= '2026-09-15')), ['2026-09-15:cleared'])
+  check('...then 15 Oct, 15 Nov', generateTransactionsForTemplate(toMonthly.recurringTemplates[0], parseLocalDate('2026-09-16'), parseLocalDate('2026-11-30')).map((o) => o.date), ['2026-10-15', '2026-11-15'])
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -156,6 +157,45 @@ const on16th: TemplateSchedule = { frequency: 'monthly', anchorDate: '2025-01-16
   check("an override whose date was just its own slot follows the new slot", o.find((x) => x.amount === 70), { originalDate: '2026-09-16', amount: 70, date: '2026-09-16' })
   check('an override before the chosen payment is untouched', o.find((x) => x.amount === 60)?.originalDate, '2026-06-15')
   check('the upcoming schedule honours them: 16 Oct £99, 16 Nov skipped, 20 Dec', recentAndUpcomingOccurrences(after.recurringTemplates[0], asOf).map((x) => x.date), ['2026-09-16', '2026-10-16', '2026-12-20', '2027-01-16'])
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 4b. The 29th–31st (Adam, 2026-09-16): a day a month can't hold falls on
+//     that month's last day, ONLY in that month. Found in review: choosing
+//     the 31st from the 15 Sep payment anchored on 30 Sep, and every later
+//     month stayed on the 30th. anchorDayOfMonth keeps the intended day.
+// ─────────────────────────────────────────────────────────────────────
+{
+  const to31st = change(longHistory, 'bill', { frequency: 'monthly', anchorDate: '2025-01-31' }, '2026-09-15')
+  const t = to31st.recurringTemplates[0]
+  check('15th → 31st from 15 Sep: the Sep payment lands on 30 Sep (September has 30 days)', dates(rowsOf(to31st, 'bill').slice(-1)), ['2026-09-30:pending'])
+  check('...stored as anchor 30 Sep, intended day 31', [t.anchorDate, t.anchorDayOfMonth], ['2026-09-30', 31])
+  const expected = ['2026-09-30', '2026-10-31', '2026-11-30', '2026-12-31', '2027-01-31', '2027-02-28', '2027-03-31', '2027-04-30']
+  check('the ledger generator: back on the 31st whenever the month has one', generateTransactionsForTemplate(t, parseLocalDate('2026-09-01'), parseLocalDate('2027-04-30')).map((o) => o.date), expected)
+  check('Manage upcoming payments shows the same dates', scheduledTemplateDates(t, parseLocalDate('2026-09-01'), parseLocalDate('2027-04-30')).map((o) => o.date), expected)
+  check('a 29 Feb in a leap year is kept', generateTransactionsForTemplate({ ...t, anchorDate: '2027-11-30', anchorDayOfMonth: 29 }, parseLocalDate('2028-01-01'), parseLocalDate('2028-03-31')).map((o) => o.date), ['2028-01-29', '2028-02-29', '2028-03-29'])
+  const quarterly = change({ ...longHistory, recurringTemplates: [{ ...bill, frequency: 'quarterly', anchorDate: '2026-03-15' }], transactions: [] }, 'bill', { frequency: 'quarterly', anchorDate: '2026-03-31' }, '2026-06-15')
+  check('quarterly 15th → 31st: 30 Jun, 30 Sep, 31 Dec, 31 Mar', generateTransactionsForTemplate(quarterly.recurringTemplates[0], parseLocalDate('2026-06-01'), parseLocalDate('2027-03-31')).map((o) => o.date), ['2026-06-30', '2026-09-30', '2026-12-31', '2027-03-31'])
+  check('changing only the frequency (→ quarterly from 30 Nov) keeps the intended 31st', generateTransactionsForTemplate(change(to31st, 'bill', { frequency: 'quarterly', anchorDate: t.anchorDate }, '2026-11-30').recurringTemplates[0], parseLocalDate('2026-11-01'), parseLocalDate('2027-08-31')).map((o) => o.date), ['2026-11-30', '2027-02-28', '2027-05-31', '2027-08-31'])
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 4c. Amount AND date in one save (found in review, fixed 2026-09-16).
+//     The amount change is recorded from the chosen payment's OLD date;
+//     moving that payment earlier left it before the new amount started.
+// ─────────────────────────────────────────────────────────────────────
+{
+  const withAmount: AppDataV2 = { ...longHistory, recurringTemplates: [{ ...bill, ...applyTemplateAmountChange(bill, 80, '2026-09-15') }] }
+  const both = change(withAmount, 'bill', { frequency: 'monthly', anchorDate: '2025-01-10' }, '2026-09-15')
+  const rows = rowsOf(both, 'bill')
+  check('amount £80 + date 15th → 10th from 15 Sep: the moved Sep payment is £80', [rows.at(-1)!.date, rows.at(-1)!.amount], ['2026-09-10', 80])
+  check('...Aug keeps the old amount', rows.at(-2)!.amount, 68.58)
+  check('...the upcoming 10 Oct is £80', generateTransactionsForTemplate(both.recurringTemplates[0], parseLocalDate('2026-10-01'), parseLocalDate('2026-10-31')).map((o) => o.amount), [80])
+  const later = change(withAmount, 'bill', { frequency: 'monthly', anchorDate: '2025-01-20' }, '2026-09-15')
+  check('amount £80 + date 15th → 20th: the moved payment is £80 too', rowsOf(later, 'bill').at(-1)!.amount, 80)
+  const futureAmount: AppDataV2 = { ...longHistory, recurringTemplates: [{ ...bill, ...applyTemplateAmountChange(bill, 90, '2026-11-15') }] }
+  const shifted = change(futureAmount, 'bill', { frequency: 'monthly', anchorDate: '2025-01-10' }, '2026-09-15')
+  check('an amount change already scheduled for 15 Nov now starts on 10 Nov, the same payment', shifted.recurringTemplates[0].amountEffectiveFrom, '2026-11-10')
 }
 
 // ─────────────────────────────────────────────────────────────────────
