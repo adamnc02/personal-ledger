@@ -19,7 +19,7 @@ import {
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
-import { nextMinimumChargeAmount, pickNextSharedCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
+import { nextMinimumChargeAmount, pickNextSharedCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance, creditCardMinimumClearsFullBalance, defaultStatementWindowForPaymentDay } from '../lib/creditCards'
 import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
@@ -445,6 +445,15 @@ export function Loans() {
       </CollapsibleSection>
     </div>
   )
+}
+
+/** The full ordinal for a day, e.g. 14 -> "14th". `ordinalSuffix` below
+ * returns only the SUFFIX ("th"), which reads correctly when the number is
+ * already being printed next to it ({day}{ordinalSuffix(day)}) but renders
+ * as a bare "th" on its own — a mistake the statement-window caption was
+ * already making before PROMPT-01 (2026-09-16). */
+function ordinalDay(day: number): string {
+  return `${day}${ordinalSuffix(day)}`
 }
 
 function ordinalSuffix(day: number): string {
@@ -1234,14 +1243,53 @@ function CreditCardEditPanel({
         />
       </div>
 
+      {/* PROMPT-01 A1 (2026-09-16, Adam-specified: "Prompt the user, but
+          default to paymentDayOfMonth") — a card with no statement window
+          has spend counting toward its VERY NEXT payment date, with no lag:
+          buy something on the 10th and it is due on the 14th. Most real
+          cards do not work that way, and neither of Adam's mum's cards has
+          a window because both predate the feature.
+
+          OFFERED, NEVER APPLIED SILENTLY. Setting a window on an existing
+          card retroactively moves still-pending spend between cycles, so it
+          has to be the user's own deliberate action — hence a button she
+          presses, pre-filled with the default, and not a migration. Already
+          cleared rows never move (APP-KNOWLEDGE.md §1.1), which is what the
+          note below tells her.
+
+          This is a convenience, not a correctness fix: since the Part A
+          root fix, a card with no window reconciles perfectly well without
+          one. */}
+      {draft.statementEndDay == null && draft.statementStartDay == null && (
+        <div className="rounded-xl p-3 -mt-1" style={{ background: 'var(--color-bg-elevated)' }}>
+          <p className="text-xs text-[var(--color-ink-muted)] mb-2">
+            No statement window set, so spend counts toward your very next payment date — something bought on the{' '}
+            {ordinalDay(Math.max(1, Number(draft.paymentDayOfMonth) - 4))} is due on the {ordinalDay(Number(draft.paymentDayOfMonth))}. Most cards give you a
+            statement period instead.
+          </p>
+          <button
+            type="button"
+            onClick={() => update(defaultStatementWindowForPaymentDay(Number(draft.paymentDayOfMonth)))}
+            className="text-[11px] font-semibold px-2.5 py-1.5 rounded-lg text-white"
+            style={{ background: 'var(--color-coral)' }}
+          >
+            Use the {ordinalDay(defaultStatementWindowForPaymentDay(Number(draft.paymentDayOfMonth)).statementStartDay)}–
+            {ordinalDay(defaultStatementWindowForPaymentDay(Number(draft.paymentDayOfMonth)).statementEndDay)}
+          </button>
+          <p className="text-[11px] text-[var(--color-ink-faint)] mt-2">
+            This moves upcoming spend into the cycle its statement belongs to. Payments you have already made stay exactly where they are.
+          </p>
+        </div>
+      )}
+
       {/* item e — a spend after this window's close doesn't count toward
           the minimum due for the window that already closed; it rolls
           into the NEXT one instead. Only shown once statementEndDay is
           actually set, since the feature is otherwise entirely inert. */}
       {draft.statementEndDay != null && (
         <p className="text-xs text-[var(--color-ink-faint)] -mt-1">
-          Statement window{draft.statementStartDay != null ? ` ${ordinalSuffix(draft.statementStartDay)}–` : ' closing '}
-          {ordinalSuffix(draft.statementEndDay)} — spend after the {ordinalSuffix(draft.statementEndDay)} counts toward the
+          Statement window{draft.statementStartDay != null ? ` ${ordinalDay(draft.statementStartDay)}–` : ' closing '}
+          {ordinalDay(draft.statementEndDay)} — spend after the {ordinalDay(draft.statementEndDay)} counts toward the
           following window's minimum payment, not this one's, even though it still shows in the balance above straight away.
         </p>
       )}
@@ -1310,6 +1358,10 @@ function CreditCardDueSection({
   onClearBalance: (date: string, amount: number) => void
 }) {
   const rows = buildCreditCardDueOverviewRows(card, transactions)
+  // PROMPT-01 Part C — a 100%-minimum card clears itself, so it gets a
+  // read-only indication instead of a Clear button (see
+  // creditCardMinimumClearsFullBalance).
+  const autoClears = creditCardMinimumClearsFullBalance(card)
   const past = rows.filter((r) => r.isPast)
   const mostRecent = past.length > 0 ? past[past.length - 1] : null
   const upcoming = rows.filter((r) => !r.isPast).slice(0, mostRecent ? 3 : 4)
@@ -1328,7 +1380,7 @@ function CreditCardDueSection({
         <>
           <h4 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Most recent due</h4>
           <div className="flex flex-col gap-2 mb-3">
-            <CreditCardDueRow row={mostRecent} onRequestClear={setConfirming} />
+            <CreditCardDueRow row={mostRecent} autoClears={autoClears} onRequestClear={setConfirming} />
           </div>
         </>
       )}
@@ -1337,7 +1389,7 @@ function CreditCardDueSection({
           <h4 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Upcoming due</h4>
           <div className="flex flex-col gap-2 mb-3">
             {upcoming.map((row) => (
-              <CreditCardDueRow key={row.date} row={row} onRequestClear={setConfirming} />
+              <CreditCardDueRow key={row.date} row={row} autoClears={autoClears} onRequestClear={setConfirming} />
             ))}
           </div>
         </>
@@ -1361,26 +1413,48 @@ function CreditCardDueSection({
 
 function CreditCardDueRow({
   row,
+  autoClears,
   onRequestClear,
 }: {
   row: { date: string; balanceDue: number; isPast: boolean }
+  /** PROMPT-01 Part C — this card's minimum is 100% of the balance, so the
+   * charge on this date clears it in full on its own. Adam, 2026-09-15:
+   * "Row is untappable, wording is 'Set to Clear'." Rendered as static
+   * text, NOT a disabled button: a disabled button still reads as a
+   * control that is unavailable, when the truth is that nothing needs
+   * doing. A fixed minimum that merely happens to cover this month's
+   * balance is deliberately NOT included — see the predicate's comment. */
+  autoClears: boolean
   onRequestClear: (row: { date: string; balanceDue: number }) => void
 }) {
   return (
     <div className="rounded-xl p-3 flex items-center justify-between gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
       <div className="min-w-0">
         <p className="text-sm text-[var(--color-ink)]">{row.date}</p>
-        <p className="text-xs text-[var(--color-ink-muted)]">£{formatCurrency(row.balanceDue)} balance due</p>
+        {/* 2026-09-16 (Adam-reported from UAT) — every row now reports what was
+            owed GOING INTO its due date, so a past and an upcoming row can
+            legitimately show the same figure when nothing moved between them.
+            Saying "balance due" on a date that has already been paid reads as
+            a stale duplicate, so a past row says explicitly which side of the
+            payment its figure sits on. */}
+        <p className="text-xs text-[var(--color-ink-muted)]">
+          £{formatCurrency(row.balanceDue)} {row.isPast ? 'was due before payment' : 'balance due'}
+        </p>
       </div>
-      {!row.isPast && (
-        <button
-          onClick={() => onRequestClear({ date: row.date, balanceDue: row.balanceDue })}
-          className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
-          style={{ background: 'var(--color-coral)' }}
-        >
-          Clear
-        </button>
-      )}
+      {!row.isPast &&
+        (autoClears ? (
+          <span className="text-[10px] font-semibold px-2 py-1 rounded-lg shrink-0" style={{ background: 'var(--color-track)', color: 'var(--color-ink-muted)' }}>
+            Set to Clear
+          </span>
+        ) : (
+          <button
+            onClick={() => onRequestClear({ date: row.date, balanceDue: row.balanceDue })}
+            className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
+            style={{ background: 'var(--color-coral)' }}
+          >
+            Clear
+          </button>
+        ))}
     </div>
   )
 }
@@ -1504,6 +1578,7 @@ function CreditCardLedgerModal({
   // styled like the Salary page's most-recent/upcoming list instead of a
   // scrollable modal row.
   const rows = buildCreditCardMinimumChargeRows(card, transactions)
+  const autoClears = creditCardMinimumClearsFullBalance(card)
   const [editingDate, setEditingDate] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
 
@@ -1530,10 +1605,29 @@ function CreditCardLedgerModal({
             <X size={20} />
           </button>
         </div>
-        <p className="text-xs text-[var(--color-ink-muted)] mb-3">Tap a minimum charge to adjust it — past or future. Spend and other card activity are on the card's own page.</p>
+        {/* PROMPT-01 Part C — a 100%-minimum card has no adjustable rows
+            (an override would be immediately superseded by the 100% rule),
+            so it must not invite a tap that does nothing. */}
+        <p className="text-xs text-[var(--color-ink-muted)] mb-3">
+          {autoClears
+            ? "Clears automatically — your minimum payment is 100% of the balance. Spend and other card activity are on the card's own page."
+            : "Tap a minimum charge to adjust it — past or future. Spend and other card activity are on the card's own page."}
+        </p>
 
         <div className="overflow-y-auto flex-1 -mx-5 px-5 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
           {rows.map((row) => {
+            // PROMPT-01 Part C — the row's content is identical either way;
+            // only whether it is a tap target differs.
+            const rowBody = (
+              <>
+                <span className="text-xs text-[var(--color-ink)]">
+                  {row.date} · Minimum charge
+                  {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
+                  {autoClears && row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Set to Clear</span>}
+                </span>
+                <span className="text-xs font-mono text-[var(--color-ink)]">£{formatCurrency(row.amount)}</span>
+              </>
+            )
             return (
               <div key={row.date} className="flex flex-col">
                 {editingDate === row.date ? (
@@ -1554,13 +1648,16 @@ function CreditCardLedgerModal({
                     </button>
                   </div>
                 ) : (
-                  <button onClick={() => startEditing(row)} className="py-2 flex items-center justify-between text-left">
-                    <span className="text-xs text-[var(--color-ink)]">
-                      {row.date} · Minimum charge
-                      {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
-                    </span>
-                    <span className="text-xs font-mono text-[var(--color-ink)]">£{formatCurrency(row.amount)}</span>
-                  </button>
+                  // Part C — untappable by construction for a 100% card: a
+                  // plain div, so there is no tap target and no override
+                  // entry point on the row at all.
+                  autoClears ? (
+                    <div className="py-2 flex items-center justify-between text-left">{rowBody}</div>
+                  ) : (
+                    <button onClick={() => startEditing(row)} className="py-2 flex items-center justify-between text-left">
+                      {rowBody}
+                    </button>
+                  )
                 )}
               </div>
             )

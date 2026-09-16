@@ -3429,7 +3429,20 @@ function ordinalSuffix(day: number): string {
   return 'th'
 }
 
-function CardActivityRow({ t }: { t: Transaction }) {
+// PROMPT-01 Part B (2026-09-16) — typed to the fields this row actually
+// reads, not `Transaction`, so it can render a GENERATED pending minimum
+// charge (a projection with no Transaction.id) exactly like a real stored
+// row. See the flat `activity` list below for why those now appear here.
+type CardActivityItem = {
+  id: string
+  date: string
+  type: 'credit_card_spend' | 'credit_card_payment'
+  amount: number
+  status: 'cleared' | 'pending'
+  note?: string
+}
+
+function CardActivityRow({ t }: { t: CardActivityItem }) {
   const isSpend = t.type === 'credit_card_spend'
   return (
     <div className="flex items-center justify-between py-2">
@@ -3597,32 +3610,6 @@ function CreditCardDetail({
   const nowOwed = withLiveBalance(storedCard, data.transactions, new Date()).currentBalance
   const paid = totalPaidForCard(card.id, data.transactions)
   const percentPaid = paid + card.currentBalance > 0 ? (paid / (paid + card.currentBalance)) * 100 : 0
-  // UAT 2026-09-08 (8-bug9.1-home-balance note) — the pie/balance above
-  // already respect the horizon toggle, but this ledger list didn't: it
-  // showed every activity row ever regardless of "This cycle"/"Next 3
-  // cycles", so a future-dated purchase (correctly reflected in the pie)
-  // showed here even under "This cycle." Same cycleStart/horizonEnd
-  // window SavingsPotDetail's own activity list already filters to.
-  const cycleStart = toLocalIsoDate(resolveCycleBounds(data, data.primaryPersonId, new Date()).start)
-  const horizonEndIso = toLocalIsoDate(horizonRangeEnd(data, data.primaryPersonId, horizon, new Date()))
-  const activity = data.transactions
-    .filter(
-      (t) =>
-        t.creditCardId === card.id &&
-        (t.type === 'credit_card_spend' || t.type === 'credit_card_payment') &&
-        t.date >= cycleStart &&
-        t.date <= horizonEndIso &&
-        // UAT 2026-09-09 (retest) — the "Show cleared" toggle now applies
-        // here too (previously not offered for a credit card at all),
-        // same off-by-default "hide cleared rows" rule as every other
-        // list on this page.
-        (showCleared || t.status !== 'cleared'),
-    )
-    // UAT 2026-09-09 (retest) — this used to sort descending; the
-    // cycle-grouped view's own rows (buildCreditCardCycleSections) are
-    // ascending, so the flat (cycle-totals off) list should read the
-    // same way rather than switching direction depending on the toggle.
-    .sort((a, b) => a.date.localeCompare(b.date))
   // The card's own colour overrides the category's colour for display
   // (types/ledger.ts: "categoryId: for icon; colour below overrides the
   // category's colour") — so the icon SHAPE comes from the category, but
@@ -3636,7 +3623,55 @@ function CreditCardDetail({
   // 1 period; "Next 3 cycles" is the current one plus THREE_CYCLES_AHEAD
   // more, matching horizonCycles' own current-cycle-first convention.
   const cardCycles = creditCardCyclePeriods(storedCard, new Date(), horizon === 'three_cycles' ? 1 + THREE_CYCLES_AHEAD : 1)
-  const cardCycleSections = cycleTotals ? buildCreditCardCycleSections(storedCard, data.transactions, cardCycles) : []
+  // BUGFIX (PROMPT-01 Part B, 2026-09-16, Adam-reported: "the minimum 100%
+  // charge is not clearing the ledger in the home page credit hero card's
+  // ledger") — built for BOTH toggle states now, not just cycleTotals-on.
+  // The flat list below is derived from these same sections, so the two
+  // states cannot disagree about the same card on the same data, which is
+  // exactly what they did before: cycleTotals ON showed the upcoming
+  // pending minimum charge, OFF showed only materialised rows.
+  const cardCycleSections = buildCreditCardCycleSections(storedCard, data.transactions, cardCycles)
+  // PROMPT-01 Part B — the flat (cycle-totals OFF) ledger, now derived by
+  // flattening the sections above rather than filtering data.transactions
+  // directly. This fixes two defects at once:
+  //
+  // 1. IT SHOWED ONLY MATERIALISED ROWS. Built purely from
+  //    `data.transactions`, it could never show a pending minimum charge —
+  //    the very row that tells the user what is about to clear their
+  //    balance. The sections have included generated charges since the
+  //    2026-09-08 cycle-totals work; the flat list never did.
+  //
+  // 2. IT USED THE HOUSEHOLD PAY CYCLE, violating the hard rule that a
+  //    credit card uses its OWN pay cycle windows (Adam, 2026-09-15;
+  //    APP-KNOWLEDGE.md §1.8). It filtered by
+  //    `resolveCycleBounds(data, data.primaryPersonId, …)` /
+  //    `horizonRangeEnd(…)` — for Adam's mum's cards that window ends
+  //    2026-10-13, ONE DAY before the card's own due date of 2026-10-14,
+  //    so the upcoming charge could not have appeared even once (1) was
+  //    fixed. Both halves were required; neither alone is sufficient.
+  //
+  // No period maths changes here: `creditCardCyclePeriods` is confirmed
+  // working and untouched. This only changes WHICH window the flat list
+  // reads from — the card's own, which already existed and was already
+  // correct and which the cycleTotals-on path was already using.
+  //
+  // EXPECTED, NOT A REGRESSION: a payment dated before the card's current
+  // period (e.g. mum's 14 Sept cleared payment, which belongs to the
+  // PREVIOUS period) correctly drops out of "This cycle" under the card's
+  // own window, where the household cycle used to include it.
+  //
+  // The two deliberate earlier UAT fixes are preserved: the "Show cleared"
+  // filter (2026-09-09) still applies, and rows still sort ASCENDING
+  // (2026-09-09) so the flat list reads the same direction as the
+  // cycle-grouped one rather than flipping with the toggle.
+  const activity: CardActivityItem[] = cardCycleSections
+    .flatMap((section) => section.rows)
+    .filter((r) => showCleared || r.status !== 'cleared')
+    .sort((a, b) => a.date.localeCompare(b.date))
+    // A generated minimum charge is a projection with no Transaction.id,
+    // so React keys come from the row's own identity instead. Date+type
+    // alone can collide (two spends the same day), hence the index.
+    .map((r, i) => ({ id: `${r.date}-${r.type}-${i}`, date: r.date, type: r.type, amount: r.amount, status: r.status, note: r.note }))
 
   return (
     <div className="flex flex-col gap-4">
