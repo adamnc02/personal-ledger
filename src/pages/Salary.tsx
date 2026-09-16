@@ -4,7 +4,7 @@ import { formatCurrency } from '../lib/format'
 import { useLedgerData } from '../context/LedgerContext'
 import { calculateNetSalary, type StudentLoanPlan, type PayFrequency, type SalaryDeduction, type DeductionType } from '../lib/tax'
 import { THREE_CYCLES_AHEAD } from '../lib/projection'
-import { findApplicableSnapshot, latestSalarySnapshot, computeNetPayForPeriod, upcomingPaydays, closedPaydays } from '../lib/salaryLedger'
+import { findApplicableSnapshot, latestSalarySnapshot, computeNetPayForPeriod, upcomingPaydays, closedPaydays, firstPaydayOnOrAfter, recentAndUpcomingPaydayDates } from '../lib/salaryLedger'
 import { calculateBonusOnTop } from '../lib/tax'
 import { AttachBonusButton } from '../components/AttachBonusButton'
 import { downloadLedgerBackup, parseLedgerBackupJson } from '../lib/ledgerStorage'
@@ -27,7 +27,18 @@ import { CategoryIcon } from '../components/CategoryIcon'
 import { CategoryIconPickerModal } from '../components/CategoryIconPickerModal'
 import { DEFAULT_POT_CATEGORY_ICON, DEFAULT_POT_CATEGORY_ICON_COLOR } from '../lib/categories'
 import { hasSalaryConfigured } from '../lib/household'
-import { pensionOccurrencePreviews, applyPensionAmountChange, newPension, scheduledPensionDates, setPausedPensionOccurrences, resolvePensionOccurrenceAmount, applyPensionSingleOccurrenceAmountChange } from '../lib/pensionLedger'
+import {
+  pensionOccurrencePreviews,
+  applyPensionAmountChange,
+  newPension,
+  scheduledPensionDates,
+  setPausedPensionOccurrences,
+  resolvePensionOccurrenceAmount,
+  applyPensionSingleOccurrenceAmountChange,
+  pensionScheduleChanged,
+  recentAndUpcomingPensionDates,
+  type PensionSchedule,
+} from '../lib/pensionLedger'
 import { JointAccountSetupModal } from '../components/JointAccountSetupModal'
 import { RebalanceAccountsModal, type RebalanceTarget } from '../components/RebalanceAccountsModal'
 import { formatFullDate } from '../lib/format'
@@ -42,7 +53,7 @@ import {
 import { buildExampleLedger } from '../lib/savingsInterest'
 import { newPot, potBalanceAsOf, potDepositOccurrencePreviews } from '../lib/potLedger'
 import { pickNextSharedCardColor } from '../lib/creditCards'
-import { recentAndUpcomingOccurrences } from '../lib/schedule'
+import { describeSchedule, recentAndUpcomingOccurrences } from '../lib/schedule'
 import { recentAndUpcomingLoanPaymentDates } from '../lib/ledgerLoans'
 import { locationsEqual, transferLocationLabel, transferLocationKey, buildTransferLocationOptions, type TransferLocationOption } from '../lib/transferLedger'
 import { AmountStep, LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
@@ -186,6 +197,16 @@ const PENSION_FREQUENCY_LABELS: Record<RecurrenceFrequency, string> = {
   monthly: 'Monthly',
   quarterly: 'Quarterly',
   annual: 'Annually',
+}
+
+function ordinalSuffixFor(day: number): string {
+  if (day % 100 >= 11 && day % 100 <= 13) return 'th'
+  return day % 10 === 1 ? 'st' : day % 10 === 2 ? 'nd' : day % 10 === 3 ? 'rd' : 'th'
+}
+
+/** "Monthly from 25 June 2026" (+ the weekend rule when it's on) — the schedule row of a pension's change confirmation. */
+function describePensionSchedule(schedule: PensionSchedule): string {
+  return `${describeSchedule(schedule)}${schedule.adjustForNonWorkingDay ? ', earlier if a weekend/bank holiday' : ''}`
 }
 
 interface PensionFields {
@@ -354,6 +375,12 @@ function PensionRow({
 }) {
   const owner = people.find((p) => p.id === pension.personId)
   const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  const { changePensionSchedule } = useLedgerData()
+  // 2026-09-16 — a change to WHEN this pension pays (date, frequency,
+  // interval, weekend rule) waits here for "which payment should this start
+  // from". Saving it straight onto the pension re-created every past payment
+  // on the new schedule; see lib/scheduleChange.ts.
+  const [pendingSchedule, setPendingSchedule] = useState<{ updates: Partial<Omit<Pension, 'id' | 'personId'>> & { personId?: string }; next: PensionSchedule } | null>(null)
   useEffect(() => {
     if (shouldFlashOnMount) {
       triggerFlash()
@@ -411,20 +438,41 @@ function PensionRow({
                 // just the name/frequency/date shouldn't fabricate a change
                 // record for an amount that never moved.
                 const amountPatch = fields.amount !== pension.amount ? applyPensionAmountChange(pension, fields.amount, todayIso()) : { amount: fields.amount }
-                onSave({
-                  personId,
-                  name: fields.name,
+                const next: PensionSchedule = {
                   frequency: fields.frequency,
                   intervalWeeks: fields.intervalWeeks,
                   anchorDate: fields.anchorDate,
                   adjustForNonWorkingDay: fields.adjustForNonWorkingDay,
-                  cycleStartFollowsPayday: fields.cycleStartFollowsPayday,
-                  ...amountPatch,
-                })
+                }
+                const updates = { personId, name: fields.name, cycleStartFollowsPayday: fields.cycleStartFollowsPayday, ...amountPatch }
+                if (pensionScheduleChanged(pension, next) && recentAndUpcomingPensionDates(pension, new Date()).length > 0) {
+                  setPendingSchedule({ updates, next })
+                  return
+                }
+                onSave({ ...updates, ...next })
                 onToggle()
                 triggerFlash()
               }}
             />
+            {pendingSchedule && (
+              <EffectiveDatedChangeFlow
+                occurrences={recentAndUpcomingPensionDates(pension, new Date())}
+                dateStepDescription={`${pension.name}'s payments are changing from ${describePensionSchedule(pension)} to ${describePensionSchedule(pendingSchedule.next)}. Which payment should this start from? Everything before it stays as it was.`}
+                buildChanges={() => [{ label: 'Schedule', from: describePensionSchedule(pension), to: describePensionSchedule(pendingSchedule.next) }]}
+                affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
+                onCancelAll={() => {
+                  setPendingSchedule(null)
+                  onToggle()
+                }}
+                onCommit={(effectiveFrom) => {
+                  onSave(pendingSchedule.updates)
+                  changePensionSchedule(pension.id, pendingSchedule.next, effectiveFrom)
+                  setPendingSchedule(null)
+                  onToggle()
+                  triggerFlash()
+                }}
+              />
+            )}
             <label className="flex items-center gap-2 mt-1">
               <input type="checkbox" checked={pension.active} onChange={(e) => onSave({ active: e.target.checked })} />
               <span className="text-xs text-[var(--color-ink-muted)]">Active — paused pensions stop generating new payments</span>
@@ -2403,6 +2451,7 @@ export function Salary() {
     updatePerson,
     setPrimaryPerson,
     updatePayCycle,
+    changePayday,
     addSalarySnapshot,
     updateSalarySnapshot,
     removeAllSalaryHistory,
@@ -2750,7 +2799,18 @@ export function Salary() {
                                   const latest = latestSalarySnapshot(person)
                                   const effectiveFrom = latest?.endDate ? toLocalIsoDate(addDays(parseLocalDate(latest.endDate), 1)) : todayIso()
                                   addSalarySnapshot(person.id, { ...fields, effectiveFrom })
-                                  updatePayCycle(person.id, payCycleFields)
+                                  // A new job's payday takes effect from its own first
+                                  // payday; the old job's paid salary stays on the old
+                                  // day rather than being re-created on the new one.
+                                  if (payCycleFields.paydayDayOfMonth !== payCycle.paydayDayOfMonth || payCycleFields.paydayAdjustForNonWorkingDay !== payCycle.paydayAdjustForNonWorkingDay) {
+                                    changePayday(
+                                      person.id,
+                                      { paydayDayOfMonth: payCycleFields.paydayDayOfMonth, paydayAdjustForNonWorkingDay: payCycleFields.paydayAdjustForNonWorkingDay },
+                                      firstPaydayOnOrAfter(payCycle, effectiveFrom),
+                                    )
+                                  }
+                                  const { paydayDayOfMonth: _day, paydayAdjustForNonWorkingDay: _adjust, ...otherPayCycleFields } = payCycleFields
+                                  updatePayCycle(person.id, otherPayCycleFields)
                                   setStartingNewJobFor(null)
                                 }}
                                 editingDeduction={editingDeduction}
@@ -3173,6 +3233,8 @@ export function Salary() {
               openingBalance={payCycle?.openingBalance ?? 0}
               openingBalanceDate={payCycle?.openingBalanceDate ?? todayIso()}
               onSave={(updates) => updatePayCycle(person.id, updates)}
+              paydayOccurrences={payCycle && hasSalaryConfigured(person) ? recentAndUpcomingPaydayDates(payCycle, new Date()) : []}
+              onChangePayday={(next, pickedDate) => changePayday(person.id, next, pickedDate)}
               onDeleteSalary={() => {
                 removeAllSalaryHistory(person.id)
                 setSettingsOpenFor(null)
@@ -3597,6 +3659,8 @@ function PayCycleSettingsModal({
   onSave,
   onDeleteSalary,
   onClose,
+  paydayOccurrences,
+  onChangePayday,
 }: {
   personName: string
   isPrimary: boolean
@@ -3618,7 +3682,15 @@ function PayCycleSettingsModal({
   }) => void
   onDeleteSalary: () => void
   onClose: () => void
+  /** The payday "which payment" picker (recentAndUpcomingPaydayDates). Empty = no salary paid yet, so nothing to move. */
+  paydayOccurrences: { date: string; isPast: boolean }[]
+  /** A payday change, from a chosen payday — re-dates stored salary rather than duplicating it (lib/scheduleChange.ts). */
+  onChangePayday: (next: { paydayDayOfMonth: number; paydayAdjustForNonWorkingDay: boolean }, pickedDate: string) => void
 }) {
+  // 2026-09-16 — set while a payday change waits for "which payday should
+  // this start from". Saving it straight onto the pay cycle re-created
+  // every past salary payment on the new day.
+  const [choosingPaydayFrom, setChoosingPaydayFrom] = useState(false)
   // Staged draft — was previously live-applying every keystroke straight
   // to updatePayCycle via an onChange prop, which meant "Done" was purely
   // a dismiss button with nothing to cancel. Converted per Adam's
@@ -3645,17 +3717,47 @@ function PayCycleSettingsModal({
     (Number(draftOpeningBalance) || 0) !== openingBalance ||
     draftOpeningBalanceDate !== openingBalanceDate
 
+  const paydayChanged = draftPayday !== payday || draftAdjust !== adjustForNonWorkingDay
+  const paydayLabel = (day: number, adjust: boolean) => `The ${day}${ordinalSuffixFor(day)}${adjust ? ', earlier if a weekend/bank holiday' : ''}`
+
   function handleSave() {
+    if (paydayChanged && paydayOccurrences.length > 0) {
+      setChoosingPaydayFrom(true)
+      return
+    }
+    saveAll(draftPayday, draftAdjust)
+    onClose()
+  }
+
+  function saveAll(paydayDayOfMonth: number, paydayAdjustForNonWorkingDay: boolean) {
     onSave({
-      paydayDayOfMonth: draftPayday,
-      paydayAdjustForNonWorkingDay: draftAdjust,
+      paydayDayOfMonth,
+      paydayAdjustForNonWorkingDay,
       cycleStartDayOfMonth: draftCycleStartDay,
       cycleStartFollowsPayday: draftCycleFollowsPayday,
       salarySortBasis: draftSalarySortBasis,
       openingBalance: Number(draftOpeningBalance) || 0,
       openingBalanceDate: draftOpeningBalanceDate,
     })
-    onClose()
+  }
+
+  if (choosingPaydayFrom) {
+    return (
+      <EffectiveDatedChangeFlow
+        occurrences={paydayOccurrences}
+        dateStepDescription={`${personName}'s payday is changing from ${paydayLabel(payday, adjustForNonWorkingDay).toLowerCase()} to ${paydayLabel(draftPayday, draftAdjust).toLowerCase()}. Which payday should this start from? Every payday before it stays as it was.`}
+        buildChanges={() => [{ label: 'Payday', from: paydayLabel(payday, adjustForNonWorkingDay), to: paydayLabel(draftPayday, draftAdjust) }]}
+        affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
+        onCancelAll={onClose}
+        onCommit={(effectiveFrom) => {
+          // Everything else first, keeping the current payday; the payday
+          // change then re-dates stored salary from the chosen payday.
+          saveAll(payday, adjustForNonWorkingDay)
+          onChangePayday({ paydayDayOfMonth: draftPayday, paydayAdjustForNonWorkingDay: draftAdjust }, effectiveFrom)
+          onClose()
+        }}
+      />
+    )
   }
 
   return createPortal(

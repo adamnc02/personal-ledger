@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { formatCurrency, formatMonthYear } from '../lib/format'
+import { formatCurrency, formatFullDate, formatMonthYear } from '../lib/format'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Plus, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, X, Info, AlertTriangle } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
@@ -19,7 +19,7 @@ import {
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
-import { nextMinimumChargeAmount, pickNextSharedCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance, creditCardMinimumClearsFullBalance, defaultStatementWindowForPaymentDay } from '../lib/creditCards'
+import { nextMinimumChargeAmount, pickNextSharedCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance, creditCardMinimumClearsFullBalance, defaultStatementWindowForPaymentDay, recentAndUpcomingCardPaymentDates } from '../lib/creditCards'
 import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
@@ -37,7 +37,7 @@ import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { peopleWithIncomeCount } from '../lib/household'
 import { shouldOfferLocationPicker } from '../lib/pickerFirst'
 
-import { todayIso } from '../lib/date'
+import { parseLocalDate, todayIso } from '../lib/date'
 
 // The pre-seeded "Loan" category (see categories.ts) — LoanForm defaults
 // new loans onto this rather than falling through to whatever happens to
@@ -845,7 +845,12 @@ function LoanEditPanel({
   // applyLoanMonthlyPaymentChange) — no scope ("just this/all future")
   // step for monthlyPayment, per Adam's own call: a loan's own payment
   // has no single-occurrence concept, only a permanent change.
-  const [changeKind, setChangeKind] = useState<'monthlyPayment' | 'location' | null>(null)
+  const [changeKind, setChangeKind] = useState<'monthlyPayment' | 'location' | 'startDate' | null>(null)
+  // 2026-09-16 — the first payment date goes through the same "which
+  // payment" step. Saving it straight onto the loan re-created every past
+  // payment on the new day; changeLoanStartDate re-dates them instead.
+  const { changeLoanStartDate } = useLedgerData()
+  const startDateChanged = draft.startDate !== loan.startDate
 
   // Prefill only needs to seed the initial draft/form state above — once
   // this panel has mounted with it, tell the parent to forget it so a
@@ -1040,6 +1045,8 @@ function LoanEditPanel({
           dateStepDescription={
             changeKind === 'monthlyPayment'
               ? `${loan.name}'s payment is changing from £${formatCurrency(loan.monthlyPayment)} to £${formatCurrency(draft.monthlyPayment)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
+              : changeKind === 'startDate'
+              ? `${loan.name}'s payment date is changing from the ${ordinalDay(parseLocalDate(loan.startDate).getDate())} to the ${ordinalDay(parseLocalDate(draft.startDate).getDate())}. Which payment should this start from? Everything before it stays as it was.`
               : `${loan.name} is moving to ${loanLocationLabel(draft.location, draft.potId, pots)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
           }
           buildChanges={() => {
@@ -1047,26 +1054,43 @@ function LoanEditPanel({
             if (changeKind === 'monthlyPayment') changes.push({ label: 'Monthly payment', from: `£${formatCurrency(loan.monthlyPayment)}`, to: `£${formatCurrency(draft.monthlyPayment)}` })
             const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
             if (locationChanged) changes.push({ label: 'Location', from: loanLocationLabel(loan.location, loan.potId, pots), to: loanLocationLabel(draft.location, draft.potId, pots) })
+            if (startDateChanged) changes.push({ label: 'First payment date', from: formatFullDate(loan.startDate), to: formatFullDate(draft.startDate) })
             return changes
           }}
           affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
           onCancelAll={cancelEverything}
-          onCommit={(effectiveFrom) => {
-            const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
-            if (changeKind === 'monthlyPayment') {
-              const paymentPatch = applyLoanMonthlyPaymentChange(loan, draft.monthlyPayment, effectiveFrom)
+          onCommit={(pickedDate) => {
+            // A start-date change re-dates stored payments from the picked
+            // one AFTER everything else saves, so the plain save keeps the
+            // current start date. Its effective-from dates (a monthly payment
+            // or location change made in the same save) are recorded against
+            // the picked payment and move with it.
+            const effectiveFrom = pickedDate
+            const toSave = startDateChanged ? { ...draft, startDate: loan.startDate } : draft
+            const locationChanged = toSave.location !== loan.location || (toSave.location === 'pot' && toSave.potId !== loan.potId)
+            if (changeKind === 'startDate') {
               if (locationChanged) {
-                const { location: _l, potId: _p, ...rest } = draft
-                onSave({ ...rest, ...paymentPatch })
-                onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+                onAssignLocation(toSave.location, effectiveFrom, toSave.location === 'pot' ? toSave.potId : undefined)
+                const { location: _l, potId: _p, ...rest } = toSave
+                onSave(rest)
               } else {
-                onSave({ ...draft, ...paymentPatch })
+                onSave(toSave)
+              }
+            } else if (changeKind === 'monthlyPayment') {
+              const paymentPatch = applyLoanMonthlyPaymentChange(loan, toSave.monthlyPayment, effectiveFrom)
+              if (locationChanged) {
+                const { location: _l, potId: _p, ...rest } = toSave
+                onSave({ ...rest, ...paymentPatch })
+                onAssignLocation(toSave.location, effectiveFrom, toSave.location === 'pot' ? toSave.potId : undefined)
+              } else {
+                onSave({ ...toSave, ...paymentPatch })
               }
             } else {
-              onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
-              const { location: _l, potId: _p, ...rest } = draft
+              onAssignLocation(toSave.location, effectiveFrom, toSave.location === 'pot' ? toSave.potId : undefined)
+              const { location: _l, potId: _p, ...rest } = toSave
               onSave(rest)
             }
+            if (startDateChanged) changeLoanStartDate(loan.id, draft.startDate, pickedDate)
             setChangeKind(null)
           }}
         />
@@ -1081,6 +1105,10 @@ function LoanEditPanel({
           const hasOccurrences = recentAndUpcomingLoanPaymentDates(loan, new Date()).length > 0
           if (monthlyPaymentChanged && hasOccurrences) {
             setChangeKind('monthlyPayment')
+            return
+          }
+          if (startDateChanged && hasOccurrences) {
+            setChangeKind('startDate')
             return
           }
           if (locationChanged && hasOccurrences) {
@@ -1164,6 +1192,12 @@ function CreditCardEditPanel({
   // collapsed, for no functional reason. Still pre-opens when a
   // prefill exists (e.g. from a What-if payoff scenario), same as loans.
   const [loggingPayment, setLoggingPayment] = useState(!!overpaymentPrefill)
+  // 2026-09-16 — a payment-day change waits for "which payment should this
+  // start from". Saving it straight onto the card re-created every past
+  // minimum payment on the new day; changeCardPaymentDay re-dates them.
+  const { changeCardPaymentDay } = useLedgerData()
+  const [choosingPaymentDayFrom, setChoosingPaymentDayFrom] = useState(false)
+  const paymentDayOccurrences = recentAndUpcomingCardPaymentDates(storedCard, new Date())
 
   useEffect(() => {
     if (overpaymentPrefill) onPrefillConsumed()
@@ -1332,7 +1366,35 @@ function CreditCardEditPanel({
         </label>
       )}
 
-      <FormButtonRow onCancel={onCancel} onSave={() => onSave(draft)} saveDisabled={!dirty} />
+      {choosingPaymentDayFrom && (
+        <EffectiveDatedChangeFlow
+          occurrences={paymentDayOccurrences}
+          dateStepDescription={`${storedCard.name}'s payment day is changing from the ${ordinalDay(storedCard.paymentDayOfMonth)} to the ${ordinalDay(draft.paymentDayOfMonth)}. Which payment should this start from? Everything before it stays as it was.`}
+          buildChanges={() => [{ label: 'Payment day', from: `The ${ordinalDay(storedCard.paymentDayOfMonth)}`, to: `The ${ordinalDay(draft.paymentDayOfMonth)}` }]}
+          affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
+          onCancelAll={() => {
+            setChoosingPaymentDayFrom(false)
+            onCancel()
+          }}
+          onCommit={(pickedDate) => {
+            // Everything else first, keeping the current payment day.
+            onSave({ ...draft, paymentDayOfMonth: storedCard.paymentDayOfMonth })
+            changeCardPaymentDay(storedCard.id, draft.paymentDayOfMonth, pickedDate)
+            setChoosingPaymentDayFrom(false)
+          }}
+        />
+      )}
+      <FormButtonRow
+        onCancel={onCancel}
+        onSave={() => {
+          if (draft.paymentDayOfMonth !== storedCard.paymentDayOfMonth && paymentDayOccurrences.length > 0) {
+            setChoosingPaymentDayFrom(true)
+            return
+          }
+          onSave(draft)
+        }}
+        saveDisabled={!dirty}
+      />
         </>
       )}
     </div>

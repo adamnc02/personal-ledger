@@ -13,8 +13,17 @@
 //   credit card payment day     (mum: Natwest, Santander)             ✗
 //   salary payday               (Adam's backup: Ella, 10th)           ✗
 //   pension date / frequency    (synthetic; neither backup has one)   ✗
+//   savings pot opening date    (Rebalance accounts)                  ✗
 // Every ✗ duplicated the payment it moved; a frequency change also invented
-// past payments. Fixed via lib/scheduleChange.ts.
+// past payments. Fixed via lib/scheduleChange.ts (interest: a period claim
+// in generateSavingsInterestTransactions).
+//
+// Found on the way, and WORSE because it needs no edit at all: a
+// follows-payday / follows-cycle-start recurring transfer duplicated on
+// every load after its first payday — the reconciler moved the stored row
+// back to its unadjusted slot, and the generator re-created it on the
+// payday. Adam's three deposits would have started on 1 Oct 2026. Toggling
+// "Follow payday" also silently re-dated every past transfer.
 //
 // For each surface this asserts, using the SAME function the UI calls:
 //   1. the old behaviour (overwrite the field) duplicates, for the record;
@@ -31,7 +40,8 @@ import { applyPensionScheduleChange, generatePensionTransactions } from '../src/
 import { applyLoanStartDateChange, applyRecurringOverpaymentStartDateChange, buildLoanSchedule, recentAndUpcomingLoanRecurringOverpaymentDates } from '../src/lib/ledgerLoans'
 import { applyCardPaymentDayChange, recentAndUpcomingCardPaymentDates } from '../src/lib/creditCards'
 import { applyPaydayChange, paydaysForMonth, recentAndUpcomingPaydayDates } from '../src/lib/salaryLedger'
-import { applyTemplateSingleOccurrenceDateChange } from '../src/lib/schedule'
+import { applyTemplateScheduleChange, applyTemplateSingleOccurrenceDateChange, recentAndUpcomingOccurrences } from '../src/lib/schedule'
+import { newSavingsPot } from '../src/lib/savingsPotLedger'
 import { parseLocalDate } from '../src/lib/date'
 import type { AppDataV2, Pension, Transaction } from '../src/types/ledger'
 
@@ -217,6 +227,42 @@ for (const card of mum.creditCards) {
   check('[loan] first payment on the 31st: 31 Jan, 28 Feb, 31 Mar, 30 Apr', buildLoanSchedule(loan).slice(0, 4).map((e) => e.date), ['2027-01-31', '2027-02-28', '2027-03-31', '2027-04-30'])
   const payCycle = { ...adam.payCycles[0], paydayDayOfMonth: 31, paydayAdjustForNonWorkingDay: false, paydayHistory: undefined }
   check('[salary] payday the 31st: 31 Jan, 28 Feb, 31 Mar, 30 Apr', [0, 1, 2, 3].map((m) => paydaysForMonth(payCycle, 2027, m).map((d) => d.getDate())[0]), [31, 28, 31, 30])
+}
+
+// ── Follows-payday transfers: no edit at all, just time passing ──
+{
+  const raw = parseLedgerBackupJson(readFileSync(DIR + 'finance-ledger-backup-2026-09-15.json', 'utf8'))
+  const deposits = raw.recurringTemplates.filter((t) => t.kind === 'transfer' && t.followsPayday)
+  check('[fixture] Adam has 3 follow-payday deposits', deposits.map((t) => t.name).sort(), ['Bills Deposit', 'Joint Account Deposit', 'Savings Deposit'])
+  let d = raw
+  const days = ['2026-09-16', '2026-10-01', '2026-10-02', '2026-10-15', '2026-11-02', '2026-11-03', '2026-12-01']
+  for (const day of days) d = autoClearDuePayments(d, parseLocalDate(day))
+  for (const t of deposits) {
+    check(`[follows payday, day after day] ${t.name}: one transfer per payday, on the payday`, d.transactions.filter((x) => x.sourceId === t.id).map((x) => x.date).sort(), ['2026-09-30', '2026-10-30', '2026-11-30'])
+  }
+
+  // Turning "Follow payday" off from the October payment keeps September's
+  // transfer on the day it went out.
+  const bills = d.recurringTemplates.find((t) => t.name === 'Bills Deposit')!
+  const dec = parseLocalDate('2026-12-01')
+  const adamsPayCycle = d.payCycles.find((pc) => pc.personId === d.primaryPersonId)!
+  check('[follows payday] the picker lists the real payday dates', recentAndUpcomingOccurrences(bills, dec, adamsPayCycle).map((o) => o.date).slice(0, 2), ['2026-11-30', '2026-12-31'])
+  const { patch, transactions } = applyTemplateScheduleChange(bills, d.transactions, { frequency: bills.frequency, intervalWeeks: bills.intervalWeeks, anchorDate: bills.anchorDate, followsPayday: false, followsCycleStart: false }, '2026-10-30', '2026-12-01', adamsPayCycle)
+  const off = autoClearDuePayments({ ...d, transactions, recurringTemplates: d.recurringTemplates.map((t) => (t.id === bills.id ? { ...t, ...patch } : t)) }, dec)
+  check('[follow payday → off, from the 30 Oct transfer] Sep stays 30 Sep; Oct and Nov move to their own day (12th); nothing added', off.transactions.filter((x) => x.sourceId === bills.id).map((x) => x.date).sort(), ['2026-09-30', '2026-10-12', '2026-11-12'])
+  check('[follow payday → off] stable', JSON.stringify(autoClearDuePayments(off, dec).transactions), JSON.stringify(off.transactions))
+}
+
+// ── Savings pot opening date (Rebalance accounts can change it) ──
+{
+  const personId = mum.people[0].id
+  const pot = { ...newSavingsPot({ personId, name: 'ISA', openingBalance: 5000, openingDate: '2026-01-10', interestMethod: { type: 'aer_credited', aer: 4, creditingFrequency: 'monthly' } } as Parameters<typeof newSavingsPot>[0]), id: 'isa' }
+  const base = autoClearDuePayments({ ...mum, savingsPots: [pot], payCycles: mum.payCycles.map((pc) => ({ ...pc, openingBalanceDate: '2026-01-01' })) }, asOf)
+  const interest = (x: AppDataV2) => x.transactions.filter((t) => t.type === 'savings_interest' && t.sourceId === 'isa').map((t) => t.date).sort()
+  const before = interest(base)
+  check('[fixture] 8 monthly interest payments, 10 Feb → 10 Sep', [before.length, before[0], before.at(-1)], [8, '2026-02-10', '2026-09-10'])
+  const moved = autoClearDuePayments({ ...base, savingsPots: base.savingsPots.map((p) => ({ ...p, openingDate: '2026-01-12' })) }, asOf)
+  check('[savings opening date 10 → 12 Jan] no interest re-created on the 12th', interest(moved), before)
 }
 
 console.log(failures === 0 ? '\nAll schedule-edit duplicate checks passed.' : `\n${failures} check(s) FAILED.`)

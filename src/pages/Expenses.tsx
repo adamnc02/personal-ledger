@@ -2269,7 +2269,15 @@ function LoanRecurringOverpaymentEditForm({
   // event. A recurring one recomputing the payment every period it fires
   // is exactly the runaway-complexity case ledgerLoans.ts's own
   // buildLoanSchedule comment already warns about; always reduce_term.
-  const draft: LoanRecurringOverpayment = { startDate, endDate: endDate || undefined, amount, location, potId: location === 'pot' ? potId : undefined, recastMode: 'reduce_term', pausedDates: value.pausedDates }
+  // Built on top of the stored value (2026-09-16): listing only the form's
+  // fields here silently dropped amountEffectiveFrom/amountHistory/
+  // amountOverrides/scheduleFrom on every save, e.g. editing just the end
+  // date wiped a scheduled amount change.
+  const draft: LoanRecurringOverpayment = { ...value, startDate, endDate: endDate || undefined, amount, location, potId: location === 'pot' ? potId : undefined, recastMode: 'reduce_term' }
+  // 2026-09-16 — a start-date change goes through "which payment" too;
+  // saving it straight on re-created past overpayments on the new day.
+  const { changeRecurringOverpaymentStartDate } = useLedgerData()
+  const startDateChanged = draft.startDate !== value.startDate
   const dirty =
     JSON.stringify(draft.amount) !== JSON.stringify(value.amount) ||
     draft.startDate !== value.startDate ||
@@ -2334,7 +2342,7 @@ function LoanRecurringOverpaymentEditForm({
     // in the app that changed" applies to EVERY field here, not just
     // location: same confirm-diff modal Bills/recurring transfers show,
     // one line per changed field.
-    if ((amountChanged || locationChanged) && pickerOccurrences.length > 0) {
+    if ((amountChanged || locationChanged || startDateChanged) && pickerOccurrences.length > 0) {
       setChangingAmount(true)
       return
     }
@@ -2389,7 +2397,9 @@ function LoanRecurringOverpaymentEditForm({
               ? scope === 'single'
                 ? `${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)} for one payment only. Which payment is this?`
                 : `${loan.name}'s recurring overpayment is changing from ${amountLabel(value.amount)} to ${amountLabel(draft.amount)}. Which payment should this apply from?`
-              : `${loan.name}'s recurring overpayment is moving to ${overpaymentFromLabel(loan, pots, draft.location, draft.potId)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
+              : locationChanged
+                ? `${loan.name}'s recurring overpayment is moving to ${overpaymentFromLabel(loan, pots, draft.location, draft.potId)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
+                : `${loan.name}'s recurring overpayment date is changing from ${formatFullDate(value.startDate)} to ${formatFullDate(draft.startDate)}. Which payment should this start from? Everything before it stays as it was.`
           }
           buildChanges={(_effectiveFrom, scope) => {
             const changes = dateChanges(scope)
@@ -2402,7 +2412,9 @@ function LoanRecurringOverpaymentEditForm({
             onCancel()
           }}
           onCommit={(effectiveFrom, scope) => {
-            let patch: LoanRecurringOverpayment = draft
+            // A start-date change re-dates stored overpayments from the
+            // picked one after this save, so the save keeps the current date.
+            let patch: LoanRecurringOverpayment = startDateChanged ? { ...draft, startDate: value.startDate } : draft
             if (amountChanged) {
               // The picker shows the overpayment's own REAL date, but
               // amountHistory/amountOverrides must be keyed by the
@@ -2423,6 +2435,7 @@ function LoanRecurringOverpaymentEditForm({
             // stored `.date`, which IS the real display date — no
             // translation needed here, unlike the amount case above.
             if (locationChanged) onAssignLocation(effectiveFrom, draft.location as 'personal' | 'pot', draft.potId)
+            if (startDateChanged) changeRecurringOverpaymentStartDate(loan.id, draft.startDate, effectiveFrom)
             setChangingAmount(false)
           }}
         />
@@ -2708,10 +2721,19 @@ function TransferRecurringRow({
     frequency: resolvedFreq.frequency,
     intervalWeeks: resolvedFreq.frequency === 'every_n_weeks' ? intervalWeeks : template.intervalWeeks,
     anchorDate: !resolvedFreq.followsPayday && !resolvedFreq.followsCycleStart ? anchorDate : template.anchorDate,
+    followsPayday: resolvedFreq.followsPayday,
+    followsCycleStart: resolvedFreq.followsCycleStart,
   }
   const slotDiff = scheduleDiffers(template, nextSchedule)
   const slotChanged = slotDiff.date || slotDiff.frequency
-  const dateOnlyChange = slotDiff.date && !slotDiff.frequency
+  // Following payday / the budgeting cycle moves when payments land too, so
+  // it gets the same "which payment" step: earlier transfers keep the dates
+  // they actually went out on.
+  const followsChanged = resolvedFreq.followsPayday !== !!template.followsPayday || resolvedFreq.followsCycleStart !== !!template.followsCycleStart
+  const scheduleMoves = slotChanged || followsChanged
+  const dateOnlyChange = slotDiff.date && !slotDiff.frequency && !followsChanged
+  const transferScheduleLabel = (t: TemplateSchedule) =>
+    t.followsPayday ? `${TRANSFER_FREQUENCY_LABELS.follows_payday}` : t.followsCycleStart ? `${TRANSFER_FREQUENCY_LABELS.follows_cycle_start}` : describeSchedule(t)
   function freqPatch(): Partial<Omit<RecurringTemplate, 'id'>> {
     if (!freqDirty) return {}
     // Slot-moving fields are never written here once there are payments
@@ -2753,7 +2775,7 @@ function TransferRecurringRow({
     if (!locationsEqual(transferFrom, template.transferFrom)) fields.push({ label: 'From', from: fromLabel, to: transferFrom ? transferLocationLabel(transferFrom, savingsPots, pots) : '—' })
     if (!locationsEqual(transferTo, template.transferTo)) fields.push({ label: 'To', from: toLabel, to: transferTo ? transferLocationLabel(transferTo, savingsPots, pots) : '—' })
     if (nameDirty) fields.push({ label: 'Name', from: template.name, to: name.trim() })
-    if (freqDirty && !slotChanged) fields.push({ label: 'Frequency', from: TRANSFER_FREQUENCY_LABELS[transferFrequencyChoiceFor(template)], to: TRANSFER_FREQUENCY_LABELS[freqChoice] })
+    if (freqDirty && !scheduleMoves) fields.push({ label: 'Frequency', from: TRANSFER_FREQUENCY_LABELS[transferFrequencyChoiceFor(template)], to: TRANSFER_FREQUENCY_LABELS[freqChoice] })
     return fields
   }
 
@@ -2765,8 +2787,8 @@ function TransferRecurringRow({
     // RecurringTransactionEditPanel — everything else (frequency, name,
     // followsPayday, etc.) still saves immediately via their own inline
     // handlers below, unaffected by this button.
-    const hasOccurrences = recentAndUpcomingOccurrences(template, new Date()).length > 0
-    if ((amountDirty || slotChanged) && hasOccurrences) {
+    const hasOccurrences = recentAndUpcomingOccurrences(template, new Date(), payCycle).length > 0
+    if ((amountDirty || scheduleMoves) && hasOccurrences) {
       setChoosingEffectiveDate(true)
       return
     }
@@ -2826,18 +2848,18 @@ function TransferRecurringRow({
                     }
                   : undefined
             }
-            occurrences={recentAndUpcomingOccurrences(template, new Date())}
+            occurrences={recentAndUpcomingOccurrences(template, new Date(), payCycle)}
             dateStepDescription={(scope) =>
               scope === 'single'
                 ? `${template.name} is changing for one payment only. Which payment is this?`
                 : amountDirty
                   ? `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(Number(amount))}. Which payment should the change start from? Everything before it stays as it was.`
-                  : `${template.name} is changing from ${describeSchedule(template)} to ${describeSchedule(nextSchedule)}. Which payment should this start from? Everything before it stays as it was.`
+                  : `${template.name} is changing from ${transferScheduleLabel(template)} to ${transferScheduleLabel(nextSchedule)}. Which payment should this start from? Everything before it stays as it was.`
             }
             buildChanges={(_effectiveFrom, scope) => {
               const changes: RecurringChangeField[] = amountDirty ? [{ label: 'Amount', from: `£${formatCurrency(template.amount)}`, to: `£${formatCurrency(Number(amount))}` }] : []
-              if (slotDiff.frequency) {
-                changes.push({ label: 'Schedule', from: describeSchedule(template), to: describeSchedule(nextSchedule), note: scope === 'single' ? 'This applies to every payment from this one on, not just the single payment above.' : undefined })
+              if (slotDiff.frequency || followsChanged) {
+                changes.push({ label: 'Schedule', from: transferScheduleLabel(template), to: transferScheduleLabel(nextSchedule), note: scope === 'single' ? 'This applies to every payment from this one on, not just the single payment above.' : undefined })
               } else if (slotDiff.date) {
                 changes.push({ label: 'Date', from: formatFullDate(template.anchorDate), to: formatFullDate(nextSchedule.anchorDate) })
               }
@@ -2859,21 +2881,22 @@ function TransferRecurringRow({
               const amountPatch = !amountDirty
                 ? {}
                 : scope === 'single'
-                  ? applyTemplateSingleOccurrenceAmountChange(template, Number(amount), occurrenceSlotForDate(template, effectiveFrom))
-                  : applyTemplateAmountChange(template, Number(amount), occurrenceSlotForDate(template, effectiveFrom))
+                  ? applyTemplateSingleOccurrenceAmountChange(template, Number(amount), occurrenceSlotForDate(template, effectiveFrom, payCycle))
+                  : applyTemplateAmountChange(template, Number(amount), occurrenceSlotForDate(template, effectiveFrom, payCycle))
               // Same split as Bills.tsx: a single-payment date move is an
               // override; any other slot change re-slots via
               // changeRecurringTemplateSchedule, after this update.
               const singleDateMove = dateOnlyChange && scope === 'single'
-              const datePatch = singleDateMove ? applyTemplateSingleOccurrenceDateChange({ ...template, ...amountPatch }, nextSchedule.anchorDate, occurrenceSlotForDate(template, effectiveFrom)) : {}
-              const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...amountPatch, ...datePatch, ...freqPatch() }
+              const datePatch = singleDateMove ? applyTemplateSingleOccurrenceDateChange({ ...template, ...amountPatch }, nextSchedule.anchorDate, occurrenceSlotForDate(template, effectiveFrom, payCycle)) : {}
+              // A schedule move carries its own frequency/follows settings.
+              const updates: Partial<Omit<RecurringTemplate, 'id'>> = { ...amountPatch, ...datePatch, ...(scheduleMoves ? {} : freqPatch()) }
               if (locationsDirty && transferFrom && transferTo) {
                 updates.transferFrom = transferFrom
                 updates.transferTo = transferTo
               }
               if (nameDirty) updates.name = name.trim()
               onUpdate(updates)
-              if (slotChanged && !singleDateMove) changeRecurringTemplateSchedule(template.id, nextSchedule, effectiveFrom)
+              if (scheduleMoves && !singleDateMove) changeRecurringTemplateSchedule(template.id, nextSchedule, effectiveFrom)
               // A single-occurrence change leaves the STANDING amount
               // untouched — reset the local draft back to it so the field
               // doesn't keep showing the one-off value as if it were now

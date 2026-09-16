@@ -30,6 +30,10 @@ import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/credi
 import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, reassignLoanRecurringOverpaymentTransactions, type CalibrationResult } from '../lib/ledgerLoans'
 import { autoClearDuePayments } from '../lib/autoClear'
 import { applyTemplateScheduleChange, type TemplateSchedule } from '../lib/schedule'
+import { applyPensionScheduleChange, type PensionSchedule } from '../lib/pensionLedger'
+import { applyLoanStartDateChange, applyRecurringOverpaymentStartDateChange } from '../lib/ledgerLoans'
+import { applyCardPaymentDayChange } from '../lib/creditCards'
+import { applyPaydayChange } from '../lib/salaryLedger'
 import {
   applyBlockerAction,
   applyBlockerActionToAll,
@@ -139,6 +143,15 @@ interface LedgerContextValue {
   updateRecurringTemplate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   /** Changes a recurring template's due date and/or frequency for every payment from `effectiveFromDate` (a date from recentAndUpcomingOccurrences) — earlier payments keep their date, stored payments from then on move rather than duplicate. See lib/schedule.ts applyTemplateScheduleChange. */
   changeRecurringTemplateSchedule: (id: string, next: TemplateSchedule, effectiveFromDate: string) => void
+  // 2026-09-16 — the same "from which payment" schedule change for the other
+  // generators (lib/scheduleChange.ts). `pickedDate` is a date from that
+  // entity's own recentAndUpcoming… picker. Each re-dates stored payments
+  // from there rather than duplicating them.
+  changePensionSchedule: (id: string, next: PensionSchedule, pickedDate: string) => void
+  changeLoanStartDate: (id: string, newStartDate: string, pickedDate: string) => void
+  changeRecurringOverpaymentStartDate: (loanId: string, newStartDate: string, pickedDate: string) => void
+  changeCardPaymentDay: (id: string, newDay: number, pickedDate: string) => void
+  changePayday: (personId: string, next: Pick<PayCycleConfig, 'paydayDayOfMonth' | 'paydayAdjustForNonWorkingDay'>, pickedDate: string) => void
   removeRecurringTemplate: (id: string) => void
 
   // People, pay cycle, salary, savings — the piece that was previously
@@ -661,8 +674,58 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     setDataState((prev) => {
       const template = prev.recurringTemplates.find((t) => t.id === id)
       if (!template) return prev
-      const { patch, transactions } = applyTemplateScheduleChange(template, prev.transactions, next, effectiveFromDate, todayIso())
+      const payCycle = prev.payCycles.find((pc) => pc.personId === template.ownerId) ?? prev.payCycles.find((pc) => pc.personId === prev.primaryPersonId)
+      const { patch, transactions } = applyTemplateScheduleChange(template, prev.transactions, next, effectiveFromDate, todayIso(), payCycle)
       return { ...prev, transactions, recurringTemplates: prev.recurringTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)) }
+    })
+  }
+  const changePensionSchedule: LedgerContextValue['changePensionSchedule'] = (id, next, pickedDate) => {
+    setDataState((prev) => {
+      const pension = prev.pensions.find((p) => p.id === id)
+      const result = pension && applyPensionScheduleChange(pension, prev.transactions, next, pickedDate, todayIso())
+      if (!result) return prev
+      return { ...prev, transactions: result.transactions, pensions: prev.pensions.map((p) => (p.id === id ? { ...p, ...result.patch } : p)) }
+    })
+  }
+  const changeLoanStartDate: LedgerContextValue['changeLoanStartDate'] = (id, newStartDate, pickedDate) => {
+    setDataState((prev) => {
+      const loan = prev.loans.find((l) => l.id === id)
+      const result = loan && applyLoanStartDateChange(loan, prev.transactions, newStartDate, pickedDate, todayIso())
+      if (!result) return prev
+      return { ...prev, transactions: result.transactions, loans: prev.loans.map((l) => (l.id === id ? { ...l, ...result.patch } : l)) }
+    })
+  }
+  const changeRecurringOverpaymentStartDate: LedgerContextValue['changeRecurringOverpaymentStartDate'] = (loanId, newStartDate, pickedDate) => {
+    setDataState((prev) => {
+      const loan = prev.loans.find((l) => l.id === loanId)
+      const result = loan && applyRecurringOverpaymentStartDateChange(loan, prev.transactions, newStartDate, pickedDate, todayIso())
+      if (!result) return prev
+      return { ...prev, transactions: result.transactions, loans: prev.loans.map((l) => (l.id === loanId ? { ...l, ...result.patch } : l)) }
+    })
+  }
+  const changeCardPaymentDay: LedgerContextValue['changeCardPaymentDay'] = (id, newDay, pickedDate) => {
+    setDataState((prev) => {
+      const card = prev.creditCards.find((c) => c.id === id)
+      const result = card && applyCardPaymentDayChange(card, prev.transactions, newDay, pickedDate, todayIso())
+      if (!result) return prev
+      return { ...prev, transactions: result.transactions, creditCards: prev.creditCards.map((c) => (c.id === id ? { ...c, ...result.patch } : c)) }
+    })
+  }
+  const changePayday: LedgerContextValue['changePayday'] = (personId, next, pickedDate) => {
+    setDataState((prev) => {
+      const payCycle = prev.payCycles.find((pc) => pc.personId === personId)
+      const person = prev.people.find((p) => p.id === personId)
+      if (!payCycle || !person) return prev
+      // Salary sorts are made against the primary person's paydays only.
+      const result = applyPaydayChange(payCycle, person, prev.transactions, personId === prev.primaryPersonId ? prev.salarySorts : null, next, pickedDate, todayIso())
+      if (!result) return prev
+      return {
+        ...prev,
+        transactions: result.transactions,
+        payCycles: prev.payCycles.map((pc) => (pc.personId === personId ? result.payCycle : pc)),
+        people: prev.people.map((p) => (p.id === personId ? result.person : p)),
+        salarySorts: result.salarySorts ?? prev.salarySorts,
+      }
     })
   }
   const removeRecurringTemplate: LedgerContextValue['removeRecurringTemplate'] = (id) => {
@@ -1114,6 +1177,11 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     addRecurringTemplate,
     updateRecurringTemplate,
     changeRecurringTemplateSchedule,
+    changePensionSchedule,
+    changeLoanStartDate,
+    changeRecurringOverpaymentStartDate,
+    changeCardPaymentDay,
+    changePayday,
     removeRecurringTemplate,
     addPerson,
     updatePerson,

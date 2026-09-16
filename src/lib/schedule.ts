@@ -523,9 +523,11 @@ export function applyTemplateSingleOccurrenceDateChange(
  * anchor), independent of any amount history, since which DATES a bill
  * falls on doesn't change just because its amount did.
  */
-export function recentAndUpcomingOccurrences(template: RecurringTemplate, asOfDate: Date): { date: string; isPast: boolean }[] {
-  const past = generateTransactionsForTemplate(template, addYears(asOfDate, -1), asOfDate)
-  const upcoming = generateTransactionsForTemplate(template, asOfDate, addYears(asOfDate, 1)).filter((t) => t.date !== past.at(-1)?.date)
+export function recentAndUpcomingOccurrences(template: RecurringTemplate, asOfDate: Date, payCycle?: PayCycleConfig): { date: string; isPast: boolean }[] {
+  // `payCycle` resolves a follows-payday/cycle-start transfer's dates to the
+  // day it actually goes out, as the ledger shows it (2026-09-16).
+  const past = generateTransactionsForTemplate(template, addYears(asOfDate, -1), asOfDate, payCycle)
+  const upcoming = generateTransactionsForTemplate(template, asOfDate, addYears(asOfDate, 1), payCycle).filter((t) => t.date !== past.at(-1)?.date)
 
   const result: { date: string; isPast: boolean }[] = []
   if (past.length > 0) result.push({ date: past[past.length - 1].date, isPast: true })
@@ -566,6 +568,9 @@ export interface TemplateSchedule {
   intervalWeeks?: number
   anchorDate: string
   anchorDayOfMonth?: number
+  /** Transfers only: resolving each date to payday / budgeting-cycle start also moves when payments land. Omitted = unchanged. */
+  followsPayday?: boolean
+  followsCycleStart?: boolean
 }
 
 /** "Monthly from 16 September 2026" — for the schedule row of a change confirmation. */
@@ -659,8 +664,8 @@ function nearestSlot(next: TemplateSchedule, targetIso: string, afterIso: string
  * moved; keying a single-payment edit on the display date silently wrote
  * an override for a slot that doesn't exist.
  */
-export function occurrenceSlotForDate(template: RecurringTemplate, displayDate: string): string {
-  const around = scheduledTemplateDates(template, addYears(parseLocalDate(displayDate), -1), addYears(parseLocalDate(displayDate), 1))
+export function occurrenceSlotForDate(template: RecurringTemplate, displayDate: string, payCycle?: PayCycleConfig): string {
+  const around = scheduledTemplateDates(template, addYears(parseLocalDate(displayDate), -1), addYears(parseLocalDate(displayDate), 1), payCycle)
   return around.find((o) => o.date === displayDate)?.originalDate ?? displayDate
 }
 
@@ -676,11 +681,13 @@ export function applyTemplateScheduleChange(
   next: TemplateSchedule,
   effectiveFromDate: string,
   asOfIso: string,
+  /** Needed only for a follows-payday/cycle-start transfer, whose picker shows payday-resolved dates. */
+  payCycle?: PayCycleConfig,
 ): {
-  patch: Pick<RecurringTemplate, 'frequency' | 'intervalWeeks' | 'anchorDate' | 'anchorDayOfMonth' | 'occurrenceOverrides' | 'amountEffectiveFrom' | 'amountHistory'>
+  patch: Pick<RecurringTemplate, 'frequency' | 'intervalWeeks' | 'anchorDate' | 'anchorDayOfMonth' | 'occurrenceOverrides' | 'amountEffectiveFrom' | 'amountHistory' | 'followsPayday' | 'followsCycleStart'>
   transactions: Transaction[]
 } {
-  const pickedSlot = occurrenceSlotForDate(template, effectiveFromDate)
+  const pickedSlot = occurrenceSlotForDate(template, effectiveFromDate, payCycle)
   // Snap onto the old schedule, so a date that isn't a slot (e.g. before
   // the anchor) can't place the new anchor ahead of the real first slot.
   const fromSlot = rawSlots(template, pickedSlot, { count: 1 })[0] ?? pickedSlot
@@ -751,6 +758,8 @@ export function applyTemplateScheduleChange(
       intervalWeeks: next.frequency === 'every_n_weeks' ? next.intervalWeeks : template.intervalWeeks,
       anchorDate: newAnchor,
       anchorDayOfMonth,
+      ...(next.followsPayday !== undefined ? { followsPayday: next.followsPayday } : {}),
+      ...(next.followsCycleStart !== undefined ? { followsCycleStart: next.followsCycleStart } : {}),
       occurrenceOverrides: overrides,
       amountEffectiveFrom: remapBoundary(template.amountEffectiveFrom),
       amountHistory: template.amountHistory?.map((h) => ({ ...h, effectiveFrom: remapBoundary(h.effectiveFrom)! })),

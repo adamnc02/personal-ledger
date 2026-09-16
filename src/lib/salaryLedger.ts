@@ -356,6 +356,12 @@ function paydayDates(payCycle: PayCycleConfig, start: Date, end: Date): string[]
   return out
 }
 
+/** The first payday on or after `dateIso` under the current rules — where a new job's payday change takes effect. */
+export function firstPaydayOnOrAfter(payCycle: PayCycleConfig, dateIso: string): string {
+  const from = parseLocalDate(dateIso)
+  return paydayDates(payCycle, from, new Date(from.getFullYear(), from.getMonth() + 2, 1)).find((d) => d >= dateIso) ?? dateIso
+}
+
 /** The "which payment" picker for a payday change: the most recent payday and the next 3. */
 export function recentAndUpcomingPaydayDates(payCycle: PayCycleConfig, asOfDate: Date): { date: string; isPast: boolean }[] {
   const asOfIso = toIso(asOfDate)
