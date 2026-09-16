@@ -1081,6 +1081,11 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   const todayIso = toIso(asOfDate)
   const stored = transactions.filter((t) => t.creditCardId === card.id && t.type === 'credit_card_payment' && !t.sourceType)
   const storedDates = new Set(stored.map((t) => t.date))
+  // Total stored (non-sourceType) payment on each date — added back below so
+  // a materialized row reports the balance owed GOING INTO its due date,
+  // the same convention generated rows use. See the BUGFIX note there.
+  const storedPaymentsOnDate = new Map<string, number>()
+  for (const t of stored) storedPaymentsOnDate.set(t.date, round2((storedPaymentsOnDate.get(t.date) ?? 0) + t.amount))
 
   // Confirmed as a real bug: a blind "1 year back" was generating a full
   // year of entirely fictional past minimum charges for a BRAND NEW
@@ -1188,7 +1193,42 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   ).filter((t) => !storedDates.has(t.date))
 
   const rows: CreditCardMinimumChargeRow[] = [
-    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true, projectedBalanceDue: cardBalanceAsOf(card, transactions, parseLocalDate(t.date)) })),
+    // BUGFIX (2026-09-16, Adam-reported from the test-app UAT: his mum's
+    // Natwest showed "£1,400 balance due" against BOTH 14 Sept and 14 Oct,
+    // reading as a duplicated row).
+    //
+    // `projectedBalanceDue` means "the balance owed as of this due date",
+    // and a GENERATED row reports it as `workingBalanceBeforePayment` — the
+    // running balance as it stood immediately BEFORE that cycle's own charge
+    // was deducted. A materialized row was reporting
+    // `cardBalanceAsOf(t.date)`, which (filtering `t.date <= asOfIso`)
+    // already has that date's payment deducted — i.e. the balance AFTER.
+    //
+    // Two conventions in one list. Natwest: 14 Sept showed £1400 ("left
+    // after paying £200 off £1600") while 14 Oct showed £1400 ("owed before
+    // paying"), the same figure meaning two different things, with the real
+    // £1600 owed on 14 Sept appearing nowhere. Santander showed £91.24
+    // twice, hiding the £319.31 genuinely owed before her payment.
+    //
+    // Adding that date's own stored payments back puts every row on the
+    // generated rows' convention: what was owed GOING INTO this due date.
+    // Natwest now reads 1600 → 1400 → 1200 → …, a clean monotonic schedule.
+    //
+    // Only non-`sourceType` payments are added back — exactly the set
+    // `stored` itself is built from — so the arithmetic stays consistent
+    // with the rows actually being rendered.
+    //
+    // Deliberately does NOT affect the Clear button: it sizes its payoff
+    // from UPCOMING rows only (`isPast === false` in
+    // buildCreditCardDueOverviewRows), and those are generated rows, whose
+    // figure is unchanged.
+    ...stored.map((t) => ({
+      date: t.date,
+      amount: t.amount,
+      status: t.status,
+      materialized: true,
+      projectedBalanceDue: round2(cardBalanceAsOf(card, transactions, parseLocalDate(t.date)) + storedPaymentsOnDate.get(t.date)!),
+    })),
     ...generated.map((t) => ({
       date: t.date,
       amount: t.amount,

@@ -111,6 +111,17 @@ const balanceDueNov = balanceDueRows.find((r) => r.date === '2026-11-14')
 check('buildCreditCardBalanceDueRows (Clear-button payoff amount) also agrees for 14th Nov', balanceDueNov?.balanceDue, nov14?.projectedBalanceDue)
 
 // ---- Real activity always wins — a MATERIALIZED (already-happened) row is untouched by the projection ----
+// UPDATED 2026-09-16 (Adam-reported from UAT): the ASSERTION's expected value moved, its INTENT did
+// not. This block guards that a past row reports REAL logged activity rather than the
+// "assume the minimum gets paid" projection — and it still does. What changed is which side of that
+// date's own payment the figure sits on. It used to be `cardBalanceAsOf(date)`, whose filter is
+// `t.date <= asOfIso`, so it had that date's payment already deducted — the balance AFTER. Every
+// GENERATED row reports the balance BEFORE its own charge (`workingBalanceBeforePayment`), so the
+// list carried two conventions at once: mum's Natwest showed "£1,400 balance due" against both
+// 14 Sept (left after paying) and 14 Oct (owed before paying), the same number meaning two
+// different things, with the £1,600 genuinely owed on 14 Sept shown nowhere. Materialized rows now
+// add that date's own stored payments back, so every row answers one question: what was owed going
+// INTO this due date. Still real activity, still never the projection.
 const materializedCard: CreditCard = { ...card, id: 'card-2' }
 const materializedSpend = recordCreditCardSpend(materializedCard, 1000, '2026-09-09', 'test spend')
 const storedMinimumCharge: Transaction = {
@@ -131,7 +142,14 @@ const materializedTransactions: Transaction[] = [{ ...materializedSpend.transact
 const materializedRows = buildCreditCardMinimumChargeRows(materializedCard, materializedTransactions, new Date(2026, 9, 20))
 const materializedOct14 = materializedRows.find((r) => r.date === '2026-10-14')
 check('A materialized (already-logged) row is flagged materialized: true', materializedOct14?.materialized, true)
-check('...and its projectedBalanceDue is the REAL cardBalanceAsOf figure, not the assumed-minimum-paid projection', materializedOct14?.projectedBalanceDue, cardBalanceAsOf(materializedCard, materializedTransactions, new Date('2026-10-14')))
+check(
+  '...and its projectedBalanceDue is REAL logged activity, not the assumed-minimum-paid projection — the balance owed going INTO that date, i.e. cardBalanceAsOf plus that date\'s own stored payment',
+  materializedOct14?.projectedBalanceDue,
+  cardBalanceAsOf(materializedCard, materializedTransactions, new Date('2026-10-14')) + storedMinimumCharge.amount,
+)
+// The projection would have given something else entirely — this is what the check above is really
+// defending, and it must stay true whichever side of the payment the figure sits on.
+check('...and that is NOT the projected figure the generated rows would have used', materializedOct14?.projectedBalanceDue === nov14?.projectedBalanceDue, false)
 
 console.log(failures === 0 ? '\nAll "assume the minimum gets paid" projection checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

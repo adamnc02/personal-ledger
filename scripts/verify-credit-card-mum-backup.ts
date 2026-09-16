@@ -23,7 +23,7 @@
 // materialised and the rows will have shifted. Pinning asOf is what makes
 // this definitive whenever it runs.
 import { readFileSync } from 'node:fs'
-import { cardBalanceAsOf, withLiveBalance, buildCreditCardMinimumChargeRows } from '../src/lib/creditCards'
+import { cardBalanceAsOf, withLiveBalance, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows } from '../src/lib/creditCards'
 import type { CreditCard, Transaction } from '../src/types/ledger'
 
 let failures = 0
@@ -173,6 +173,24 @@ const decTxns: Transaction[] = [
 const decCard = { ...baseCard, balanceAsOfDate: '2026-11-01' } as CreditCard
 const decPending = buildCreditCardMinimumChargeRows(decCard, decTxns, new Date(2026, 11, 15)).filter((r) => r.status === 'pending')
 check('December (GMT) behaves exactly as September (BST)', decPending.map((r) => `${r.date}/${r.amount}`), ['2027-01-14/50'])
+
+// ---------------------------------------------------------------------
+// EVERY ROW ANSWERS ONE QUESTION: what was owed GOING INTO this due date.
+// Found in UAT 2026-09-16 — a materialized row used to report
+// cardBalanceAsOf (the balance AFTER its own payment) while generated rows
+// report the balance BEFORE theirs, so Natwest showed "£1,400 balance due"
+// against BOTH 14 Sept and 14 Oct, the same number meaning two different
+// things, hiding the £1,600 genuinely owed on 14 Sept.
+// ---------------------------------------------------------------------
+console.log('\n--- one convention: what was owed going into each due date ---')
+const nDue = buildCreditCardDueOverviewRows(natwest, txns, asOf)
+check('Natwest reads as a clean descending schedule, 14 Sept included', nDue.slice(0, 5).map((r) => r.balanceDue), [1600, 1400, 1200, 1000, 800])
+check('the 14 Sept row is £1600 owed going in, NOT the £1400 left after', nDue[0]?.balanceDue, 1600)
+check('...and it is flagged past, so it carries no Clear button', nDue[0]?.isPast, true)
+const sDue = buildCreditCardDueOverviewRows(santander, txns, asOf)
+check('Santander 14 Sept is the £319.31 owed before her £228.07 payment', sDue[0]?.balanceDue, 319.31)
+check('...leaving the £91.24 that carries to 14 Oct', sDue[1]?.balanceDue, 91.24)
+check('319.31 − 228.07 === 91.24 — the rows reconcile against the real payment', Math.round((sDue[0]!.balanceDue - 228.07) * 100) / 100, sDue[1]?.balanceDue)
 
 console.log(`\n${failures === 0 ? '✓ ALL CHECKS PASSED' : `✗ ${failures} CHECK(S) FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

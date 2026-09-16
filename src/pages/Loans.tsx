@@ -1431,7 +1431,15 @@ function CreditCardDueRow({
     <div className="rounded-xl p-3 flex items-center justify-between gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
       <div className="min-w-0">
         <p className="text-sm text-[var(--color-ink)]">{row.date}</p>
-        <p className="text-xs text-[var(--color-ink-muted)]">£{formatCurrency(row.balanceDue)} balance due</p>
+        {/* 2026-09-16 (Adam-reported from UAT) — every row now reports what was
+            owed GOING INTO its due date, so a past and an upcoming row can
+            legitimately show the same figure when nothing moved between them.
+            Saying "balance due" on a date that has already been paid reads as
+            a stale duplicate, so a past row says explicitly which side of the
+            payment its figure sits on. */}
+        <p className="text-xs text-[var(--color-ink-muted)]">
+          £{formatCurrency(row.balanceDue)} {row.isPast ? 'was due before payment' : 'balance due'}
+        </p>
       </div>
       {!row.isPast &&
         (autoClears ? (
