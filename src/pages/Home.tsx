@@ -9,7 +9,7 @@ import { averageAdHocSpendForCycle, daysOfSpendHistory, forecastSpendForCycle, h
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary, buildJointPersonGroups, type JointPersonGroup } from '../lib/jointLedger'
 import { computeJointAccountProjection, jointAccountSignedAmount, buildJointTrendSeries } from '../lib/jointAccountLedger'
-import { computeHouseholdProjections, buildHouseholdTrendSeries, type HouseholdPersonProjection } from '../lib/householdLedger'
+import { computeHouseholdProjections, buildHouseholdTrendSeries, buildHouseholdPersonGroups, type HouseholdPersonGroup } from '../lib/householdLedger'
 import { nextMinimumChargeAmount, totalPaidForCard, withLiveBalance, creditCardCyclePeriods, buildCreditCardCycleSections, buildCreditCardTrendSeries, type CreditCardCycleSection } from '../lib/creditCards'
 import { resolveCycleBounds } from '../lib/pensionLedger'
 import { findApplicableSnapshot } from '../lib/salaryLedger'
@@ -1169,9 +1169,11 @@ function DeckDetail(props: {
  *
  * Widened (Adam-specified, 2026-09-03) from 'personal'-only to also cover
  * 'household' and 'joint', now that both get the same ledger-parity
- * toolkit. 'person' grouping (Household-only) is included alongside
- * 'list' — Adam's own spec for the group-by-person view: "the same
- * options to follow... include cycle-end totals."
+ * toolkit. 'person' grouping is included alongside 'list' — Adam's
+ * original spec for the group-by-person view: "the same options to
+ * follow... include cycle-end totals." (Since 2026-09-14 on Joint and
+ * 2026-09-16 on Household, Person grouping is a fixed cycle-outer view
+ * that ignores this toggle — see JointDetail/HouseholdDetail.)
  *
  * Widened again (Adam-specified, 2026-09-08) for 'credit_card' — a
  * genuinely different case from the other four, which all share one
@@ -1486,8 +1488,9 @@ function FiltersSheet({
   // Independent of Cycle-end totals, but still only meaningful for 'list'
   // grouping + 'date' order on a Group-by/Order-by card: 'category'/
   // 'person' already split the ledger a different way
-  // (CategoryGroupedList/PersonGroupedList don't accept a
-  // groupByDirection prop), and AmountOrderedList doesn't either.
+  // (CategoryGroupedList doesn't accept a groupByDirection prop, and
+  // 'person' routes CycleGroupedList through its own mutually exclusive
+  // groupByPerson mode), and AmountOrderedList doesn't either.
   // Credit Card/Savings Pot have no Group-by/Order-by of their own to
   // conflict with, so it's always applicable there.
   const groupByDirectionApplicable = !showGroupOrder || (grouping === 'list' && order === 'date')
@@ -2273,8 +2276,18 @@ function ProjectedSpendRow({ forecastAmount, realSpend, runningBalance }: { fore
  * bucket) and an empty bucket for THIS cycle specifically is just noise,
  * so empty groups are dropped entirely rather than shown with a "Nothing
  * here" placeholder each.
+ *
+ * 2026-09-16 (PROMPT-03) — renamed from JointPersonPills: Household's
+ * "Group by Person" now renders through this too (fed by
+ * householdLedger.ts's buildHouseholdPersonGroups instead), so the two
+ * cards share ONE grouping implementation — a change here must be
+ * checked on both. `amountSign` is whatever CycleGroupedList itself folds
+ * with (jointAccountSignedAmount for Joint, signedAmount for Household),
+ * so a pill's total always uses the same sign as the cycle around it.
+ * Each pill's figure is that person's NET for this one cycle, not a
+ * running balance.
  */
-function JointPersonPills({ groups, data }: { groups: JointPersonGroup[]; data: AppDataV2 }) {
+function PersonPills({ groups, data, amountSign }: { groups: (JointPersonGroup | HouseholdPersonGroup)[]; data: AppDataV2; amountSign: (t: Transaction) => number }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
   const toggle = (id: string) =>
     setCollapsed((prev) => {
@@ -2290,7 +2303,7 @@ function JointPersonPills({ groups, data }: { groups: JointPersonGroup[]; data: 
     <div className="flex flex-col gap-1.5">
       {nonEmpty.map((group) => {
         const expanded = !collapsed.has(group.id)
-        const total = round2(group.transactions.reduce((sum, t) => sum + jointAccountSignedAmount(t), 0))
+        const total = round2(group.transactions.reduce((sum, t) => sum + amountSign(t), 0))
         const ordered = group.transactions.slice().sort(compareByDateSalaryFirst)
         return (
           <div key={group.id} className="rounded-xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
@@ -2306,7 +2319,7 @@ function JointPersonPills({ groups, data }: { groups: JointPersonGroup[]; data: 
             {expanded && (
               <div className="px-3 pb-2 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
                 {ordered.map((t) => (
-                  <TransactionRow key={t.id} t={t} data={data} amountSign={jointAccountSignedAmount} />
+                  <TransactionRow key={t.id} t={t} data={data} amountSign={amountSign} />
                 ))}
               </div>
             )}
@@ -2327,6 +2340,7 @@ function CycleGroupedList({
   amountSign,
   groupByDirection,
   groupByPerson,
+  buildPersonGroups,
   forecastByCycle,
 }: {
   transactions: Transaction[]
@@ -2336,8 +2350,10 @@ function CycleGroupedList({
   showCleared: boolean
   amountSign?: (t: Transaction) => number
   groupByDirection?: boolean
-  /** 2026-09-14 (Joint's "Group by Person," cycle-outer/person-inner redesign) — mutually exclusive with groupByDirection at the FiltersSheet level (Joint's own "Group by" pills only ever select one of List/Category/Person, and Direction is its own independent toggle only offered while grouping is List+Date). When on, each expanded cycle's body renders JointPersonPills instead of a flat/direction-split row list — see that component's own comment. Joint-only; every other caller omits this entirely. */
+  /** 2026-09-14 (Joint's "Group by Person," cycle-outer/person-inner redesign) — mutually exclusive with groupByDirection at the FiltersSheet level (Joint's own "Group by" pills only ever select one of List/Category/Person, and Direction is its own independent toggle only offered while grouping is List+Date). When on, each expanded cycle's body renders PersonPills instead of a flat/direction-split row list — see that component's own comment. Joint and (2026-09-16, PROMPT-03) Household; every other caller omits this entirely. */
   groupByPerson?: boolean
+  /** Splits ONE cycle's visible rows into person pills while groupByPerson is on. Defaults to Joint's own buildJointPersonGroups (payee shares + "Spend"); Household passes buildHouseholdPersonGroups. */
+  buildPersonGroups?: (rows: Transaction[]) => (JointPersonGroup | HouseholdPersonGroup)[]
   /** 2026-09-13 (average spend forecast) — one entry per FUTURE cycle that needs a synthetic forecast row, keyed by that cycle's own start date (ISO). Personal/Joint only; every other caller omits this entirely. See buildForecastByCycle's own comment. */
   forecastByCycle?: Map<string, { forecastAmount: number; realSpend: number }>
 }) {
@@ -2454,7 +2470,7 @@ function CycleGroupedList({
             {expanded && (
               <div className="px-3 pb-1">
                 {groupByPerson ? (
-                  <JointPersonPills groups={buildJointPersonGroups(data, section.visibleRows.map(({ t }) => t))} data={data} />
+                  <PersonPills groups={(buildPersonGroups ?? ((rows) => buildJointPersonGroups(data, rows)))(section.visibleRows.map(({ t }) => t))} data={data} amountSign={sign} />
                 ) : groupByDirection ? (
                   <DirectionGroupedRows<CycleRowItem>
                     items={[
@@ -3242,75 +3258,6 @@ function PotDetail({
   )
 }
 
-/**
- * Household's "Group by: Person" view — Adam's own spec: each person gets
- * their own section, with "the same options to follow" (order by amount
- * or date, cycle-end totals, show/hide cleared) applied WITHIN their
- * section, using their own running balance — literally reusing
- * AmountOrderedList/CycleGroupedList/DateOrderedList per person, same as
- * the ungrouped view reuses them for the combined list.
- */
-function PersonGroupedList({
-  personProjections,
-  data,
-  order,
-  cycleTotals,
-  showCleared,
-}: {
-  personProjections: HouseholdPersonProjection[]
-  data: AppDataV2
-  order: Order
-  cycleTotals: boolean
-  showCleared: boolean
-}) {
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
-  const toggle = (id: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-
-  return (
-    <div className="flex flex-col gap-4">
-      {personProjections.map((pp) => {
-        const isCollapsed = collapsed.has(pp.personId)
-        return (
-          <div key={pp.personId}>
-            <button onClick={() => toggle(pp.personId)} className="w-full flex items-center justify-between gap-2 mb-2 text-left">
-              <span className="flex items-center gap-1.5">
-                {isCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-                <span className="text-sm font-semibold text-[var(--color-ink)]">{pp.personName}</span>
-              </span>
-              <span className="text-xs font-mono font-semibold tabular-nums" style={{ color: 'var(--color-ink-muted)' }}>
-                £{formatCurrency(pp.clearedBalance)}
-              </span>
-            </button>
-            {!isCollapsed &&
-              (order === 'amount' ? (
-                <AmountOrderedList transactions={pp.transactions} data={data} showCleared={showCleared} />
-              ) : cycleTotals ? (
-                <CycleGroupedList
-                  transactions={pp.transactions}
-                  data={data}
-                  openingRunningBalance={pp.openingBalance}
-                  cycles={pp.cycles}
-                  showCleared={showCleared}
-                />
-              ) : (
-                <DateOrderedList transactions={pp.transactions} data={data} openingRunningBalance={pp.openingBalance} showCleared={showCleared} cycleStartIso={toLocalIsoDate(pp.cycles[0].start)} />
-              ))}
-          </div>
-        )
-      })}
-      {personProjections.length === 0 && (
-        <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">Nobody has a pay cycle set up yet.</p>
-      )}
-    </div>
-  )
-}
-
 function HouseholdDetail({
   data,
   horizon,
@@ -3382,7 +3329,22 @@ function HouseholdDetail({
         <p className="text-xs text-[var(--color-ink-faint)] mt-2 mb-4">Each person's own personal bills and transactions — no joint bills here; see the Joint card for those.</p>
 
         {grouping === 'person' ? (
-          <PersonGroupedList personProjections={personProjections} data={data} order={order} cycleTotals={cycleTotals} showCleared={showCleared} />
+          // 2026-09-16 (PROMPT-03) — cycle-outer, person-inner, the same
+          // shape and the same component Joint uses (see JointDetail):
+          // replaces the old person-outer PersonGroupedList. Like Joint,
+          // it ignores `order`/`cycleTotals` — Person grouping is its own
+          // fixed view. Cycles are the combined list's own (primary
+          // person's) cycles, so each cycle's person pills sum to exactly
+          // what the ungrouped cycle-totals view shows for that cycle.
+          <CycleGroupedList
+            transactions={combinedTransactions}
+            data={data}
+            openingRunningBalance={combinedOpeningBalance}
+            cycles={combinedCycles}
+            showCleared={showCleared}
+            groupByPerson
+            buildPersonGroups={(rows) => buildHouseholdPersonGroups(personProjections, rows)}
+          />
         ) : grouping === 'category' ? (
           <CategoryGroupedList transactions={combinedTransactions} data={data} showCleared={showCleared} />
         ) : order === 'amount' ? (
