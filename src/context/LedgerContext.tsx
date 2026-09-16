@@ -13,7 +13,6 @@ import type {
   RecurringTemplate,
   SalaryOverride,
   SalarySnapshot,
-  SalarySort,
   SalarySortTarget,
   SavingsPot,
   StatementCalibrationLine,
@@ -30,7 +29,22 @@ import { createCategory, removeCategorySafely } from '../lib/categories'
 import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/creditCards'
 import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, reassignLoanRecurringOverpaymentTransactions, type CalibrationResult } from '../lib/ledgerLoans'
 import { autoClearDuePayments } from '../lib/autoClear'
-import { removePersonFromData, removePotFromData, removeSavingsPotFromData } from '../lib/deleteReassign'
+import {
+  applyBlockerAction,
+  applyBlockerActionToAll,
+  dropSalarySortTarget,
+  removeCreditCardFromData,
+  removeLoanFromData,
+  removePensionFromData,
+  removePersonFromData,
+  removePotFromData,
+  removeRecurringTemplateFromData,
+  removeSavingsPotFromData,
+  removeTransactionFromData,
+  type BlockerAction,
+  type BlockerTarget,
+  type DeleteSubject,
+} from '../lib/deleteReassign'
 import { convertClearedSalaryToStandaloneIncome, nextRecordedSeq } from '../lib/salaryLedger'
 
 import { toLocalIsoDate as toIso } from '../lib/date'
@@ -40,20 +54,9 @@ const todayIso = () => toIso(new Date())
 // lib/deleteReassign.ts can use them without importing this component.
 // Re-exported here because verify scripts import them from this path.
 export { sweepPendingForLoan, sweepPendingForCreditCard, sweepPendingForSavingsPot, sweepPendingForPot, sweepPendingForSource } from '../lib/pendingSweep'
-import { sweepPendingForLoan, sweepPendingForCreditCard, sweepPendingForSource } from '../lib/pendingSweep'
 
-// ── Salary Sort target removal (2026-09 session) — shared by
-// updateTransaction (date-edit detach), removeTransaction (delete), and
-// LedgerContext's own clearSalarySortTarget/saveSalarySort below, so
-// "drop one target, then remove the whole SalarySort if that empties it"
-// is written exactly once. Pure — takes/returns the salarySorts array,
-// no setDataState involved, so every caller composes it into their own
-// single state update rather than this doing a second render pass.
-export function dropSalarySortTarget(salarySorts: SalarySort[], sortId: string, transactionId: string): SalarySort[] {
-  return salarySorts
-    .map((s) => (s.id === sortId ? { ...s, targets: s.targets.filter((t) => t.transactionId !== transactionId) } : s))
-    .filter((s) => s.targets.length > 0)
-}
+// dropSalarySortTarget moved to lib/deleteReassign.ts; re-exported for verify-salary-sort.ts.
+export { dropSalarySortTarget } from '../lib/deleteReassign'
 
 interface AdHocInput {
   type: 'expense' | 'income'
@@ -271,6 +274,14 @@ interface LedgerContextValue {
   addPot: (personId: string, pot: Omit<Pot, 'id' | 'personId'>) => string
   updatePot: (id: string, updates: Partial<Omit<Pot, 'id' | 'personId'>>) => void
   removePot: (id: string) => void
+
+  // ── Delete-reassign flows (PROMPT-05, 2026-09-16) ──
+  // Deleting a Person/Pot/Savings Pot is blocked while anything still
+  // points at it (lib/deleteReassign.ts findDeleteBlockers). These resolve
+  // one blocker, or every blocker that accepts `target`, by reassigning to
+  // an explicit target or deleting the item. See DeleteBlockedModal.
+  resolveDeleteBlocker: (subject: DeleteSubject, blockerKey: string, action: BlockerAction) => void
+  resolveAllDeleteBlockers: (subject: DeleteSubject, target: BlockerTarget) => void
   // Hand-logged from the Transactions page's Pots button — same two-sided
   // bookkeeping shape as logSavingsDeposit/logSavingsWithdrawal above.
   logPotDeposit: (potId: string, amount: number, date: string, note?: string) => void
@@ -419,17 +430,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
   }
 
   const removeTransaction: LedgerContextValue['removeTransaction'] = (id) => {
-    setDataState((prev) => {
-      const existing = prev.transactions.find((t) => t.id === id)
-      const transactions = prev.transactions.filter((t) => t.id !== id)
-      if (!existing || existing.sourceType !== 'salary_sort' || !existing.sourceId) {
-        return { ...prev, transactions }
-      }
-      // Drops just this one target, leaving the rest of the sort intact
-      // — matches saveSalarySort/clearSalarySortTarget's own "an empty
-      // sort isn't a sort" rule if this was the last target.
-      return { ...prev, transactions, salarySorts: dropSalarySortTarget(prev.salarySorts, existing.sourceId, id) }
-    })
+    setDataState((prev) => removeTransactionFromData(prev, id))
   }
 
   const logCreditCardSpend: LedgerContextValue['logCreditCardSpend'] = (cardId, amount, date, note) => {
@@ -538,14 +539,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     }))
   }
   const removeLoan: LedgerContextValue['removeLoan'] = (id) => {
-    setDataState((prev) => {
-      const loan = prev.loans.find((l) => l.id === id)
-      return {
-        ...prev,
-        loans: prev.loans.filter((l) => l.id !== id),
-        transactions: loan ? sweepPendingForLoan(prev.transactions, loan) : prev.transactions,
-      }
-    })
+    setDataState((prev) => removeLoanFromData(prev, id))
   }
   const logLoanOverpayment: LedgerContextValue['logLoanOverpayment'] = (loanId, amount, date, note, recastMode) => {
     setDataState((prev) => {
@@ -640,11 +634,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     })
   }
   const removeCreditCard: LedgerContextValue['removeCreditCard'] = (id) => {
-    setDataState((prev) => ({
-      ...prev,
-      creditCards: prev.creditCards.filter((c) => c.id !== id),
-      transactions: sweepPendingForCreditCard(prev.transactions, id),
-    }))
+    setDataState((prev) => removeCreditCardFromData(prev, id))
   }
 
   const addRecurringTemplate: LedgerContextValue['addRecurringTemplate'] = (template) => {
@@ -656,11 +646,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     setDataState((prev) => ({ ...prev, recurringTemplates: prev.recurringTemplates.map((t) => (t.id === id ? { ...t, ...updates } : t)) }))
   }
   const removeRecurringTemplate: LedgerContextValue['removeRecurringTemplate'] = (id) => {
-    setDataState((prev) => ({
-      ...prev,
-      recurringTemplates: prev.recurringTemplates.filter((t) => t.id !== id),
-      transactions: sweepPendingForSource(prev.transactions, 'recurring_template', id),
-    }))
+    setDataState((prev) => removeRecurringTemplateFromData(prev, id))
   }
 
   const addPerson: LedgerContextValue['addPerson'] = ({ name, color }) => {
@@ -947,21 +933,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     setDataState((prev) => ({ ...prev, pensions: prev.pensions.map((p) => (p.id === id ? { ...p, ...updates } : p)) }))
   }
   const removePension: LedgerContextValue['removePension'] = (id) => {
-    setDataState((prev) => ({
-      ...prev,
-      pensions: prev.pensions.filter((p) => p.id !== id),
-      transactions: sweepPendingForSource(prev.transactions, 'pension', id),
-      // A person's followsIncomeSource pointing at a now-deleted pension
-      // would silently strand their cycle-following choice — fall back
-      // to 'salary' (the same default as never having set one), same
-      // reconciliation instinct as household.ts's reconcilePersonReferences
-      // for a dangling ownerId.
-      payCycles: prev.payCycles.map((pc) =>
-        pc.followsIncomeSource?.type === 'pension' && pc.followsIncomeSource.pensionId === id
-          ? { ...pc, followsIncomeSource: { type: 'salary' } }
-          : pc,
-      ),
-    }))
+    setDataState((prev) => removePensionFromData(prev, id))
   }
 
   const setJointAccountOpening: LedgerContextValue['setJointAccountOpening'] = (openingBalance, openingBalanceDate) => {
@@ -993,6 +965,12 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
   }
   const removePot: LedgerContextValue['removePot'] = (id) => {
     setDataState((prev) => removePotFromData(prev, id))
+  }
+  const resolveDeleteBlocker: LedgerContextValue['resolveDeleteBlocker'] = (subject, blockerKey, action) => {
+    setDataState((prev) => applyBlockerAction(prev, subject, blockerKey, action))
+  }
+  const resolveAllDeleteBlockers: LedgerContextValue['resolveAllDeleteBlockers'] = (subject, target) => {
+    setDataState((prev) => applyBlockerActionToAll(prev, subject, target))
   }
 
   // SUPERSEDED (2026-09-04 session) — thin wrapper over logTransfer, same
@@ -1151,6 +1129,8 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     addPot,
     updatePot,
     removePot,
+    resolveDeleteBlocker,
+    resolveAllDeleteBlockers,
     logPotDeposit,
     logPotWithdrawal,
     assignRecurringTemplateLocation,
