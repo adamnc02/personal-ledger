@@ -610,6 +610,18 @@ function relocateLoan(l: Loan, location: BillLocation, potId: string | undefined
   }
 }
 
+/**
+ * Keeps a rewrite on PENDING rows only. The Bills/Borrowing "move to a
+ * pot" flow deliberately rewrites cleared rows from its effective date
+ * (lib/locationChange.ts); a move made while deleting does not (Adam,
+ * 2026-09-16): cleared rows are left alone, including one cleared today,
+ * matching every other move in this file. Both lists are index-aligned
+ * because the rewrite is a plain map.
+ */
+function pendingOnly(original: Transaction[], rewritten: Transaction[]): Transaction[] {
+  return original.map((t, i) => (t.status === 'pending' ? rewritten[i] : t))
+}
+
 function reassignToLocation(data: AppDataV2, subject: DeleteSubject, b: DeleteBlocker, target: BlockerTarget, asOfIso: string): AppDataV2 {
   switch (b.entity) {
     case 'template': {
@@ -635,7 +647,7 @@ function reassignToLocation(data: AppDataV2, subject: DeleteSubject, b: DeleteBl
       return {
         ...data,
         recurringTemplates: data.recurringTemplates.map((x) => (x.id === t.id ? relocateTemplate(x, next.location, next.potId, asOfIso) : x)),
-        transactions: reassignTransactionsForLocationChange(data.transactions, 'recurring_template', t.id, asOfIso, next.location, next.potId),
+        transactions: pendingOnly(data.transactions, reassignTransactionsForLocationChange(data.transactions, 'recurring_template', t.id, asOfIso, next.location, next.potId)),
       }
     }
     case 'loan': {
@@ -644,7 +656,7 @@ function reassignToLocation(data: AppDataV2, subject: DeleteSubject, b: DeleteBl
       return {
         ...data,
         loans: data.loans.map((l) => (l.id === b.id ? relocateLoan(l, next.location, next.potId, asOfIso) : l)),
-        transactions: reassignTransactionsForLocationChange(data.transactions, 'loan', b.id, asOfIso, next.location, next.potId),
+        transactions: pendingOnly(data.transactions, reassignTransactionsForLocationChange(data.transactions, 'loan', b.id, asOfIso, next.location, next.potId)),
       }
     }
     case 'loanRecurringOverpayment': {
@@ -666,7 +678,7 @@ function reassignToLocation(data: AppDataV2, subject: DeleteSubject, b: DeleteBl
               }
             : l,
         ),
-        transactions: reassignLoanRecurringOverpaymentTransactions(data.transactions, b.id, asOfIso, resolved.location, resolved.potId),
+        transactions: pendingOnly(data.transactions, reassignLoanRecurringOverpaymentTransactions(data.transactions, b.id, asOfIso, resolved.location, resolved.potId)),
       }
     }
     case 'transaction': {

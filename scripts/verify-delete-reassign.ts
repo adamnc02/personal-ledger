@@ -490,6 +490,61 @@ function potFixture(): AppDataV2 {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// 5b. When a move takes effect (Adam, 2026-09-16): cleared rows are left
+//     alone — INCLUDING one cleared today — and pending rows move. The
+//     first build reused the Bills-page location flow for pot bills/loans/
+//     overpayments, which also rewrites a row cleared today.
+// ─────────────────────────────────────────────────────────────────────
+{
+  const potRow = (id: string, sourceType: Transaction['sourceType'], sourceId: string, date: string, status: 'cleared' | 'pending'): Transaction =>
+    txn(id, { date, status, location: 'pot', potId: 'adam-pot', type: 'bill_payment', sourceType, sourceId })
+  const transferRow = (id: string, date: string, status: 'cleared' | 'pending'): Transaction => ({
+    ...buildTransferTransaction({ type: 'personal' }, { type: 'pot', potId: 'adam-pot' }, 30, date, ADAM),
+    id,
+    status,
+    sourceType: 'recurring_template',
+    sourceId: 'pot-in',
+  })
+  const rowsFor = (prefix: string, make: (id: string, date: string, status: 'cleared' | 'pending') => Transaction) => [
+    make(`${prefix}-past-cleared`, '2026-05-01', 'cleared'),
+    make(`${prefix}-today-cleared`, ASOF, 'cleared'),
+    make(`${prefix}-future-pending`, '2026-07-01', 'pending'),
+  ]
+  const base5b = potFixture()
+  const data: AppDataV2 = {
+    ...base5b,
+    transactions: [
+      ...rowsFor('bill', (id, d, s) => potRow(id, 'recurring_template', 'pot-bill', d, s)),
+      ...rowsFor('loan', (id, d, s) => potRow(id, 'loan', 'pot-loan', d, s)),
+      ...rowsFor('overpay', (id, d, s) => potRow(id, 'loan_recurring_overpayment', 'overpay-from-pot', d, s)),
+      ...rowsFor('transfer', transferRow),
+    ],
+  }
+  const personal = { type: 'reassign', target: { type: 'location', location: { type: 'personal' } } } as const
+  let moved = applyBlockerAction(data, potSubject, 'template:pot-bill', personal, ASOF)
+  moved = applyBlockerAction(moved, potSubject, 'loan:pot-loan', personal, ASOF)
+  moved = applyBlockerAction(moved, potSubject, 'loanRecurringOverpayment:overpay-from-pot', personal, ASOF)
+  moved = applyBlockerAction(moved, potSubject, 'template:pot-in', { type: 'reassign', target: { type: 'location', location: { type: 'joint' } } }, ASOF)
+  const find = (d: AppDataV2, id: string) => d.transactions.find((t) => t.id === id)
+  for (const prefix of ['bill', 'loan', 'overpay', 'transfer']) {
+    check(`[pot move: ${prefix}] a row cleared BEFORE today is untouched`, find(moved, `${prefix}-past-cleared`), find(data, `${prefix}-past-cleared`))
+    check(`[pot move: ${prefix}] a row cleared TODAY is untouched`, find(moved, `${prefix}-today-cleared`), find(data, `${prefix}-today-cleared`))
+    check(`[pot move: ${prefix}] a pending row moves`, JSON.stringify(find(moved, `${prefix}-future-pending`)) !== JSON.stringify(find(data, `${prefix}-future-pending`)), true)
+  }
+  check('[pot move: bill] the pending row is now Personal', [find(moved, 'bill-future-pending')?.location, find(moved, 'bill-future-pending')?.potId], ['personal', undefined])
+  check('[pot move: transfer] the pending row now goes to Joint', find(moved, 'transfer-future-pending')?.toLocation, { type: 'joint' })
+
+  const person5b: AppDataV2 = {
+    ...household(),
+    transactions: rowsFor('ella-bill', (id, d, s) => txn(id, { date: d, status: s, ownerId: ELLA, type: 'bill_payment', sourceType: 'recurring_template', sourceId: 'ella-bill' })),
+  }
+  const movedPerson = applyBlockerAction(person5b, ellaSubject, 'template:ella-bill', { type: 'reassign', target: { type: 'person', personId: ADAM } }, ASOF)
+  check('[person move] a row cleared before today keeps Ella', find(movedPerson, 'ella-bill-past-cleared')?.ownerId, ELLA)
+  check('[person move] a row cleared today keeps Ella', find(movedPerson, 'ella-bill-today-cleared')?.ownerId, ELLA)
+  check('[person move] a pending row moves to Adam', find(movedPerson, 'ella-bill-future-pending')?.ownerId, ADAM)
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // 6. The two real backups
 // ─────────────────────────────────────────────────────────────────────
 for (const [label, file] of [
