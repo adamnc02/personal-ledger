@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency } from '../lib/format'
 import { useLedgerData } from '../context/LedgerContext'
@@ -1727,6 +1727,8 @@ function SavingsPotLedgerModal({
  * assignment, so ticking it here moves it in (and implicitly out of
  * wherever it was, since an item can only ever have one location).
  */
+const CHECKLIST_VISIBLE_ROWS = 10
+
 function potEligibleItems(pot: Pot, templates: RecurringTemplate[], loans: Loan[]) {
   // A real bill's `kind` is undefined in practice (never explicitly
   // 'bill' — see RecurringTemplate.kind's own comment; 'transaction' and
@@ -1874,6 +1876,19 @@ function PotEditForm({
 }) {
   const [name, setName] = useState(pot.name)
   const items = potEligibleItems(pot, templates, loans)
+  // Height of exactly CHECKLIST_VISIBLE_ROWS full rows, measured from the
+  // rendered rows (their height depends on font size and dividers).
+  const checklistRef = useRef<HTMLDivElement>(null)
+  const [checklistMaxHeight, setChecklistMaxHeight] = useState<number | undefined>(undefined)
+  useLayoutEffect(() => {
+    const list = checklistRef.current
+    if (!list || items.length <= CHECKLIST_VISIBLE_ROWS) {
+      setChecklistMaxHeight(undefined)
+      return
+    }
+    const lastVisible = list.children[CHECKLIST_VISIBLE_ROWS - 1] as HTMLElement | undefined
+    if (lastVisible) setChecklistMaxHeight(Math.ceil(lastVisible.getBoundingClientRect().bottom - list.getBoundingClientRect().top + list.scrollTop))
+  }, [items.length])
   // Batch 7 (2026-09-07, Bug 8) — Adam's own spec: "immediately after
   // unticking/ticking an item, the same changes take effect from
   // follow-up modal that appears in bills appears... The changes to the
@@ -1982,8 +1997,26 @@ function PotEditForm({
 
       {items.length > 0 && (
         <div className="mt-4">
-          <span className="text-xs font-medium text-[var(--color-ink)]">What this pot pays</span>
-          <div className="flex flex-col divide-y max-h-64 overflow-y-auto mt-2" style={{ borderColor: 'var(--color-track)' }}>
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-xs font-medium text-[var(--color-ink)]">What this pot pays</span>
+            {items.length > CHECKLIST_VISIBLE_ROWS && (
+              <span className="text-[11px] text-[var(--color-ink-faint)]">
+                {items.length} items · scroll for more
+              </span>
+            )}
+          </div>
+          {/* 2026-09-16 (Adam-reported, "not every bill or loan is listed"):
+              every eligible item WAS here, but a fixed 256px window showed ~7
+              rows cut at a row edge, so the list looked complete and the rest
+              (standing orders, both loans) looked missing. Now sized to show
+              exactly 10 full rows, with the count above as the cue that it
+              scrolls. overscroll-contain keeps a scroll at either end from
+              dragging the page. */}
+          <div
+            ref={checklistRef}
+            className="flex flex-col divide-y overflow-y-auto overscroll-contain mt-2"
+            style={{ borderColor: 'var(--color-track)', maxHeight: checklistMaxHeight }}
+          >
             {items.map((item) => (
               <label key={item.key} className={`py-2 flex items-center gap-3 ${item.locked ? '' : 'cursor-pointer'}`}>
                 <input
