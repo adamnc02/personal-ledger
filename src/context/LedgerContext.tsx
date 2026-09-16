@@ -35,8 +35,6 @@ import { applyLoanStartDateChange, applyRecurringOverpaymentStartDateChange } fr
 import { applyCardPaymentDayChange } from '../lib/creditCards'
 import { applyPaydayChange } from '../lib/salaryLedger'
 import {
-  applyBlockerAction,
-  applyBlockerActionToAll,
   dropSalarySortTarget,
   removeCreditCardFromData,
   removeLoanFromData,
@@ -46,8 +44,8 @@ import {
   removeRecurringTemplateFromData,
   removeSavingsPotFromData,
   removeTransactionFromData,
+  resolveBlockersAndDelete,
   type BlockerAction,
-  type BlockerTarget,
   type DeleteSubject,
 } from '../lib/deleteReassign'
 import { convertClearedSalaryToStandaloneIncome, nextRecordedSeq } from '../lib/salaryLedger'
@@ -293,11 +291,10 @@ interface LedgerContextValue {
 
   // ── Delete-reassign flows (PROMPT-05, 2026-09-16) ──
   // Deleting a Person/Pot/Savings Pot is blocked while anything still
-  // points at it (lib/deleteReassign.ts findDeleteBlockers). These resolve
-  // one blocker, or every blocker that accepts `target`, by reassigning to
-  // an explicit target or deleting the item. See DeleteBlockedModal.
-  resolveDeleteBlocker: (subject: DeleteSubject, blockerKey: string, action: BlockerAction) => void
-  resolveAllDeleteBlockers: (subject: DeleteSubject, target: BlockerTarget) => void
+  // points at it (lib/deleteReassign.ts findDeleteBlockers). The sheet stages
+  // a Move/Delete decision per blocker; this applies them all and then the
+  // delete, or nothing if any blocker is left unresolved. See DeleteGuardModal.
+  deleteWithResolutions: (subject: DeleteSubject, decisions: [key: string, action: BlockerAction][]) => void
   // Hand-logged from the Transactions page's Pots button — same two-sided
   // bookkeeping shape as logSavingsDeposit/logSavingsWithdrawal above.
   logPotDeposit: (potId: string, amount: number, date: string, note?: string) => void
@@ -1049,11 +1046,8 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
   const removePot: LedgerContextValue['removePot'] = (id) => {
     setDataState((prev) => removePotFromData(prev, id))
   }
-  const resolveDeleteBlocker: LedgerContextValue['resolveDeleteBlocker'] = (subject, blockerKey, action) => {
-    setDataState((prev) => applyBlockerAction(prev, subject, blockerKey, action))
-  }
-  const resolveAllDeleteBlockers: LedgerContextValue['resolveAllDeleteBlockers'] = (subject, target) => {
-    setDataState((prev) => applyBlockerActionToAll(prev, subject, target))
+  const deleteWithResolutions: LedgerContextValue['deleteWithResolutions'] = (subject, decisions) => {
+    setDataState((prev) => resolveBlockersAndDelete(prev, subject, decisions))
   }
 
   // SUPERSEDED (2026-09-04 session) — thin wrapper over logTransfer, same
@@ -1218,8 +1212,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     addPot,
     updatePot,
     removePot,
-    resolveDeleteBlocker,
-    resolveAllDeleteBlockers,
+    deleteWithResolutions,
     logPotDeposit,
     logPotWithdrawal,
     assignRecurringTemplateLocation,

@@ -776,3 +776,20 @@ export function targetOptionKey(target: BlockerTarget): string {
       return 'self'
   }
 }
+
+/**
+ * The blocker sheet's Delete (Adam, 2026-09-16: "the move button should
+ * store everything as a draft state"). Every Move/Delete choice in the sheet
+ * is staged, and only this applies them — each decision in order, then the
+ * delete itself, as one state update. If any blocker is still unresolved
+ * afterwards, nothing at all is applied: a delete that can't complete must
+ * not leave half its moves behind.
+ */
+export function resolveBlockersAndDelete(data: AppDataV2, subject: DeleteSubject, decisions: [key: string, action: BlockerAction][], asOfIso: string = todayIso()): AppDataV2 {
+  let next = data
+  for (const [key, action] of decisions) next = applyBlockerAction(next, subject, key, action, asOfIso)
+  if (findDeleteBlockers(next, subject).length > 0) return data
+  if (subject.type === 'person') return removePersonFromData(next, subject.id)
+  if (subject.type === 'pot') return removePotFromData(next, subject.id, asOfIso)
+  return removeSavingsPotFromData(next, subject.id, asOfIso)
+}

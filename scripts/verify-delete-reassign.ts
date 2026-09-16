@@ -36,6 +36,8 @@ import {
   removePersonFromData,
   removePotFromData,
   removeSavingsPotFromData,
+  resolveBlockersAndDelete,
+  type BlockerAction,
   type DeleteSubject,
 } from '../src/lib/deleteReassign'
 import type { AppDataV2, CreditCard, Loan, Pension, Person, Pot, RecurringTemplate, SavingsPot, Transaction, TransferLocation } from '../src/types/ledger'
@@ -487,6 +489,36 @@ function potFixture(): AppDataV2 {
   check('every savings pot blocker resolved', findDeleteBlockers(next, sub), [])
   check('a Salary Sort target follows its retargeted transaction', next.salarySorts[0].targets[0].to, { type: 'personal' })
   check('savings pot delete: nothing dangling', danglingReferences(removeSavingsPotFromData(next, 'adam-savings', ASOF)), [])
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 5a. Staged decisions (Adam, 2026-09-16): Move/Delete in the sheet are a
+//     draft; only Delete applies them, together with the delete itself.
+// ─────────────────────────────────────────────────────────────────────
+{
+  const data = household()
+  const blockers = findDeleteBlockers(data, ellaSubject)
+  const toAdam: BlockerAction = { type: 'reassign', target: { type: 'person', personId: ADAM } }
+  const allButOne: [string, BlockerAction][] = blockers.slice(1).map((b) => [b.key, toAdam])
+  check('[staged] with one item still undecided, Delete changes NOTHING (not even the decided moves)', resolveBlockersAndDelete(data, ellaSubject, allButOne, ASOF) === data, true)
+  const all: [string, BlockerAction][] = blockers.map((b, i) => [b.key, i % 3 === 0 && canDeleteBlocker(data, b) ? { type: 'delete' } : toAdam])
+  const done = resolveBlockersAndDelete(data, ellaSubject, all, ASOF)
+  check('[staged] with every item decided, Delete applies them and deletes Ella', done.people.map((p) => p.id), [ADAM])
+  check('[staged] items staged for deletion are gone', all.filter(([, a]) => a.type === 'delete').every(([key]) => {
+    const [entity, id] = key.split(':')
+    return entity === 'template' ? !done.recurringTemplates.some((t) => t.id === id) : entity === 'loan' ? !done.loans.some((l) => l.id === id) : entity === 'pension' ? !done.pensions.some((p) => p.id === id) : entity === 'savingsPot' ? !done.savingsPots.some((p) => p.id === id) : entity === 'creditCard' ? !done.creditCards.some((c) => c.id === id) : entity === 'transaction' ? !done.transactions.some((t) => t.id === id) : entity === 'pot' ? !done.pots.some((p) => p.id === id) : true
+  }), true)
+  check('[staged] nothing dangling', danglingReferences(done), [])
+  check('[staged] cleared history untouched', done.transactions.filter((t) => t.status === 'cleared'), data.transactions.filter((t) => t.status === 'cleared'))
+
+  const potData = potFixture()
+  const potBlockers = findDeleteBlockers(potData, potSubject)
+  const potDecisions: [string, BlockerAction][] = potBlockers.map((b) => {
+    const options = blockerTargetOptions(potData, potSubject, b)
+    return [b.key, options.length > 0 ? { type: 'reassign', target: options[0].target } : { type: 'delete' }]
+  })
+  const potDone = resolveBlockersAndDelete(potData, potSubject, potDecisions, ASOF)
+  check('[staged pot] every item decided → pot deleted, nothing dangling', [potDone.pots.some((p) => p.id === 'adam-pot'), danglingReferences(potDone)], [false, []])
 }
 
 // ─────────────────────────────────────────────────────────────────────
