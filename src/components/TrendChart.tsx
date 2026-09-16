@@ -65,6 +65,29 @@ function makeYScale(values: number[], height: number, padTop: number, padBottom:
   return (v: number) => padTop + (1 - (v - min) / span) * (height - padTop - padBottom)
 }
 
+/**
+ * Client x → viewBox x, via the SVG's own screen transform.
+ *
+ * BUGFIX (2026-09-16, PROMPT-04 Bug A — measured, not assumed): both charts
+ * are `width="100%"` with a fixed viewBox and no preserveAspectRatio, so the
+ * default `xMidYMid meet` scales the drawing UNIFORMLY and centres it. In the
+ * 350px-wide Trends modal on a 390px phone the pill chart's 320×160 viewBox
+ * draws at scale 1.0 with 15px of dead margin each side, and the line chart's
+ * 364-wide viewBox draws at 0.962. The old hit-tests scaled by
+ * `(clientX - rect.left) / rect.width * WIDTH`, i.e. assumed the drawing filled
+ * the element edge to edge (and, for the line chart, that the viewBox was 320
+ * wide rather than 320 + padRight) — so the pill chart highlighted the column
+ * to the right at the left edge and to the left at the right edge, and the line
+ * chart's crosshair trailed the finger by up to 38px. getScreenCTM() is the
+ * transform the browser actually rendered with, letterboxing included, so this
+ * is correct by construction at any element size or aspect ratio.
+ */
+function clientToViewBoxX(svg: SVGSVGElement, clientX: number): number | null {
+  const ctm = svg.getScreenCTM()
+  if (!ctm || ctm.a === 0) return null
+  return (clientX - ctm.e) / ctm.a
+}
+
 function linePath(points: { x: number; y: number }[]): string {
   if (points.length === 0) return ''
   return points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
@@ -135,8 +158,8 @@ export function BalanceSpendChart({ series, view, color, interactive = false, he
   function hitTest(clientX: number) {
     const svg = svgRef.current
     if (!svg) return
-    const rect = svg.getBoundingClientRect()
-    const relX = ((clientX - rect.left) / rect.width) * WIDTH
+    const relX = clientToViewBoxX(svg, clientX)
+    if (relX === null) return
     let closest = 0
     let closestDist = Infinity
     for (let i = 0; i < days.length; i++) {
@@ -257,6 +280,8 @@ export interface SavingsPotPillChartProps {
   onActivePointChange?: (point: SavingsPotPillPoint | null) => void
 }
 
+const MAX_PILL_WIDTH = 24
+
 export function SavingsPotPillChart({ series, color, interactive = false, height = 140, onActivePointChange }: SavingsPotPillChartProps) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
@@ -266,27 +291,30 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
   const padTop = 4
   const padBottom = interactive ? 18 : 2
   const trackHeight = height - padTop - padBottom
-  const barGap = 3
-  const barWidth = points.length > 0 ? Math.max(2, WIDTH / points.length - barGap) : 4
+  // Stride first, bar width derived from it, so n columns always span exactly WIDTH.
+  // Previously barWidth was clamped to >= 2 with a fixed 3px gap, so past 64 columns
+  // the stride exceeded WIDTH / n and the later columns rendered outside the viewBox —
+  // invisible and unreachable. Not reachable at today's granularities; latent.
+  const stride = points.length > 0 ? WIDTH / points.length : WIDTH
+  // Capped and centred in its slot: with few columns (a pot opened this cycle has ONE Year
+  // column) an uncapped pill spanned the whole chart and rendered as an ellipse. The slot, not
+  // the drawn pill, stays the touch target, so hit-testing below is unchanged.
+  const barGap = Math.min(3, stride / 3)
+  const barWidth = Math.min(MAX_PILL_WIDTH, stride - barGap)
 
-  // The background "track" behind every column is a fixed height — the
-  // reference scale for the whole chart — set by the single largest amount
-  // actually SAVED (a positive netChange) across the current granularity's
-  // points, per the reference screenshots (every track pill is identical
-  // height; only the coloured fill inside it varies). Each column's fill
-  // is then that period's own net movement (saved OR withdrawn) as a
-  // fraction of that scale, not the period's end-of-period balance — the
-  // running balance is shown as text in the callout above the chart
-  // instead, not encoded in bar height. Falls back to the largest
-  // magnitude of any kind when there's no positive period at all (e.g. a
-  // pot that's only ever been withdrawn from), so bars still have a
-  // meaningful scale rather than every one dividing by zero.
-  const netValues = points.map((p) => p.netChange)
-  const maxSaved = Math.max(0, ...netValues)
-  const scaleMax = maxSaved > 0 ? maxSaved : Math.max(1, ...netValues.map((v) => Math.abs(v)))
+  // Column heights (Adam, 2026-09-16 — corrects the first build): every
+  // column's background track is full height and stands for the highest
+  // balance the pot reaches anywhere in this view (series.peakBalance,
+  // including a peak inside a single day); the coloured fill is that
+  // period's END BALANCE against it — the original Trends spec's "each
+  // column is the pot's end-of-period balance". The first build drew the
+  // fill from |netChange| instead, so on Adam's pot the only tall column
+  // was the day he withdrew £242, and the day it held £242.85 was flat.
+  // The net saved/withdrawn figure lives in the tooltip, not in bar height.
+  const scaleMax = series.peakBalance > 0 ? series.peakBalance : 1
 
-  function fillHeight(v: number) {
-    return Math.min(trackHeight, (Math.abs(v) / scaleMax) * trackHeight)
+  function fillHeight(balance: number) {
+    return Math.min(trackHeight, (Math.max(0, balance) / scaleMax) * trackHeight)
   }
 
   // Cap x-axis LABELS at 4 even though every column still renders — per
@@ -304,9 +332,9 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
   function hitTest(clientX: number) {
     const svg = svgRef.current
     if (!svg || points.length === 0) return
-    const rect = svg.getBoundingClientRect()
-    const relX = ((clientX - rect.left) / rect.width) * WIDTH
-    const idx = Math.min(points.length - 1, Math.max(0, Math.floor(relX / (barWidth + barGap))))
+    const relX = clientToViewBoxX(svg, clientX)
+    if (relX === null) return
+    const idx = Math.min(points.length - 1, Math.max(0, Math.floor(relX / stride)))
     setActiveIndex(idx)
     onActivePointChange?.(points[idx])
   }
@@ -343,8 +371,8 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
       style={{ touchAction: interactive ? 'none' : undefined, display: 'block', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}
     >
       {points.map((p, i) => {
-        const h = Math.max(2, fillHeight(p.netChange))
-        const x = i * (barWidth + barGap)
+        const h = Math.max(2, fillHeight(p.endBalance))
+        const x = i * stride + (stride - barWidth) / 2
         const y = height - padBottom - h
         const isActive = activeIndex === i
         return (

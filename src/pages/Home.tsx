@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso, parseLocalDate } from '../lib/date'
-import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
 import { averageAdHocSpendForCycle, daysOfSpendHistory, forecastSpendForCycle, hasAnyMatchingSpend, hasSpendHistory, MIN_SPEND_HISTORY_DAYS, type SpendScope } from '../lib/averageSpendForecast'
@@ -1841,11 +1841,41 @@ function TrendsModal({
                     £{formatCurrency(activePillPoint ? activePillPoint.endBalance : spSeries.points[spSeries.points.length - 1]?.endBalance ?? 0)}
                   </span>
                 </div>
-                {activePillPoint && (
-                  <p className="text-xs" style={{ color: activePillPoint.netChange < 0 ? 'var(--color-coral)' : 'var(--color-positive)' }}>
-                    {activePillPoint.netChange < 0 ? `£${formatCurrency(Math.abs(activePillPoint.netChange))} withdrawn` : `£${formatCurrency(activePillPoint.netChange)} saved`} this period
-                  </p>
-                )}
+                {/* Always rendered at a fixed height, active or not (Adam, 2026-09-16: the box's
+                    height must not change) — the net headline and the small gross in/out
+                    sub-label share ONE non-wrapping row, so any period, including one with both a
+                    deposit and a withdrawal, fits the same box. The in/out figures are what name
+                    a drop's cause (PROMPT-04 Bug B); individual transactions are deliberately
+                    not listed. */}
+                <div className="flex items-baseline justify-between gap-2 whitespace-nowrap overflow-hidden" style={{ height: 16 }}>
+                  {activePillPoint && (
+                    <>
+                      {/* Styled like the other cards' "£X IN/OUT" tooltip label (Adam, 2026-09-16):
+                          muted capitalised text, with only the arrow coloured. Pence kept, unlike the
+                          line chart's whole pounds, because pot movements are often small. */}
+                      <span className="text-xs text-[var(--color-ink-muted)] truncate flex items-center gap-1">
+                        {activePillPoint.netChange < 0 ? (
+                          <>
+                            <ArrowDown size={12} className="shrink-0" style={{ color: 'var(--color-coral)' }} aria-hidden />
+                            £{formatCurrency(Math.abs(activePillPoint.netChange))} OUT
+                          </>
+                        ) : activePillPoint.netChange > 0 ? (
+                          <>
+                            <ArrowUp size={12} className="shrink-0" style={{ color: 'var(--color-positive)' }} aria-hidden />
+                            £{formatCurrency(activePillPoint.netChange)} SAVED
+                          </>
+                        ) : (
+                          'No change'
+                        )}
+                      </span>
+                      {(activePillPoint.moneyIn > 0 || activePillPoint.moneyOut > 0) && (
+                        <span className="text-[10px] font-mono text-[var(--color-ink-faint)] shrink-0">
+                          £{formatCurrency(activePillPoint.moneyIn)} in · £{formatCurrency(activePillPoint.moneyOut)} out
+                        </span>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
 
               <div className="w-full">

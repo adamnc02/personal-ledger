@@ -159,7 +159,12 @@ export function buildExampleLedger(method: SavingsInterestMethod): ExampleLedger
 
   if (method.type === 'aer_credited') {
     let balance = EXAMPLE_OPENING_BALANCE
-    for (const c of walkCreditingDates(start, method.creditingFrequency, rangeEnd).slice(0, 3)) {
+    // Walked far enough for three credits at ANY frequency (2026-09-16, PROMPT-04
+    // Bug C) — the 3-month rangeEnd above showed one quarterly credit and no annual
+    // one at all, invisible until the form actually saved a non-monthly choice.
+    // Monthly still takes the first three, exactly as before.
+    const creditRangeEnd = new Date(2029, 0, 1)
+    for (const c of walkCreditingDates(start, method.creditingFrequency, creditRangeEnd).slice(0, 3)) {
       const interest = aerCreditedInterest(balance, method)
       balance = round2(balance + interest)
       // BUGFIX (Adam-reported, 2026-09-02): this used to interpolate the
