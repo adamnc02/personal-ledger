@@ -2014,6 +2014,8 @@ function PotEditForm({
               dragging the page. */}
           <div
             ref={checklistRef}
+            // Swipe-to-delete is off inside the list, so a drag here only ever scrolls it.
+            data-no-swipe
             className="flex flex-col divide-y overflow-y-auto overscroll-contain mt-2"
             style={{ borderColor: 'var(--color-track)', maxHeight: checklistMaxHeight }}
           >
