@@ -29,6 +29,7 @@ import { createCategory, removeCategorySafely } from '../lib/categories'
 import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/creditCards'
 import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, reassignLoanRecurringOverpaymentTransactions, type CalibrationResult } from '../lib/ledgerLoans'
 import { autoClearDuePayments } from '../lib/autoClear'
+import { applyTemplateScheduleChange, type TemplateSchedule } from '../lib/schedule'
 import {
   applyBlockerAction,
   applyBlockerActionToAll,
@@ -136,6 +137,8 @@ interface LedgerContextValue {
 
   addRecurringTemplate: (template: Omit<RecurringTemplate, 'id' | 'active'>) => string
   updateRecurringTemplate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
+  /** Changes a recurring template's due date and/or frequency for every payment from `effectiveFromDate` (a date from recentAndUpcomingOccurrences) — earlier payments keep their date, stored payments from then on move rather than duplicate. See lib/schedule.ts applyTemplateScheduleChange. */
+  changeRecurringTemplateSchedule: (id: string, next: TemplateSchedule, effectiveFromDate: string) => void
   removeRecurringTemplate: (id: string) => void
 
   // People, pay cycle, salary, savings — the piece that was previously
@@ -645,6 +648,14 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
   const updateRecurringTemplate: LedgerContextValue['updateRecurringTemplate'] = (id, updates) => {
     setDataState((prev) => ({ ...prev, recurringTemplates: prev.recurringTemplates.map((t) => (t.id === id ? { ...t, ...updates } : t)) }))
   }
+  const changeRecurringTemplateSchedule: LedgerContextValue['changeRecurringTemplateSchedule'] = (id, next, effectiveFromDate) => {
+    setDataState((prev) => {
+      const template = prev.recurringTemplates.find((t) => t.id === id)
+      if (!template) return prev
+      const { patch, transactions } = applyTemplateScheduleChange(template, prev.transactions, next, effectiveFromDate, todayIso())
+      return { ...prev, transactions, recurringTemplates: prev.recurringTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)) }
+    })
+  }
   const removeRecurringTemplate: LedgerContextValue['removeRecurringTemplate'] = (id) => {
     setDataState((prev) => removeRecurringTemplateFromData(prev, id))
   }
@@ -1093,6 +1104,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     removeCreditCard,
     addRecurringTemplate,
     updateRecurringTemplate,
+    changeRecurringTemplateSchedule,
     removeRecurringTemplate,
     addPerson,
     updatePerson,

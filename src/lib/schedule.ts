@@ -13,6 +13,7 @@ import type { PayCycleConfig, RecurrenceFrequency, RecurringOccurrenceOverride, 
 import { upcomingPaydays } from './salaryLedger'
 import { nextCycleStartAfter } from './payCycle'
 import { categoryForTransfer } from './transferLedger'
+import { formatFullDate } from './format'
 
 function daysInMonth(year: number, monthIndex0: number): number {
   return new Date(year, monthIndex0 + 1, 0).getDate()
@@ -559,6 +560,21 @@ export interface TemplateSchedule {
   frequency: RecurrenceFrequency
   intervalWeeks?: number
   anchorDate: string
+}
+
+/** "Monthly from 16 September 2026" — for the schedule row of a change confirmation. */
+export function describeSchedule(schedule: TemplateSchedule): string {
+  const labels: Record<RecurrenceFrequency, string> = { weekly: 'Weekly', every_n_weeks: 'Every N weeks', monthly: 'Monthly', quarterly: 'Quarterly', annual: 'Annual' }
+  const frequency = schedule.frequency === 'every_n_weeks' ? `Every ${schedule.intervalWeeks ?? 1} weeks` : labels[schedule.frequency]
+  return `${frequency} from ${formatFullDate(schedule.anchorDate)}`
+}
+
+/** Whether two schedules differ in anything that moves a slot. */
+export function scheduleDiffers(a: TemplateSchedule, b: TemplateSchedule): { date: boolean; frequency: boolean } {
+  return {
+    date: a.anchorDate !== b.anchorDate,
+    frequency: a.frequency !== b.frequency || (b.frequency === 'every_n_weeks' && (a.intervalWeeks ?? 1) !== (b.intervalWeeks ?? 1)),
+  }
 }
 
 /** Raw anchor-walked slots (overrides ignored) on/after `fromIso`, up to `untilIso` or `count`. */
