@@ -589,7 +589,12 @@ export function recurringOverpaymentRealDates(loan: Loan, schedule: LoanSchedule
   const r = loan.recurringOverpayment
   if (!r) return map
 
-  let cursor = parseLocalDate(r.startDate)
+  // The k-th overpayment date is counted from startDate, not stepped from
+  // the previous one: stepping stuck a 31st on the 28th after February
+  // (2026-09-16). date-fns addMonths clamps to the month's last day.
+  const overpaymentStart = parseLocalDate(r.startDate)
+  let monthsFromStart = 0
+  let cursor = overpaymentStart
   let previousPeriodDate = parseLocalDate(loan.advanceDate ?? loan.startDate)
   let iterations = 0
 
@@ -615,7 +620,7 @@ export function recurringOverpaymentRealDates(loan: Loan, schedule: LoanSchedule
     // inside this period's window — normally the very first step,
     // since both cadences are monthly.
     while (toIso(cursor) <= toIso(previousPeriodDate) && iterations < MAX_SCHEDULE_ENTRIES) {
-      cursor = addMonths(cursor, 1)
+      cursor = addMonths(overpaymentStart, ++monthsFromStart)
       iterations++
     }
     map.set(entry.date, toIso(cursor))
