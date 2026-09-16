@@ -65,6 +65,29 @@ function makeYScale(values: number[], height: number, padTop: number, padBottom:
   return (v: number) => padTop + (1 - (v - min) / span) * (height - padTop - padBottom)
 }
 
+/**
+ * Client x → viewBox x, via the SVG's own screen transform.
+ *
+ * BUGFIX (2026-09-16, PROMPT-04 Bug A — measured, not assumed): both charts
+ * are `width="100%"` with a fixed viewBox and no preserveAspectRatio, so the
+ * default `xMidYMid meet` scales the drawing UNIFORMLY and centres it. In the
+ * 350px-wide Trends modal on a 390px phone the pill chart's 320×160 viewBox
+ * draws at scale 1.0 with 15px of dead margin each side, and the line chart's
+ * 364-wide viewBox draws at 0.962. The old hit-tests scaled by
+ * `(clientX - rect.left) / rect.width * WIDTH`, i.e. assumed the drawing filled
+ * the element edge to edge (and, for the line chart, that the viewBox was 320
+ * wide rather than 320 + padRight) — so the pill chart highlighted the column
+ * to the right at the left edge and to the left at the right edge, and the line
+ * chart's crosshair trailed the finger by up to 38px. getScreenCTM() is the
+ * transform the browser actually rendered with, letterboxing included, so this
+ * is correct by construction at any element size or aspect ratio.
+ */
+function clientToViewBoxX(svg: SVGSVGElement, clientX: number): number | null {
+  const ctm = svg.getScreenCTM()
+  if (!ctm || ctm.a === 0) return null
+  return (clientX - ctm.e) / ctm.a
+}
+
 function linePath(points: { x: number; y: number }[]): string {
   if (points.length === 0) return ''
   return points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
@@ -135,8 +158,8 @@ export function BalanceSpendChart({ series, view, color, interactive = false, he
   function hitTest(clientX: number) {
     const svg = svgRef.current
     if (!svg) return
-    const rect = svg.getBoundingClientRect()
-    const relX = ((clientX - rect.left) / rect.width) * WIDTH
+    const relX = clientToViewBoxX(svg, clientX)
+    if (relX === null) return
     let closest = 0
     let closestDist = Infinity
     for (let i = 0; i < days.length; i++) {
@@ -266,8 +289,13 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
   const padTop = 4
   const padBottom = interactive ? 18 : 2
   const trackHeight = height - padTop - padBottom
-  const barGap = 3
-  const barWidth = points.length > 0 ? Math.max(2, WIDTH / points.length - barGap) : 4
+  // Stride first, bar width derived from it, so n columns always span exactly WIDTH.
+  // Previously barWidth was clamped to >= 2 with a fixed 3px gap, so past 64 columns
+  // the stride exceeded WIDTH / n and the later columns rendered outside the viewBox —
+  // invisible and unreachable. Not reachable at today's granularities; latent.
+  const stride = points.length > 0 ? WIDTH / points.length : WIDTH
+  const barGap = Math.min(3, stride / 3)
+  const barWidth = stride - barGap
 
   // The background "track" behind every column is a fixed height — the
   // reference scale for the whole chart — set by the single largest amount
@@ -304,9 +332,9 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
   function hitTest(clientX: number) {
     const svg = svgRef.current
     if (!svg || points.length === 0) return
-    const rect = svg.getBoundingClientRect()
-    const relX = ((clientX - rect.left) / rect.width) * WIDTH
-    const idx = Math.min(points.length - 1, Math.max(0, Math.floor(relX / (barWidth + barGap))))
+    const relX = clientToViewBoxX(svg, clientX)
+    if (relX === null) return
+    const idx = Math.min(points.length - 1, Math.max(0, Math.floor(relX / stride)))
     setActiveIndex(idx)
     onActivePointChange?.(points[idx])
   }
@@ -344,7 +372,7 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
     >
       {points.map((p, i) => {
         const h = Math.max(2, fillHeight(p.netChange))
-        const x = i * (barWidth + barGap)
+        const x = i * stride
         const y = height - padBottom - h
         const isActive = activeIndex === i
         return (
