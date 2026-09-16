@@ -104,3 +104,64 @@ describe('SavingsPotForm repro — 10000 becoming 9990 on save', () => {
     expect(fields.recurringDepositDayOfMonth).toBe(14)
   })
 })
+
+// PROMPT-04 Bug C (2026-09-16): the "Credited" dropdown set state that
+// defaultMethodOfType never read, so Quarterly/Annual silently saved as
+// Monthly. These drive the real form, so they prove the choice reaches
+// onSave — not just that a helper returns the right shape.
+describe('SavingsPotForm — interest crediting frequency', () => {
+  const people = [{ id: 'p1', name: 'Beverley', color: '#fff', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }]
+
+  for (const frequency of ['monthly', 'quarterly', 'annual'] as const) {
+    it(`saves a new pot credited ${frequency} as exactly '${frequency}', and the explanation says so`, async () => {
+      const user = userEvent.setup()
+      const onSave = vi.fn()
+      render(<SavingsPotForm people={people} defaultPersonId="p1" onCancel={() => {}} onSave={onSave} />)
+      await user.click(screen.getByText(/New pot/))
+      await user.type(screen.getByPlaceholderText('e.g. Rainy day fund'), 'house deposit')
+      await user.selectOptions(screen.getByLabelText('Credited'), frequency)
+
+      await user.click(screen.getByText('Save'))
+      const label = { monthly: 'monthly', quarterly: 'quarterly', annual: 'annually' }[frequency]
+      expect(screen.getByText(new RegExp(`paid in ${label}`))).toBeTruthy()
+      await user.click(screen.getByText('Looks good, save'))
+      await clickFinalSave(user)
+
+      const [, fields] = onSave.mock.calls[0]
+      expect(fields.interestMethod).toEqual({ type: 'aer_credited', aer: 4.5, creditingFrequency: frequency })
+    })
+  }
+
+  it('reopening a quarterly pot shows Quarterly, and editing another field keeps it quarterly', async () => {
+    const user = userEvent.setup()
+    const onSave = vi.fn()
+    const initial = { name: 'ISA', openingBalance: 500, openingDate: '2026-01-01', interestMethod: { type: 'aer_credited' as const, aer: 3, creditingFrequency: 'quarterly' as const } }
+    render(<SavingsPotForm people={people} defaultPersonId="p1" initial={initial} onCancel={() => {}} onSave={onSave} />)
+    expect((screen.getByLabelText('Credited') as HTMLSelectElement).value).toBe('quarterly')
+
+    await user.clear(screen.getByLabelText('AER (%)'))
+    await user.type(screen.getByLabelText('AER (%)'), '3.5')
+    await user.click(screen.getByText('Save'))
+    await user.click(screen.getByText('Looks good, save'))
+    await clickFinalSave(user)
+
+    const [, fields] = onSave.mock.calls[0]
+    expect(fields.interestMethod).toEqual({ type: 'aer_credited', aer: 3.5, creditingFrequency: 'quarterly' })
+  })
+
+  it('daily accrual carries no crediting frequency', async () => {
+    const user = userEvent.setup()
+    const onSave = vi.fn()
+    render(<SavingsPotForm people={people} defaultPersonId="p1" onCancel={() => {}} onSave={onSave} />)
+    await user.click(screen.getByText(/New pot/))
+    await user.type(screen.getByPlaceholderText('e.g. Rainy day fund'), 'house deposit')
+    await user.selectOptions(screen.getByLabelText('Credited'), 'annual')
+    await user.selectOptions(screen.getByLabelText('Interest method'), 'daily_accrual_monthly_credited')
+    await user.click(screen.getByText('Save'))
+    await user.click(screen.getByText('Looks good, save'))
+    await clickFinalSave(user)
+
+    const [, fields] = onSave.mock.calls[0]
+    expect(fields.interestMethod).toEqual({ type: 'daily_accrual_monthly_credited', aer: 4.5 })
+  })
+})

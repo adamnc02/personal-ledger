@@ -465,8 +465,14 @@ const CREDITING_FREQUENCY_LABELS: Record<'monthly' | 'quarterly' | 'annual', str
   annual: 'Annually',
 }
 
-function defaultMethodOfType(type: SavingsInterestMethod['type'], aer: number): SavingsInterestMethod {
-  return type === 'aer_credited' ? { type: 'aer_credited', aer, creditingFrequency: 'monthly' } : { type: 'daily_accrual_monthly_credited', aer }
+// BUGFIX (2026-09-16, PROMPT-04 Bug C): creditingFrequency used to be
+// hardcoded to 'monthly' here, so the form's "Credited" dropdown set state
+// that was never written — Quarterly/Annual silently saved as Monthly, and
+// the explanation modal read that wrong value straight back. Existing pots
+// are deliberately NOT rewritten: a saved 'monthly' can't be told apart
+// from a genuine choice.
+function defaultMethodOfType(type: SavingsInterestMethod['type'], aer: number, creditingFrequency: 'monthly' | 'quarterly' | 'annual' = 'monthly'): SavingsInterestMethod {
+  return type === 'aer_credited' ? { type: 'aer_credited', aer, creditingFrequency } : { type: 'daily_accrual_monthly_credited', aer }
 }
 
 /**
@@ -685,7 +691,7 @@ export function SavingsPotForm({
   const [confirming, setConfirming] = useState(false)
   const [pickingInterestDestination, setPickingInterestDestination] = useState(false)
 
-  const method = defaultMethodOfType(methodType, aer)
+  const method = defaultMethodOfType(methodType, aer, creditingFrequency)
   // UAT follow-up (2026-09-04, Adam-reported): Save used to gate on
   // `!name.trim()` alone — always false (so always enabled) once a
   // savings pot already has a name, regardless of whether anything had
