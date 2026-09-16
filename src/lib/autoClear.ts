@@ -132,8 +132,34 @@ function reconcilePensionTransactions(data: AppDataV2): AppDataV2 {
  * the owning template itself is ever editable, so there's no hand-entered
  * figure here to trample. 2026-09-14: reconciles `date` the same way, for
  * the same reason — see this function's own comment on the date fix.
+ *
+ * 2026-09-16 (Adam-reported in UAT, all three surfaces): reconciles
+ * `status` too. Step 1 below only ever moves a row pending -> cleared
+ * when its date arrives; nothing did the reverse, so moving an
+ * already-cleared occurrence's date into the FUTURE left it counting as
+ * cleared money that had supposedly already left the account, on a date
+ * that has not happened yet. Repro: new bill due yesterday (clears), move
+ * it to today (fine), move it to tomorrow (still cleared, still in the
+ * cleared balance).
+ *
+ * Safe because a `recurring_template` row's cleared status is never
+ * hand-set: there is no "mark as cleared" path anywhere in the app —
+ * autoClearDuePayments is the only thing that clears anything — so for
+ * these rows `cleared` can only ever have meant "its date was on or
+ * before today". A cleared row dated in the future is therefore always
+ * wrong, whatever moved it there, which is why this corrects the state
+ * rather than only the transition: a row already stranded by this bug
+ * self-heals on the next load, with no migration. The pending -> cleared
+ * direction deliberately stays with Step 1, which runs after every
+ * reconciler and already handles a date moved back into the past.
+ *
+ * No side effect needs unwinding: applyClearSideEffects only acts on
+ * savings_contribution/savings_entry rows, which are never sourced from a
+ * RecurringTemplate. Savings-pot and credit-card balances are derived
+ * from the transactions themselves, so flipping the status back to
+ * pending is the whole of the correction there too.
  */
-function reconcileRecurringTemplateTransactions(data: AppDataV2): AppDataV2 {
+function reconcileRecurringTemplateTransactions(data: AppDataV2, asOfIso: string): AppDataV2 {
   let changed = false
   const transactions = data.transactions.map((t) => {
     if (t.sourceType !== 'recurring_template' || !t.sourceId) return t
@@ -187,10 +213,17 @@ function reconcileRecurringTemplateTransactions(data: AppDataV2): AppDataV2 {
     // one pass, same "materialized rows are never hand-edited, so this is
     // always safe" reasoning the amount fix already relied on.
     const date = override?.date ?? slot
+    // See this function's comment: a generated row dated in the future
+    // can never legitimately be cleared. Checked against the resolved
+    // `date`, not `t.date`, so the move and the un-clear land in the same
+    // pass — and checked as STATE rather than as a transition, so a row
+    // already stranded by this bug is corrected even on a pass where its
+    // date doesn't change.
+    const status: Transaction['status'] = t.status === 'cleared' && date > asOfIso ? 'pending' : t.status
     if (amount <= 0) return stamp(t, slot)
-    if (amount === t.amount && date === t.date) return stamp(t, slot)
+    if (amount === t.amount && date === t.date && status === t.status) return stamp(t, slot)
     changed = true
-    return { ...stamp(t, slot), amount, date }
+    return { ...stamp(t, slot), amount, date, status }
   })
   return changed ? { ...data, transactions } : data
 
@@ -325,7 +358,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
   // that's drifted from its computed value should be corrected whether
   // or not there's also something new coming due this pass.
   const reconciled = reconcilePotTransactions(
-    reconcileSavingsPotTransactions(reconcileLoanTransactions(reconcileRecurringTemplateTransactions(reconcilePensionTransactions(reconcileSalaryTransactions(data))))),
+    reconcileSavingsPotTransactions(reconcileLoanTransactions(reconcileRecurringTemplateTransactions(reconcilePensionTransactions(reconcileSalaryTransactions(data)), asOfIso))),
   )
   if (reconciled !== data) {
     result = reconciled

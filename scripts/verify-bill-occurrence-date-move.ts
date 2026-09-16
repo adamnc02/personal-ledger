@@ -152,6 +152,69 @@ for (const tpl of [bill, txn, xfer]) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// B3 — moving a CLEARED occurrence into the future must un-clear it.
+//
+// Adam, UAT 2026-09-16, on all three surfaces: "I created a new bill with
+// a due date of yesterday, everything fine, shows up in cleared and
+// affects current card balance. I moved the first payment to today, again
+// all works correctly. I then moved the same payment to tomorrow, and it
+// was still being counted as a cleared payment, despite the date being in
+// the future now."
+//
+// Step 1 of autoClearDuePayments only ever moved a row pending -> cleared
+// once its date arrived; nothing did the reverse. The money had
+// supposedly already left the account on a date that hasn't happened.
+// ─────────────────────────────────────────────────────────────────────
+const yesterdayTemplates = [bill, txn, xfer].map((t) => ({ ...t, anchorDate: '2026-07-09' }))
+for (const tpl of yesterdayTemplates) {
+  const kind = tpl.kind!
+  const row = (d: AppDataV2) => d.transactions.find((t) => t.sourceId === tpl.id)
+  const openingBalance = payCycle.openingBalance
+
+  // asOf is 2026-07-10, so the anchor (9 Jul) is "yesterday".
+  const s0 = autoClearDuePayments(dataWith([tpl]), asOf)
+  check(`[${kind}] B3 — due yesterday: exactly one cleared row`, [row(s0)?.date, row(s0)?.status], ['2026-07-09', 'cleared'])
+  check(`[${kind}] B3 — ...and it has left the cleared balance`, computeProjection(s0, 'me', payCycle, 'three_cycles', asOf).clearedBalance < openingBalance, true)
+
+  const toToday = { ...tpl, ...applyTemplateSingleOccurrenceDateChange(tpl, '2026-07-10', '2026-07-09') }
+  const s1 = autoClearDuePayments({ ...s0, recurringTemplates: [toToday] }, asOf)
+  check(`[${kind}] B3 — moved to TODAY: still cleared (today counts as due)`, [row(s1)?.date, row(s1)?.status], ['2026-07-10', 'cleared'])
+
+  // THE BUG.
+  const toTomorrow = { ...toToday, ...applyTemplateSingleOccurrenceDateChange(toToday, '2026-07-11', '2026-07-09') }
+  const s2 = autoClearDuePayments({ ...s1, recurringTemplates: [toTomorrow] }, asOf)
+  check(`[${kind}] B3 — moved to TOMORROW: reverts to pending`, [row(s2)?.date, row(s2)?.status], ['2026-07-11', 'pending'])
+  check(`[${kind}] B3 — ...and the cleared balance is whole again`, computeProjection(s2, 'me', payCycle, 'three_cycles', asOf).clearedBalance, openingBalance)
+  check(`[${kind}] B3 — ...but it is still coming, so the projection still includes it`, computeProjection(s2, 'me', payCycle, 'three_cycles', asOf).projectedBalance < openingBalance, true)
+  check(`[${kind}] B3 — no duplicate was created by the un-clear`, rowsFor(s2, tpl.id).length, 1)
+
+  // Back into the past — Step 1 must re-clear it.
+  const backToPast = { ...toTomorrow, ...applyTemplateSingleOccurrenceDateChange(toTomorrow, '2026-07-09', '2026-07-09') }
+  const s3 = autoClearDuePayments({ ...s2, recurringTemplates: [backToPast] }, asOf)
+  check(`[${kind}] B3 — moved back into the past: clears again`, [row(s3)?.date, row(s3)?.status], ['2026-07-09', 'cleared'])
+  check(`[${kind}] B3 — round trip returns the exact original balance`, computeProjection(s3, 'me', payCycle, 'three_cycles', asOf).clearedBalance, computeProjection(s0, 'me', payCycle, 'three_cycles', asOf).clearedBalance)
+  check(`[${kind}] B3 — idempotent`, autoClearDuePayments(s3, asOf) === s3, true)
+
+  // SELF-HEAL: a row already stranded by this bug (cleared, future-dated,
+  // with the override already pointing at that same date, so nothing
+  // changes this pass) must still be corrected. This is the shape of
+  // Adam's own test data at the moment he reported it — without this, the
+  // fix would only help people who move the date yet again.
+  const stranded: AppDataV2 = {
+    ...s2,
+    transactions: s2.transactions.map((t) => (t.sourceId === tpl.id ? { ...t, status: 'cleared' as const } : t)),
+    recurringTemplates: [toTomorrow],
+  }
+  const healed = autoClearDuePayments(stranded, asOf)
+  check(`[${kind}] B3 — an ALREADY-stranded row self-heals with no further edit`, [row(healed)?.date, row(healed)?.status], ['2026-07-11', 'pending'])
+}
+
+// A future-dated occurrence that was never cleared is left alone, and a
+// past-dated cleared one is not disturbed — guards against over-reach.
+const untouched = autoClearDuePayments(dataWith([bill]), asOf)
+check('a normal past cleared row is not un-cleared', untouched.transactions.find((t) => t.date === '2026-07-01')?.status, 'cleared')
+
+// ─────────────────────────────────────────────────────────────────────
 // B1 — scheduledTemplateDates ("Manage upcoming payments") display.
 // ─────────────────────────────────────────────────────────────────────
 const movedBill = move(bill, '2026-07-05', '2026-07-01')
