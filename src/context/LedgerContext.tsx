@@ -13,7 +13,6 @@ import type {
   RecurringTemplate,
   SalaryOverride,
   SalarySnapshot,
-  SalarySort,
   SalarySortTarget,
   SavingsPot,
   StatementCalibrationLine,
@@ -30,92 +29,37 @@ import { createCategory, removeCategorySafely } from '../lib/categories'
 import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/creditCards'
 import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, reassignLoanRecurringOverpaymentTransactions, type CalibrationResult } from '../lib/ledgerLoans'
 import { autoClearDuePayments } from '../lib/autoClear'
-import { reconcilePersonReferences } from '../lib/household'
+import { applyTemplateScheduleChange, type TemplateSchedule } from '../lib/schedule'
+import { applyPensionScheduleChange, type PensionSchedule } from '../lib/pensionLedger'
+import { applyLoanStartDateChange, applyRecurringOverpaymentStartDateChange } from '../lib/ledgerLoans'
+import { applyCardPaymentDayChange } from '../lib/creditCards'
+import { applyPaydayChange } from '../lib/salaryLedger'
+import {
+  dropSalarySortTarget,
+  removeCreditCardFromData,
+  removeLoanFromData,
+  removePensionFromData,
+  removePersonFromData,
+  removePotFromData,
+  removeRecurringTemplateFromData,
+  removeSavingsPotFromData,
+  removeTransactionFromData,
+  resolveBlockersAndDelete,
+  type BlockerAction,
+  type DeleteSubject,
+} from '../lib/deleteReassign'
 import { convertClearedSalaryToStandaloneIncome, nextRecordedSeq } from '../lib/salaryLedger'
 
 import { toLocalIsoDate as toIso } from '../lib/date'
 const todayIso = () => toIso(new Date())
 
-// ── Pending-transaction sweep on delete (UI consistency review §3/§10
-// Phase 1, confirmed 2026-09 session: "all pending transactions are
-// deleted, with only cleared items retained as historic fact, and
-// immutable" — refined by UAT Batch 4, see isSweepableOnGeneratorDelete
-// below: a cleared item dated TODAY is the one exception) ─────────────
-// Deleting a Loan/CreditCard/RecurringTemplate/Pension/SavingsPot never
-// touched `transactions` at all before this — a CLEARED row correctly
-// stayed untouched (it already happened, deleting its generator doesn't
-// un-happen it), but a PENDING one silently stuck around too: still
-// shown as due, permanently orphaned from a generator that no longer
-// exists. This removes the pending ones, plus any cleared-today ones.
-//
-// Loans need their own matcher rather than reusing the generic one below
-// — a loan's overpayments carry sourceId: <overpayment's own id>, not the
-// loan's id, so a transaction can belong to a loan without sourceId
-// equalling loan.id at all. Every OTHER loan-generated sourceType
-// (loan/loan_recurring_overpayment/loan_settlement) does use loan.id
-// directly — see ledgerLoans.ts's own transaction-building code for the
-// convention this mirrors.
-// UAT Batch 4 (2026-09-04, Adam-specified): a CLEARED transaction is
-// normally immutable historic fact and survives every sweep below — but
-// one dated TODAY is an exception, since "cleared" for a same-day item
-// generally just means auto-clear already ran for it moments ago, not
-// that it's settled history worth preserving. This is also the root fix
-// for the stray-pot-balance bug (a recurring transfer's already-cleared
-// TODAY occurrence surviving deletion of its generator). There's no
-// creation-timestamp field anywhere on Transaction, so the transaction's
-// own `date` is the only "today" signal available.
-function isSweepableOnGeneratorDelete(t: Transaction, asOfIso: string): boolean {
-  return t.status === 'pending' || t.date === asOfIso
-}
+// The pending-transaction sweep helpers live in lib/pendingSweep.ts so
+// lib/deleteReassign.ts can use them without importing this component.
+// Re-exported here because verify scripts import them from this path.
+export { sweepPendingForLoan, sweepPendingForCreditCard, sweepPendingForSavingsPot, sweepPendingForPot, sweepPendingForSource } from '../lib/pendingSweep'
 
-export function sweepPendingForLoan(transactions: Transaction[], loan: Loan, asOfIso: string = todayIso()): Transaction[] {
-  const overpaymentIds = new Set(loan.overpayments.map((o) => o.id))
-  return transactions.filter((t) => {
-    if (!isSweepableOnGeneratorDelete(t, asOfIso)) return true
-    if (t.sourceType === 'loan' || t.sourceType === 'loan_recurring_overpayment' || t.sourceType === 'loan_settlement') return t.sourceId !== loan.id
-    if (t.sourceType === 'loan_overpayment') return !overpaymentIds.has(t.sourceId ?? '')
-    return true
-  })
-}
-
-// CreditCard and SavingsPot both carry a direct FK field on Transaction
-// (creditCardId/savingsPotId) covering every way a transaction can be
-// tied to them — generated minimum payments (no sourceType at all),
-// logged lump payments/deposits (sourceType set), and spend/withdrawals
-// alike — so one plain filter on that field is correct and complete,
-// unlike loans above.
-export function sweepPendingForCreditCard(transactions: Transaction[], cardId: string, asOfIso: string = todayIso()): Transaction[] {
-  return transactions.filter((t) => !isSweepableOnGeneratorDelete(t, asOfIso) || t.creditCardId !== cardId)
-}
-export function sweepPendingForSavingsPot(transactions: Transaction[], potId: string, asOfIso: string = todayIso()): Transaction[] {
-  return transactions.filter((t) => !isSweepableOnGeneratorDelete(t, asOfIso) || t.savingsPotId !== potId)
-}
-// Pots backlog item (2026-09-03) — same "one direct FK field covers
-// everything" reasoning as sweepPendingForSavingsPot/sweepPendingForCreditCard
-// above: potId is stamped on pot_deposit/pot_withdrawal AND on any
-// pot-funded bill_payment/loan_payment row (see RecurringTemplate.potId's
-// comment), so one plain filter is correct and complete here too.
-export function sweepPendingForPot(transactions: Transaction[], potId: string, asOfIso: string = todayIso()): Transaction[] {
-  return transactions.filter((t) => !isSweepableOnGeneratorDelete(t, asOfIso) || t.potId !== potId)
-}
-// RecurringTemplate and Pension only ever get linked via sourceType/
-// sourceId (no direct FK field on Transaction the way cards/pots have).
-export function sweepPendingForSource(transactions: Transaction[], sourceType: NonNullable<Transaction['sourceType']>, sourceId: string, asOfIso: string = todayIso()): Transaction[] {
-  return transactions.filter((t) => !isSweepableOnGeneratorDelete(t, asOfIso) || t.sourceType !== sourceType || t.sourceId !== sourceId)
-}
-
-// ── Salary Sort target removal (2026-09 session) — shared by
-// updateTransaction (date-edit detach), removeTransaction (delete), and
-// LedgerContext's own clearSalarySortTarget/saveSalarySort below, so
-// "drop one target, then remove the whole SalarySort if that empties it"
-// is written exactly once. Pure — takes/returns the salarySorts array,
-// no setDataState involved, so every caller composes it into their own
-// single state update rather than this doing a second render pass.
-export function dropSalarySortTarget(salarySorts: SalarySort[], sortId: string, transactionId: string): SalarySort[] {
-  return salarySorts
-    .map((s) => (s.id === sortId ? { ...s, targets: s.targets.filter((t) => t.transactionId !== transactionId) } : s))
-    .filter((s) => s.targets.length > 0)
-}
+// dropSalarySortTarget moved to lib/deleteReassign.ts; re-exported for verify-salary-sort.ts.
+export { dropSalarySortTarget } from '../lib/deleteReassign'
 
 interface AdHocInput {
   type: 'expense' | 'income'
@@ -195,6 +139,17 @@ interface LedgerContextValue {
 
   addRecurringTemplate: (template: Omit<RecurringTemplate, 'id' | 'active'>) => string
   updateRecurringTemplate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
+  /** Changes a recurring template's due date and/or frequency for every payment from `effectiveFromDate` (a date from recentAndUpcomingOccurrences) — earlier payments keep their date, stored payments from then on move rather than duplicate. See lib/schedule.ts applyTemplateScheduleChange. */
+  changeRecurringTemplateSchedule: (id: string, next: TemplateSchedule, effectiveFromDate: string) => void
+  // 2026-09-16 — the same "from which payment" schedule change for the other
+  // generators (lib/scheduleChange.ts). `pickedDate` is a date from that
+  // entity's own recentAndUpcoming… picker. Each re-dates stored payments
+  // from there rather than duplicating them.
+  changePensionSchedule: (id: string, next: PensionSchedule, pickedDate: string) => void
+  changeLoanStartDate: (id: string, newStartDate: string, pickedDate: string) => void
+  changeRecurringOverpaymentStartDate: (loanId: string, newStartDate: string, pickedDate: string) => void
+  changeCardPaymentDay: (id: string, newDay: number, pickedDate: string) => void
+  changePayday: (personId: string, next: Pick<PayCycleConfig, 'paydayDayOfMonth' | 'paydayAdjustForNonWorkingDay'>, pickedDate: string) => void
   removeRecurringTemplate: (id: string) => void
 
   // People, pay cycle, salary, savings — the piece that was previously
@@ -333,6 +288,13 @@ interface LedgerContextValue {
   addPot: (personId: string, pot: Omit<Pot, 'id' | 'personId'>) => string
   updatePot: (id: string, updates: Partial<Omit<Pot, 'id' | 'personId'>>) => void
   removePot: (id: string) => void
+
+  // ── Delete-reassign flows (PROMPT-05, 2026-09-16) ──
+  // Deleting a Person/Pot/Savings Pot is blocked while anything still
+  // points at it (lib/deleteReassign.ts findDeleteBlockers). The sheet stages
+  // a Move/Delete decision per blocker; this applies them all and then the
+  // delete, or nothing if any blocker is left unresolved. See DeleteGuardModal.
+  deleteWithResolutions: (subject: DeleteSubject, decisions: [key: string, action: BlockerAction][]) => void
   // Hand-logged from the Transactions page's Pots button — same two-sided
   // bookkeeping shape as logSavingsDeposit/logSavingsWithdrawal above.
   logPotDeposit: (potId: string, amount: number, date: string, note?: string) => void
@@ -481,17 +443,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
   }
 
   const removeTransaction: LedgerContextValue['removeTransaction'] = (id) => {
-    setDataState((prev) => {
-      const existing = prev.transactions.find((t) => t.id === id)
-      const transactions = prev.transactions.filter((t) => t.id !== id)
-      if (!existing || existing.sourceType !== 'salary_sort' || !existing.sourceId) {
-        return { ...prev, transactions }
-      }
-      // Drops just this one target, leaving the rest of the sort intact
-      // — matches saveSalarySort/clearSalarySortTarget's own "an empty
-      // sort isn't a sort" rule if this was the last target.
-      return { ...prev, transactions, salarySorts: dropSalarySortTarget(prev.salarySorts, existing.sourceId, id) }
-    })
+    setDataState((prev) => removeTransactionFromData(prev, id))
   }
 
   const logCreditCardSpend: LedgerContextValue['logCreditCardSpend'] = (cardId, amount, date, note) => {
@@ -600,14 +552,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     }))
   }
   const removeLoan: LedgerContextValue['removeLoan'] = (id) => {
-    setDataState((prev) => {
-      const loan = prev.loans.find((l) => l.id === id)
-      return {
-        ...prev,
-        loans: prev.loans.filter((l) => l.id !== id),
-        transactions: loan ? sweepPendingForLoan(prev.transactions, loan) : prev.transactions,
-      }
-    })
+    setDataState((prev) => removeLoanFromData(prev, id))
   }
   const logLoanOverpayment: LedgerContextValue['logLoanOverpayment'] = (loanId, amount, date, note, recastMode) => {
     setDataState((prev) => {
@@ -702,11 +647,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     })
   }
   const removeCreditCard: LedgerContextValue['removeCreditCard'] = (id) => {
-    setDataState((prev) => ({
-      ...prev,
-      creditCards: prev.creditCards.filter((c) => c.id !== id),
-      transactions: sweepPendingForCreditCard(prev.transactions, id),
-    }))
+    setDataState((prev) => removeCreditCardFromData(prev, id))
   }
 
   const addRecurringTemplate: LedgerContextValue['addRecurringTemplate'] = (template) => {
@@ -715,14 +656,77 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     return id
   }
   const updateRecurringTemplate: LedgerContextValue['updateRecurringTemplate'] = (id, updates) => {
-    setDataState((prev) => ({ ...prev, recurringTemplates: prev.recurringTemplates.map((t) => (t.id === id ? { ...t, ...updates } : t)) }))
-  }
-  const removeRecurringTemplate: LedgerContextValue['removeRecurringTemplate'] = (id) => {
     setDataState((prev) => ({
       ...prev,
-      recurringTemplates: prev.recurringTemplates.filter((t) => t.id !== id),
-      transactions: sweepPendingForSource(prev.transactions, 'recurring_template', id),
+      recurringTemplates: prev.recurringTemplates.map((t) => {
+        if (t.id !== id) return t
+        // Editing the date directly makes it the intended day again — see
+        // RecurringTemplate.anchorDayOfMonth.
+        const anchorEdited = updates.anchorDate !== undefined && updates.anchorDate !== t.anchorDate && updates.anchorDayOfMonth === t.anchorDayOfMonth
+        return anchorEdited ? { ...t, ...updates, anchorDayOfMonth: undefined } : { ...t, ...updates }
+      }),
     }))
+  }
+  const changeRecurringTemplateSchedule: LedgerContextValue['changeRecurringTemplateSchedule'] = (id, next, effectiveFromDate) => {
+    setDataState((prev) => {
+      const template = prev.recurringTemplates.find((t) => t.id === id)
+      if (!template) return prev
+      const payCycle = prev.payCycles.find((pc) => pc.personId === template.ownerId) ?? prev.payCycles.find((pc) => pc.personId === prev.primaryPersonId)
+      const { patch, transactions } = applyTemplateScheduleChange(template, prev.transactions, next, effectiveFromDate, todayIso(), payCycle)
+      return { ...prev, transactions, recurringTemplates: prev.recurringTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)) }
+    })
+  }
+  const changePensionSchedule: LedgerContextValue['changePensionSchedule'] = (id, next, pickedDate) => {
+    setDataState((prev) => {
+      const pension = prev.pensions.find((p) => p.id === id)
+      const result = pension && applyPensionScheduleChange(pension, prev.transactions, next, pickedDate, todayIso())
+      if (!result) return prev
+      return { ...prev, transactions: result.transactions, pensions: prev.pensions.map((p) => (p.id === id ? { ...p, ...result.patch } : p)) }
+    })
+  }
+  const changeLoanStartDate: LedgerContextValue['changeLoanStartDate'] = (id, newStartDate, pickedDate) => {
+    setDataState((prev) => {
+      const loan = prev.loans.find((l) => l.id === id)
+      const result = loan && applyLoanStartDateChange(loan, prev.transactions, newStartDate, pickedDate, todayIso())
+      if (!result) return prev
+      return { ...prev, transactions: result.transactions, loans: prev.loans.map((l) => (l.id === id ? { ...l, ...result.patch } : l)) }
+    })
+  }
+  const changeRecurringOverpaymentStartDate: LedgerContextValue['changeRecurringOverpaymentStartDate'] = (loanId, newStartDate, pickedDate) => {
+    setDataState((prev) => {
+      const loan = prev.loans.find((l) => l.id === loanId)
+      const result = loan && applyRecurringOverpaymentStartDateChange(loan, prev.transactions, newStartDate, pickedDate, todayIso())
+      if (!result) return prev
+      return { ...prev, transactions: result.transactions, loans: prev.loans.map((l) => (l.id === loanId ? { ...l, ...result.patch } : l)) }
+    })
+  }
+  const changeCardPaymentDay: LedgerContextValue['changeCardPaymentDay'] = (id, newDay, pickedDate) => {
+    setDataState((prev) => {
+      const card = prev.creditCards.find((c) => c.id === id)
+      const result = card && applyCardPaymentDayChange(card, prev.transactions, newDay, pickedDate, todayIso())
+      if (!result) return prev
+      return { ...prev, transactions: result.transactions, creditCards: prev.creditCards.map((c) => (c.id === id ? { ...c, ...result.patch } : c)) }
+    })
+  }
+  const changePayday: LedgerContextValue['changePayday'] = (personId, next, pickedDate) => {
+    setDataState((prev) => {
+      const payCycle = prev.payCycles.find((pc) => pc.personId === personId)
+      const person = prev.people.find((p) => p.id === personId)
+      if (!payCycle || !person) return prev
+      // Salary sorts are made against the primary person's paydays only.
+      const result = applyPaydayChange(payCycle, person, prev.transactions, personId === prev.primaryPersonId ? prev.salarySorts : null, next, pickedDate, todayIso())
+      if (!result) return prev
+      return {
+        ...prev,
+        transactions: result.transactions,
+        payCycles: prev.payCycles.map((pc) => (pc.personId === personId ? result.payCycle : pc)),
+        people: prev.people.map((p) => (p.id === personId ? result.person : p)),
+        salarySorts: result.salarySorts ?? prev.salarySorts,
+      }
+    })
+  }
+  const removeRecurringTemplate: LedgerContextValue['removeRecurringTemplate'] = (id) => {
+    setDataState((prev) => removeRecurringTemplateFromData(prev, id))
   }
 
   const addPerson: LedgerContextValue['addPerson'] = ({ name, color }) => {
@@ -739,21 +743,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     setDataState((prev) => ({ ...prev, people: prev.people.map((p) => (p.id === id ? { ...p, ...updates } : p)) }))
   }
   const removePerson: LedgerContextValue['removePerson'] = (id) => {
-    setDataState((prev) => {
-      if (prev.people.length <= 1) return prev // always at least one person
-      const remaining = prev.people.filter((p) => p.id !== id)
-      // Removing a person can orphan bills/loans/cards that reference
-      // them (ownerId on personal items, payee on joint ones) and can
-      // make an existing 'joint' item stop being meaningful if fewer
-      // than 2 people are left — reconcilePersonReferences handles both,
-      // and is also run on every load/restore so data already saved
-      // before this existed self-heals too. See lib/household.ts.
-      return reconcilePersonReferences({
-        ...prev,
-        people: remaining,
-        payCycles: prev.payCycles.filter((pc) => pc.personId !== id),
-      })
-    })
+    setDataState((prev) => removePersonFromData(prev, id))
   }
   const setPrimaryPerson: LedgerContextValue['setPrimaryPerson'] = (id) => {
     setDataState((prev) => ({ ...prev, primaryPersonId: id }))
@@ -845,17 +835,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     setDataState((prev) => ({ ...prev, savingsPots: prev.savingsPots.map((p) => (p.id === id ? { ...p, ...updates } : p)) }))
   }
   const removeSavingsPot: LedgerContextValue['removeSavingsPot'] = (id) => {
-    setDataState((prev) => ({
-      ...prev,
-      savingsPots: prev.savingsPots.filter((p) => p.id !== id),
-      // A pot's own CLEARED transactions (deposits/withdrawals/interest
-      // already materialized) are historical fact and stay untouched —
-      // same reasoning removePension uses for a person's past
-      // pension_income transactions. PENDING ones are different: they
-      // haven't happened yet and never will now, so they're swept
-      // (2026-09 session — see sweepPendingForSavingsPot above).
-      transactions: sweepPendingForSavingsPot(prev.transactions, id),
-    }))
+    setDataState((prev) => removeSavingsPotFromData(prev, id))
   }
 
   // ── Transfer (2026-09-04 session) — see LedgerContextValue.logTransfer's
@@ -1033,21 +1013,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     setDataState((prev) => ({ ...prev, pensions: prev.pensions.map((p) => (p.id === id ? { ...p, ...updates } : p)) }))
   }
   const removePension: LedgerContextValue['removePension'] = (id) => {
-    setDataState((prev) => ({
-      ...prev,
-      pensions: prev.pensions.filter((p) => p.id !== id),
-      transactions: sweepPendingForSource(prev.transactions, 'pension', id),
-      // A person's followsIncomeSource pointing at a now-deleted pension
-      // would silently strand their cycle-following choice — fall back
-      // to 'salary' (the same default as never having set one), same
-      // reconciliation instinct as household.ts's reconcilePersonReferences
-      // for a dangling ownerId.
-      payCycles: prev.payCycles.map((pc) =>
-        pc.followsIncomeSource?.type === 'pension' && pc.followsIncomeSource.pensionId === id
-          ? { ...pc, followsIncomeSource: { type: 'salary' } }
-          : pc,
-      ),
-    }))
+    setDataState((prev) => removePensionFromData(prev, id))
   }
 
   const setJointAccountOpening: LedgerContextValue['setJointAccountOpening'] = (openingBalance, openingBalanceDate) => {
@@ -1078,56 +1044,10 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     setDataState((prev) => ({ ...prev, pots: prev.pots.map((p) => (p.id === id ? { ...p, ...updates } : p)) }))
   }
   const removePot: LedgerContextValue['removePot'] = (id) => {
-    setDataState((prev) => ({
-      ...prev,
-      pots: prev.pots.filter((p) => p.id !== id),
-      // A pot's own CLEARED transactions (deposits/withdrawals, and any
-      // pot-funded bill/loan payment that already happened) are
-      // historical fact and stay untouched — same reasoning
-      // removeSavingsPot uses. PENDING ones are swept — they haven't
-      // happened and never will now.
-      transactions: sweepPendingForPot(prev.transactions, id),
-      // Any bill/loan whose REGULAR payment pointed at this now-deleted
-      // pot falls back to 'personal' rather than being left with a
-      // dangling potId that nothing generates against — same
-      // reconciliation instinct as removePension's followsIncomeSource
-      // fallback below, and household.ts's reconcilePersonReferences
-      // backstop for the same case on data that predates this in-app
-      // path. Recorded into locationHistory like any other location
-      // change, so the Wallet page's audit trail shows WHY it moved.
-      recurringTemplates: prev.recurringTemplates.map((t) =>
-        t.location === 'pot' && t.potId === id
-          ? {
-              ...t,
-              location: 'personal',
-              potId: undefined,
-              locationEffectiveFrom: todayIso(),
-              locationHistory: [...(t.locationHistory ?? []), priorLocationEntry(t, t.anchorDate)],
-            }
-          : t,
-      ),
-      loans: prev.loans.map((l) => {
-        let next = l
-        if (l.location === 'pot' && l.potId === id) {
-          next = {
-            ...next,
-            location: 'personal',
-            potId: undefined,
-            locationEffectiveFrom: todayIso(),
-            locationHistory: [...(next.locationHistory ?? []), priorLocationEntry(next, next.startDate)],
-          }
-        }
-        // A recurring overpayment independently funded from this pot
-        // loses that explicit choice too — reverts to "follows the
-        // loan's own location" (the field's own absent-default), not
-        // forced to 'personal', since the loan itself might still be
-        // pot-funded via a DIFFERENT pot, or genuinely personal/joint.
-        if (next.recurringOverpayment?.location === 'pot' && next.recurringOverpayment.potId === id) {
-          next = { ...next, recurringOverpayment: { ...next.recurringOverpayment, location: undefined, potId: undefined } }
-        }
-        return next
-      }),
-    }))
+    setDataState((prev) => removePotFromData(prev, id))
+  }
+  const deleteWithResolutions: LedgerContextValue['deleteWithResolutions'] = (subject, decisions) => {
+    setDataState((prev) => resolveBlockersAndDelete(prev, subject, decisions))
   }
 
   // SUPERSEDED (2026-09-04 session) — thin wrapper over logTransfer, same
@@ -1250,6 +1170,12 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     removeCreditCard,
     addRecurringTemplate,
     updateRecurringTemplate,
+    changeRecurringTemplateSchedule,
+    changePensionSchedule,
+    changeLoanStartDate,
+    changeRecurringOverpaymentStartDate,
+    changeCardPaymentDay,
+    changePayday,
     removeRecurringTemplate,
     addPerson,
     updatePerson,
@@ -1286,6 +1212,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     addPot,
     updatePot,
     removePot,
+    deleteWithResolutions,
     logPotDeposit,
     logPotWithdrawal,
     assignRecurringTemplateLocation,

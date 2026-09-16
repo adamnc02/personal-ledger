@@ -56,8 +56,12 @@ function creditingPeriodsPerYear(frequency: 'monthly' | 'quarterly' | 'annual'):
   return frequency === 'monthly' ? 12 : frequency === 'quarterly' ? 4 : 1
 }
 
-function nextCreditingDate(current: Date, frequency: 'monthly' | 'quarterly' | 'annual'): Date {
-  return frequency === 'monthly' ? addMonths(current, 1) : frequency === 'quarterly' ? addQuarters(current, 1) : addYears(current, 1)
+// The k-th crediting date, always counted from the opening date rather than
+// stepped from the previous one. Stepping drifted: a pot opened on the 31st
+// credited 28 Feb and then the 28th forever (2026-09-16). date-fns clamps
+// to the month's last day, so the 31st is 28 Feb but 31 Mar again.
+function nthCreditingDate(opening: Date, frequency: 'monthly' | 'quarterly' | 'annual', k: number): Date {
+  return frequency === 'monthly' ? addMonths(opening, k) : frequency === 'quarterly' ? addQuarters(opening, k) : addYears(opening, k)
 }
 
 export interface CreditingDate {
@@ -69,14 +73,14 @@ export interface CreditingDate {
 /** Every crediting date for method 1 (aer_credited) between openingDate and rangeEnd, inclusive of rangeEnd. */
 export function walkCreditingDates(openingDate: string, creditingFrequency: 'monthly' | 'quarterly' | 'annual', rangeEnd: Date): CreditingDate[] {
   const results: CreditingDate[] = []
-  let periodStart = parseLocalDate(openingDate)
-  let cursor = nextCreditingDate(periodStart, creditingFrequency)
-  let iterations = 0
-  while (cursor <= rangeEnd && iterations < 2000) {
+  const opening = parseLocalDate(openingDate)
+  let periodStart = opening
+  let k = 1
+  let cursor = nthCreditingDate(opening, creditingFrequency, k)
+  while (cursor <= rangeEnd && k <= 2000) {
     results.push({ date: toIso(cursor), periodStart: toIso(periodStart), periodEnd: toIso(cursor) })
     periodStart = cursor
-    cursor = nextCreditingDate(cursor, creditingFrequency)
-    iterations++
+    cursor = nthCreditingDate(opening, creditingFrequency, ++k)
   }
   return results
 }
@@ -120,14 +124,14 @@ export function dailyAccrualInterest(dailyBalances: { date: string; balance: num
 /** Every monthly crediting window for method 2 between openingDate and rangeEnd — same shape as walkCreditingDates, kept separate since method 2 has no frequency choice. */
 export function walkMonthlyCreditingDates(openingDate: string, rangeEnd: Date): CreditingDate[] {
   const results: CreditingDate[] = []
-  let periodStart = parseLocalDate(openingDate)
-  let cursor = addMonths(periodStart, 1)
-  let iterations = 0
-  while (cursor <= rangeEnd && iterations < 2000) {
+  const opening = parseLocalDate(openingDate)
+  let periodStart = opening
+  let k = 1
+  let cursor = addMonths(opening, k) // counted from opening, see nthCreditingDate
+  while (cursor <= rangeEnd && k <= 2000) {
     results.push({ date: toIso(cursor), periodStart: toIso(periodStart), periodEnd: toIso(cursor) })
     periodStart = cursor
-    cursor = addMonths(cursor, 1)
-    iterations++
+    cursor = addMonths(opening, ++k)
   }
   return results
 }

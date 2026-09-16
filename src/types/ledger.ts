@@ -428,6 +428,15 @@ export interface RecurringTemplate {
   // weekday and cadence both come from this date; for 'quarterly'/'annual'
   // it's the first occurrence.
   anchorDate: string // ISO date
+  // 2026-09-16 (Adam-specified) — the intended day of month for a
+  // monthly/quarterly/annual schedule, when it differs from anchorDate's
+  // own day. Set only when a schedule change has to anchor on a month too
+  // short for the chosen day (a "31st" bill re-anchored in September is
+  // stored as 30 Sep): each occurrence then falls on this day, or the
+  // month's last day when the month is shorter, so it's the 31st again in
+  // October. Absent = anchorDate's own day, as every template before this.
+  // Cleared whenever anchorDate itself is edited.
+  anchorDayOfMonth?: number
   location: BillLocation
   ownerId: string
   payee: string
@@ -632,6 +641,11 @@ export interface Loan {
   potId?: string
   locationEffectiveFrom?: string
   locationHistory?: LocationChange[]
+  // 2026-09-16 — the first date this loan's regular payment generates, set when its schedule
+  // is changed from a chosen payment (lib/scheduleChange.ts). Payments before
+  // it are stored history and are never re-created on the new schedule, which
+  // is what used to duplicate them. Absent = no change has ever been made.
+  scheduleFrom?: string
   overpayments: LoanOverpayment[]
   // Optional standing/recurring overpayment on top of the normal monthly
   // payment — e.g. "an extra £100 every month" or "an extra 5% of
@@ -743,6 +757,11 @@ export interface LoanRecurringOverpayment {
   // split math being applied to a pot-sourced, unsplit amount.
   location?: 'personal' | 'pot'
   potId?: string // set only when location === 'pot'
+  // 2026-09-16 — the first date this recurring overpayment generates, set when its schedule
+  // is changed from a chosen payment (lib/scheduleChange.ts). Payments before
+  // it are stored history and are never re-created on the new schedule, which
+  // is what used to duplicate them. Absent = no change has ever been made.
+  scheduleFrom?: string
 }
 
 export interface LoanOverpayment {
@@ -813,6 +832,16 @@ export interface PayCycleConfig {
   // on the Wallet page (Wallet.tsx), one radio group per person with 2+
   // active income sources.
   followsIncomeSource?: { type: 'salary' } | { type: 'pension'; pensionId: string }
+  // 2026-09-16 — the payday rules in force BEFORE each payday change, oldest
+  // first. A payday change from a chosen payday (lib/scheduleChange.ts)
+  // records the old rule: it governs paydays before `until` (the chosen
+  // payday's old date), and the next rule governs paydays from
+  // `nextRuleFrom` (that payday's new date). The two differ, and a new date
+  // can even be earlier than the old one. Salary generation and the
+  // paid-periods list then resolve each earlier month on the day it was
+  // actually paid instead of re-creating it on the new day. Absent = the
+  // payday has never been changed.
+  paydayHistory?: { paydayDayOfMonth: number; paydayAdjustForNonWorkingDay: boolean; until: string; nextRuleFrom: string }[]
 
   // ── Salary Sorter (App_Dev.md "Salary Sorter & Transfer Pill", 2026-09
   // session) — which window "due this pay cycle" means when the sorter
@@ -874,6 +903,11 @@ export interface Pension {
   intervalWeeks?: number // only meaningful when frequency === 'every_n_weeks'
   anchorDate: string // ISO date — schedule anchor, same meaning as RecurringTemplate.anchorDate
   active: boolean // paused pensions stop generating new transactions, same as an inactive RecurringTemplate
+  // 2026-09-16 — the first date this pension generates, set when its schedule
+  // is changed from a chosen payment (lib/scheduleChange.ts). Payments before
+  // it are stored history and are never re-created on the new schedule, which
+  // is what used to duplicate them. Absent = no change has ever been made.
+  scheduleFrom?: string
   // Same shape and meaning as PayCycleConfig's own fields of the same
   // name — but this pension's OWN copy, since once a person can follow
   // EITHER their salary OR a specific pension (see PayCycleConfig.
@@ -973,6 +1007,11 @@ export interface CreditCard {
   statementStartDay?: number // 1-31, informational — the window's own maths only needs statementEndDay
   statementEndDay?: number // 1-31 — the day a statement closes and its balance is tallied
   ownerId: string // personal only, no location/payee split
+  // 2026-09-16 — the first date this card's minimum payment generates, set when its schedule
+  // is changed from a chosen payment (lib/scheduleChange.ts). Payments before
+  // it are stored history and are never re-created on the new schedule, which
+  // is what used to duplicate them. Absent = no change has ever been made.
+  scheduleFrom?: string
   lumpPayments: CreditCardLumpPayment[]
   active: boolean
   // Per-date overrides for the generated minimum charge — set via the

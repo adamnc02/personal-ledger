@@ -25,7 +25,7 @@
 // settled, a second pass finds nothing left to do and is a no-op.
 
 import { nanoid } from 'nanoid'
-import { generateTransactionsForTemplate, resolveOccurrenceAmount } from './schedule'
+import { generateTransactionsForTemplate, resolveOccurrenceAmount, resolveTemplateOccurrenceDate } from './schedule'
 import { generateLoanPaymentTransactions, resolveRecurringOverpaymentSource } from './ledgerLoans'
 import { generateMinimumPaymentTransactions } from './creditCards'
 import { computeNetPayForPeriod, generateSalaryTransactions } from './salaryLedger'
@@ -189,6 +189,11 @@ function reconcileRecurringTemplateTransactions(data: AppDataV2, asOfIso: string
     // case the old code handled, so this reads it correctly — and that
     // row is then stamped below so it never needs deriving again.
     const slot = t.occurrenceOriginalDate ?? template.occurrenceOverrides?.find((o) => o.originalDate === t.date || o.date === t.date)?.originalDate ?? t.date
+    // A slot before the anchor belongs to an earlier schedule: after a change
+    // from a chosen payment (applyTemplateScheduleChange) the anchor IS that
+    // payment. The current rules — a new day, frequency, or follows-payday
+    // setting — must not re-date or re-price what was actually paid before it.
+    if (slot < template.anchorDate) return stamp(t, slot)
     const override = template.occurrenceOverrides?.find((o) => o.originalDate === slot)
     // A deleted occurrence has no live amount/date to reconcile against —
     // that already-materialized row is a separate, pre-existing gap
@@ -212,7 +217,15 @@ function reconcileRecurringTemplateTransactions(data: AppDataV2, asOfIso: string
     // actually moved to today-or-earlier. Now reconciles both fields in
     // one pass, same "materialized rows are never hand-edited, so this is
     // always safe" reasoning the amount fix already relied on.
-    const date = override?.date ?? slot
+    // 2026-09-16 — resolved exactly as the generator resolves it
+    // (resolveTemplateOccurrenceDate). This used to be the raw slot/override
+    // date, so a follows-payday or follows-cycle-start transfer's stored row
+    // (dated on the payday) was moved back to its unadjusted slot on the next
+    // load; the generator then no longer found a row on the payday and
+    // materialised it again. Every load after payday added another copy
+    // (Adam's Bills/Joint/Savings Deposits, from 30 Sep 2026).
+    const payCycle = data.payCycles.find((pc) => pc.personId === template.ownerId) ?? data.payCycles.find((pc) => pc.personId === data.primaryPersonId)
+    const date = resolveTemplateOccurrenceDate(override?.date ?? slot, template, payCycle)
     // See this function's comment: a generated row dated in the future
     // can never legitimately be cleared. Checked against the resolved
     // `date`, not `t.date`, so the move and the un-clear land in the same

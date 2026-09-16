@@ -23,6 +23,7 @@ import { CREDIT_CARD_CATEGORY_ID, SHARED_CARD_COLORS, type AppDataV2, type Credi
 import { daysBetweenInclusive, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries, type DailyBalancePoint } from './runningBalance'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
+import { planReschedule, recentAndUpcomingFrom, redateStoredPayments } from './scheduleChange'
 import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 
 // BUGFIX (Batch 8, 2026-09-07, Bug 9.2, Adam-reported): a percent_of_balance
@@ -413,7 +414,26 @@ export function withLiveBalance(card: CreditCard, transactions: Transaction[], a
  * read from `workingBalance` as before — byte-identical output to the
  * pre-item-e behaviour for every existing card.
  */
+/**
+ * 2026-09-16 — a card's payment day changed from a chosen payment
+ * (applyCardPaymentDayChange) generates nothing before `card.scheduleFrom`:
+ * those payments are stored history, and re-creating them on the new day is
+ * what used to duplicate them. Only the OUTPUT is filtered; the simulation
+ * below is untouched, so every balance and cycle figure is exactly as before.
+ */
 export function generateMinimumPaymentTransactions(
+  card: CreditCard,
+  rangeStart: Date,
+  rangeEnd: Date,
+  transactions: Transaction[] = [],
+  onCycle?: (info: { dateIso: string; statementBalanceBeforePayment: number; workingBalanceBeforePayment: number }) => void,
+): Omit<Transaction, 'id'>[] {
+  const generated = simulateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions, onCycle)
+  const from = card.scheduleFrom
+  return from ? generated.filter((t) => t.date >= from) : generated
+}
+
+function simulateMinimumPaymentTransactions(
   card: CreditCard,
   rangeStart: Date,
   rangeEnd: Date,
@@ -1555,4 +1575,55 @@ export function buildCreditCardCycleSections(card: CreditCard, transactions: Tra
     const closingBalance = statementBalanceByDate.get(dueDateIso) ?? cardBalanceAsOf(card, allAsTransactions, cycle.dueDate)
     return { ...cycle, rows, closingBalance }
   })
+}
+
+// ── Payment day change from a chosen payment (2026-09-16) — see lib/scheduleChange.ts ──
+
+function cardPaymentDates(day: number, start: Date, end: Date): string[] {
+  const out: string[] = []
+  for (let cursor = new Date(start.getFullYear(), start.getMonth(), 1); cursor <= end; cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)) {
+    const daysInMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate()
+    out.push(toIso(new Date(cursor.getFullYear(), cursor.getMonth(), Math.min(day, daysInMonth))))
+  }
+  return out
+}
+
+/** The "which payment" picker for a card: its most recent payment date and the next 3. */
+export function recentAndUpcomingCardPaymentDates(card: CreditCard, asOfDate: Date): { date: string; isPast: boolean }[] {
+  const dates = cardPaymentDates(card.paymentDayOfMonth, new Date(asOfDate.getFullYear() - 1, asOfDate.getMonth(), 1), new Date(asOfDate.getFullYear() + 1, asOfDate.getMonth(), 1)).filter(
+    (d) => d >= card.balanceAsOfDate && !(card.scheduleFrom && d < card.scheduleFrom),
+  )
+  return recentAndUpcomingFrom(dates, toIso(asOfDate))
+}
+
+export function applyCardPaymentDayChange(
+  card: CreditCard,
+  transactions: Transaction[],
+  newDay: number,
+  pickedDate: string,
+  asOfIso: string,
+): { patch: Partial<CreditCard>; transactions: Transaction[] } | null {
+  // Generated minimum payments only — a logged lump payment carries a
+  // sourceType and a date the user chose, and never moves.
+  const belongs = (t: Transaction) => t.creditCardId === card.id && t.type === 'credit_card_payment' && !t.sourceType
+  const keyed = [...transactions.filter(belongs).map((t) => t.date), ...(card.minimumPaymentOverrides ?? []).map((o) => o.date)]
+  const lastKeyed = keyed.reduce((max, k) => (k > max ? k : max), pickedDate)
+  const picked = parseLocalDate(pickedDate)
+  const start = new Date(picked.getFullYear() - 3, picked.getMonth(), 1)
+  const end = new Date(parseLocalDate(lastKeyed).getFullYear() + 2, 11, 31)
+  const asOccurrences = (dates: string[]) => dates.map((d) => ({ key: d, date: d }))
+  const plan = planReschedule(
+    asOccurrences(cardPaymentDates(card.paymentDayOfMonth, start, end).filter((d) => !(card.scheduleFrom && d < card.scheduleFrom))),
+    asOccurrences(cardPaymentDates(newDay, start, end)),
+    pickedDate,
+  )
+  if (!plan) return null
+  return {
+    patch: {
+      paymentDayOfMonth: newDay,
+      scheduleFrom: plan.firstNew.date,
+      minimumPaymentOverrides: card.minimumPaymentOverrides?.map((o) => ({ ...o, date: plan.dateMap.get(o.date) ?? o.date })),
+    },
+    transactions: redateStoredPayments(transactions, belongs, plan, asOfIso),
+  }
 }

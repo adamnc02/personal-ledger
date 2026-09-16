@@ -421,6 +421,16 @@ export function generateSavingsInterestTransactions(pot: SavingsPot, realActivit
   const results: Omit<Transaction, 'id'>[] = []
   const generatedSoFar: Transaction[] = []
   const activityPlusGenerated = () => [...realActivity, ...generatedSoFar]
+  // 2026-09-16 — a crediting period that already has a STORED interest
+  // payment for this pot on a different day is already paid. Crediting
+  // dates are counted from openingDate, so moving that date (Rebalance
+  // accounts can) shifted every period's date and re-created the whole
+  // interest history alongside what was already stored. Same-day matches
+  // were always caught by the date dedupe; this catches the rest.
+  const storedInterestDates = realActivity
+    .filter((t) => t.type === 'savings_interest' && (t.sourceId === pot.id || (t.sourceType === undefined && t.savingsPotId === pot.id)) && !t.id.startsWith('generated:'))
+    .map((t) => t.date)
+  const periodAlreadyPaid = (c: { date: string; periodStart: string }) => storedInterestDates.some((d) => d !== c.date && d > c.periodStart && d <= c.date)
 
   const method = resolveInterestMethod(pot, toIso(rangeEnd))
   // NOTE: resolving once against rangeEnd rather than per-date is a
@@ -438,6 +448,7 @@ export function generateSavingsInterestTransactions(pot: SavingsPot, realActivit
     // so later periods compound on it correctly, even though only
     // dates >= rangeStart are actually returned to the caller below.
     for (const c of walkCreditingDates(pot.openingDate, method.creditingFrequency, rangeEnd)) {
+      if (periodAlreadyPaid(c)) continue
       const override = pot.interestOverrides?.find((o) => o.date === c.date)
       const balanceAtStart = savingsPotBalanceAsOf(pot, activityPlusGenerated(), parseLocalDate(c.periodStart))
       const amount = override?.amount ?? aerCreditedInterest(balanceAtStart, method)
@@ -462,6 +473,7 @@ export function generateSavingsInterestTransactions(pot: SavingsPot, realActivit
 
   // daily_accrual_monthly_credited
   for (const c of walkMonthlyCreditingDates(pot.openingDate, rangeEnd)) {
+    if (periodAlreadyPaid(c)) continue
     const override = pot.interestOverrides?.find((o) => o.date === c.date)
     let amount: number
     if (override) {

@@ -1,6 +1,8 @@
 import { useRef, useState, type ReactNode } from 'react'
 import { Trash2 } from 'lucide-react'
 import { ConfirmModal } from './ConfirmModal'
+import { DeleteGuardModal } from './DeleteGuardModal'
+import type { DeleteSubject } from '../lib/deleteReassign'
 
 interface SwipeToDeleteProps {
   children: ReactNode
@@ -9,6 +11,8 @@ interface SwipeToDeleteProps {
   confirmLabel?: string
   /** Overrides the modal's body text — defaults to "This can't be undone." Use this for anything with a real cascading effect (e.g. Person deletion) so the confirmation actually names the consequence. */
   confirmDescription?: string
+  /** A Person/Pot/Savings Pot: the confirmation blocks while anything still points at it (PROMPT-05). Requires confirmLabel. */
+  deleteGuard?: DeleteSubject
 }
 
 const REVEAL_WIDTH = 84
@@ -50,7 +54,7 @@ function isNativeControlTarget(target: EventTarget | null): boolean {
 // whatever's under the finger gets suppressed on release.
 const DRAG_THRESHOLD = 6
 
-export function SwipeToDelete({ children, onDelete, confirmLabel, confirmDescription }: SwipeToDeleteProps) {
+export function SwipeToDelete({ children, onDelete, confirmLabel, confirmDescription, deleteGuard }: SwipeToDeleteProps) {
   const startX = useRef<number | null>(null)
   const startOffset = useRef(0)
   const draggedPastThreshold = useRef(false)
@@ -151,7 +155,19 @@ export function SwipeToDelete({ children, onDelete, confirmLabel, confirmDescrip
       >
         {children}
       </div>
-      {confirming && (
+      {confirming && deleteGuard && (
+        <DeleteGuardModal
+          subject={deleteGuard}
+          name={confirmLabel ?? ''}
+          description={confirmDescription}
+          onConfirm={() => {
+            setConfirming(false)
+            onDelete()
+          }}
+          onCancel={() => setConfirming(false)}
+        />
+      )}
+      {confirming && !deleteGuard && (
         <ConfirmModal
           title={`Delete ${confirmLabel}?`}
           description={confirmDescription ?? "This can't be undone."}

@@ -23,10 +23,13 @@ import {
   applyTemplateAmountChange,
   applyTemplateSingleOccurrenceAmountChange,
   applyTemplateSingleOccurrenceDateChange,
+  describeSchedule,
+  scheduleDiffers,
   scheduledTemplateDates,
   setPausedTemplateOccurrences,
   resolveOccurrenceAmount,
   templateOccurrencePreviews,
+  occurrenceSlotForDate,
 } from '../lib/schedule'
 import { addMonths } from 'date-fns'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
@@ -565,6 +568,7 @@ function BillEditPanel({
   onCancel: () => void
 }) {
   const [draft, setDraft] = useState<BillDraft>(() => draftFromTemplate(template))
+  const { changeRecurringTemplateSchedule } = useLedgerData()
   // Batch 7 (2026-09-07, Bug 8), generalised 2026-09-09 into the shared
   // EffectiveDatedChangeFlow — which field(s) triggered the "which payment
   // does this apply from" flow, so the flow's buildChanges/onCommit know
@@ -603,6 +607,13 @@ function BillEditPanel({
   // with no confirmation at all, unlike amount/location. Routed through
   // the exact same "which payment does this apply to / from" flow now.
   const dateChanged = draft.anchorDate !== template.anchorDate
+  // 2026-09-16 (Adam-reported) — a frequency change goes through the same
+  // "from which payment" flow as a date change. Both used to overwrite the
+  // schedule outright, which re-created every past payment on the new
+  // schedule; see lib/schedule.ts applyTemplateScheduleChange.
+  const freqChanged = scheduleDiffers(template, draft).frequency
+  const scheduleChanged = dateChanged || freqChanged
+  const scheduleLabel = describeSchedule
   // UAT follow-up (2026-09-04, Adam-requested app-wide sweep): dims Save
   // when nothing's actually changed, matching the same rule the new
   // Transfer wizards already follow — same "compare against the mount-
@@ -637,7 +648,7 @@ function BillEditPanel({
     // own, so it gets first crack at the scope question; Location rides
     // along inside whichever flow actually opens (see buildChanges/
     // onCommit below), same as it already rides along Amount.
-    if (dateChanged && recentAndUpcomingOccurrences(template, new Date()).length > 0) {
+    if (scheduleChanged && recentAndUpcomingOccurrences(template, new Date()).length > 0) {
       setChangeKind('date')
       return
     }
@@ -665,7 +676,9 @@ function BillEditPanel({
         ? scope === 'single'
           ? `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)} for one payment only. Which payment is this?`
           : `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Which payment should the new amount start from? Everything before it keeps the old amount.`
-        : changeKind === 'date'
+        : changeKind === 'date' && freqChanged
+          ? `${template.name} is changing from ${scheduleLabel(template)} to ${scheduleLabel(draft)}. Which payment should this start from? Everything before it stays as it was.`
+          : changeKind === 'date'
           ? scope === 'single'
             ? `${template.name}'s due date is changing from ${formatFullDate(template.anchorDate)} to ${formatFullDate(draft.anchorDate)} for one payment only. Which payment is this?`
             : `${template.name}'s due date is changing from ${formatFullDate(template.anchorDate)} to ${formatFullDate(draft.anchorDate)}. Which payment should the new date start from? Everything before it keeps the old date.`
@@ -685,7 +698,7 @@ function BillEditPanel({
         scopeStep={
           changeKind === 'amount'
             ? { description: `${template.name} is changing from £${formatCurrency(template.amount)} to £${formatCurrency(draft.amount)}. Just a single payment, or every payment from then on?`, singleLabel: 'Just a single payment' }
-            : changeKind === 'date'
+            : changeKind === 'date' && !freqChanged
               ? {
                   description: `${template.name}'s due date is changing from ${formatFullDate(template.anchorDate)} to ${formatFullDate(draft.anchorDate)}. Just a single payment, or every payment from then on?`,
                   singleLabel: 'Just a single payment',
@@ -703,7 +716,14 @@ function BillEditPanel({
           // as Location already does alongside Amount below), since Date
           // and Amount can change in the same edit and share one
           // effective-date pick rather than asking twice.
-          if (dateChanged) {
+          if (freqChanged) {
+            changes.push({
+              label: 'Schedule',
+              from: scheduleLabel(template),
+              to: scheduleLabel(draft),
+              note: scope === 'single' ? 'This applies to every payment from this one on, not just the single payment above.' : undefined,
+            })
+          } else if (dateChanged) {
             changes.push({ label: 'Due date', from: formatFullDate(template.anchorDate), to: formatFullDate(draft.anchorDate) })
           }
           if (locationChanged) {
@@ -731,24 +751,27 @@ function BillEditPanel({
           let patch: Partial<Omit<RecurringTemplate, 'id'>> = {}
           if (changeKind === 'amount') {
             const amountPatch =
-              scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(workingTemplate, draft.amount, effectiveFrom) : applyTemplateAmountChange(workingTemplate, draft.amount, effectiveFrom)
+              scope === 'single' ? applyTemplateSingleOccurrenceAmountChange(workingTemplate, draft.amount, occurrenceSlotForDate(template, effectiveFrom)) : applyTemplateAmountChange(workingTemplate, draft.amount, occurrenceSlotForDate(template, effectiveFrom))
             workingTemplate = { ...workingTemplate, ...amountPatch }
             patch = { ...patch, amount: scope === 'single' ? template.amount : draft.amount, ...amountPatch }
           }
-          if (dateChanged) {
-            // 2026-09-14 — "all future" pragmatically just moves the
-            // template's own schedule anchor forward (same as an
-            // unconfirmed date edit always did); it does NOT get amount's
-            // full amountHistory-style precision for regenerating past
-            // occurrences at a remembered prior anchor — that's a much
-            // larger feature this fix doesn't attempt. "Just a single
-            // payment" IS fully precise, via the same occurrenceOverrides
-            // mechanism Transfers already use.
-            const datePatch = scope === 'single' ? applyTemplateSingleOccurrenceDateChange(workingTemplate, draft.anchorDate, effectiveFrom) : { anchorDate: draft.anchorDate }
+          // "Just a single payment" date move: a per-occurrence override.
+          // Anything else (all future, or any frequency change) goes
+          // through changeRecurringTemplateSchedule AFTER the plain save,
+          // which therefore keeps the template's current schedule fields.
+          // 2026-09-16 (Adam-reported): "all future" used to overwrite
+          // anchorDate here, duplicating every stored payment.
+          const singleDateMove = dateChanged && !freqChanged && scope === 'single'
+          if (singleDateMove) {
+            const datePatch = applyTemplateSingleOccurrenceDateChange(workingTemplate, draft.anchorDate, occurrenceSlotForDate(template, effectiveFrom))
             workingTemplate = { ...workingTemplate, ...datePatch }
-            patch = { ...patch, anchorDate: scope === 'single' ? template.anchorDate : draft.anchorDate, ...datePatch }
+            patch = { ...patch, ...datePatch }
           }
+          if (scheduleChanged) patch = { ...patch, anchorDate: template.anchorDate, frequency: template.frequency, intervalWeeks: template.intervalWeeks }
           if (Object.keys(patch).length > 0) onSave({ ...draft, ...patch })
+          if (scheduleChanged && !singleDateMove) {
+            changeRecurringTemplateSchedule(template.id, { frequency: draft.frequency, intervalWeeks: draft.intervalWeeks, anchorDate: draft.anchorDate }, effectiveFrom)
+          }
           if (locationChanged) {
             // Carries its own retroactive transaction rewrite (cleared
             // rows included), which a plain onSave patch can't do — see

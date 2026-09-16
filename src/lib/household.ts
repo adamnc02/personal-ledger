@@ -1,8 +1,9 @@
 import type { AppData, Person as LegacyPerson } from '../types/models'
 import type { BillLocation } from '../types/models'
-import type { AppDataV2, Pension, Person } from '../types/ledger'
+import type { AppDataV2, Pension, Person, RecurringTemplate, Transaction, TransferLocation } from '../types/ledger'
 import { calculateNetSalary } from './tax'
 import { combineBillsWithLoans } from './loans'
+import { categoryForTransfer, locationTypeForTransfer } from './transferLedger'
 
 export interface HouseholdFigures {
   totalIncome: number // every person's net pay, normalized to a monthly-equivalent
@@ -127,11 +128,69 @@ export function reconcilePersonReferences(data: AppDataV2): AppDataV2 {
     return item
   }
 
+  // ── PROMPT-05 (2026-09-16) — references nothing used to clean up. The
+  // delete guard (lib/deleteReassign.ts) stops the UI creating these; this
+  // is the backstop for older data and imported backups.
+  const validSavingsPotIds = new Set((data.savingsPots ?? []).map((p) => p.id))
+  function endpointExists(location: TransferLocation | undefined): boolean {
+    if (location?.type === 'pot') return validPotIds.has(location.potId ?? '')
+    if (location?.type === 'savings') return validSavingsPotIds.has(location.savingsPotId ?? '')
+    return true
+  }
+
+  // A recurring transfer into or out of a pot/savings pot that no longer
+  // exists kept materialising real money movements against Personal — £50
+  // a month into nothing, in the PROMPT-05 repro. The dead endpoint becomes
+  // Personal and the template is switched OFF: silently redirecting money
+  // somewhere the user never chose would be worse than stopping it, and
+  // deleting the template would be a cascade.
+  function fallBackDanglingTransfer(t: RecurringTemplate): RecurringTemplate {
+    if (t.kind !== 'transfer' || (endpointExists(t.transferFrom) && endpointExists(t.transferTo))) return t
+    const from: TransferLocation = endpointExists(t.transferFrom) && t.transferFrom ? t.transferFrom : { type: 'personal' }
+    const to: TransferLocation = endpointExists(t.transferTo) && t.transferTo ? t.transferTo : { type: 'personal' }
+    return { ...t, transferFrom: from, transferTo: to, location: locationTypeForTransfer(from, to), categoryId: categoryForTransfer(from, to), active: false }
+  }
+
+  // A PENDING row pointing at a missing pot/savings pot hasn't happened and
+  // now never will — same rule as the sweep on delete. Checks both transfer
+  // endpoints, not just the flat potId/savingsPotId (APP-KNOWLEDGE §1.4).
+  // Cleared rows are history and are never touched.
+  function pendingRowIsDangling(t: Transaction): boolean {
+    if (t.status !== 'pending') return false
+    if (t.potId && !validPotIds.has(t.potId)) return true
+    if (t.savingsPotId && !validSavingsPotIds.has(t.savingsPotId)) return true
+    return !endpointExists(t.fromLocation) || !endpointExists(t.toLocation)
+  }
+  const transactions = data.transactions.some(pendingRowIsDangling) ? data.transactions.filter((t) => !pendingRowIsDangling(t)) : data.transactions
+  const validTransactionIds = new Set(transactions.map((t) => t.id))
+
   return {
     ...data,
     primaryPersonId: fallbackOwnerId,
-    recurringTemplates: data.recurringTemplates.map(reassign).map(fallBackDanglingPot),
-    loans: data.loans.map(reassign).map(fallBackDanglingPot),
+    transactions,
+    recurringTemplates: data.recurringTemplates.map(reassign).map(fallBackDanglingPot).map(fallBackDanglingTransfer),
+    loans: data.loans
+      .map(reassign)
+      .map(fallBackDanglingPot)
+      .map((l) =>
+        // A recurring overpayment funded from a missing pot goes back to
+        // following the loan — the field's own absent-default, same as
+        // removePot does.
+        l.recurringOverpayment?.location === 'pot' && !validPotIds.has(l.recurringOverpayment.potId ?? '')
+          ? { ...l, recurringOverpayment: { ...l.recurringOverpayment, location: undefined, potId: undefined } }
+          : l,
+      ),
+    // A Salary Sort target whose transaction is gone (swept with a deleted
+    // pot) is dropped, and an emptied sort with it — the same rule
+    // removeTransaction applies.
+    salarySorts: (data.salarySorts ?? [])
+      .map((s) => (s.targets.every((tg) => validTransactionIds.has(tg.transactionId)) ? s : { ...s, targets: s.targets.filter((tg) => validTransactionIds.has(tg.transactionId)) }))
+      .filter((s) => s.targets.length > 0),
+    payCycles: data.payCycles.map((pc) =>
+      pc.followsIncomeSource?.type === 'pension' && !(data.pensions ?? []).some((p) => p.id === (pc.followsIncomeSource as { pensionId: string }).pensionId)
+        ? { ...pc, followsIncomeSource: { type: 'salary' } }
+        : pc,
+    ),
     creditCards: data.creditCards.map((c) => (validIds.has(c.ownerId) ? c : { ...c, ownerId: fallbackOwnerId })),
     // Closes the gap flagged in the UI consistency review (§3/§5 of the
     // data-model review) — these two were the only top-level,
@@ -141,7 +200,10 @@ export function reconcilePersonReferences(data: AppDataV2): AppDataV2 {
     // else can see and reassign again later beats one that's vanished
     // from every list because nothing matches its personId any more.
     pensions: (data.pensions ?? []).map((p) => (validIds.has(p.personId) ? p : { ...p, personId: fallbackOwnerId })),
-    savingsPots: (data.savingsPots ?? []).map((p) => (validIds.has(p.personId) ? p : { ...p, personId: fallbackOwnerId })),
+    savingsPots: (data.savingsPots ?? []).map((p) => {
+      const owned = validIds.has(p.personId) ? p : { ...p, personId: fallbackOwnerId }
+      return endpointExists(owned.interestDestination) ? owned : { ...owned, interestDestination: undefined }
+    }),
     pots: reconciledPots,
   }
 }

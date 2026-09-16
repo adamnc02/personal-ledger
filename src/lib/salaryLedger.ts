@@ -25,10 +25,11 @@
 import { calculateBonusOnTop, calculateNetSalary, type BonusBreakdown, type SalaryInput } from './tax'
 import { resolvePayday } from './payCycle'
 import { INCOME_CATEGORY_ID } from '../types/ledger'
-import type { Person, PayCycleConfig, SalarySnapshot, Transaction } from '../types/ledger'
+import type { Person, PayCycleConfig, SalarySnapshot, SalarySort, Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 import { toLocalIsoDate as toIso, parseLocalDate } from './date'
+import { planReschedule, redateStoredPayments } from './scheduleChange'
 
 /** The snapshot effective on `date` — the latest one with effectiveFrom on or before it, never a future one. */
 /**
@@ -249,23 +250,24 @@ export function generateSalaryTransactions(person: Person, payCycle: PayCycleCon
   let cursor = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), 1)
 
   while (cursor <= rangeEnd) {
-    const payday = resolvePayday(cursor.getFullYear(), cursor.getMonth(), payCycle.paydayDayOfMonth, payCycle.paydayAdjustForNonWorkingDay)
-    if (payday >= rangeStart && payday <= rangeEnd) {
-      const dateIso = toIso(payday)
-      const netPay = computeNetPayForPeriod(person, dateIso)
-      if (netPay !== null && netPay > 0) {
-        results.push({
-          date: dateIso,
-          amount: netPay,
-          direction: 'in',
-          categoryId: INCOME_CATEGORY_ID,
-          paymentMethod: 'bank_transfer',
-          status: 'pending',
-          type: 'salary',
-          location: 'personal',
-          ownerId: person.id,
-          personId: person.id,
-        })
+    for (const payday of paydaysForMonth(payCycle, cursor.getFullYear(), cursor.getMonth())) {
+      if (payday >= rangeStart && payday <= rangeEnd) {
+        const dateIso = toIso(payday)
+        const netPay = computeNetPayForPeriod(person, dateIso)
+        if (netPay !== null && netPay > 0) {
+          results.push({
+            date: dateIso,
+            amount: netPay,
+            direction: 'in',
+            categoryId: INCOME_CATEGORY_ID,
+            paymentMethod: 'bank_transfer',
+            status: 'pending',
+            type: 'salary',
+            location: 'personal',
+            ownerId: person.id,
+            personId: person.id,
+          })
+        }
       }
     }
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
@@ -287,8 +289,9 @@ export function upcomingPaydays(payCycle: PayCycleConfig, fromDate: Date, count:
   let cursor = new Date(fromDate.getFullYear(), fromDate.getMonth(), 1)
   let guard = 0
   while (results.length < count && guard < 120) {
-    const payday = resolvePayday(cursor.getFullYear(), cursor.getMonth(), payCycle.paydayDayOfMonth, payCycle.paydayAdjustForNonWorkingDay)
-    if (payday > fromDate) results.push(payday)
+    for (const payday of paydaysForMonth(payCycle, cursor.getFullYear(), cursor.getMonth())) {
+      if (payday > fromDate && results.length < count) results.push(payday)
+    }
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
     guard++
   }
@@ -309,11 +312,108 @@ export function closedPaydays(payCycle: PayCycleConfig, beforeDate: Date, count:
   let cursor = new Date(beforeDate.getFullYear(), beforeDate.getMonth(), 1)
   let guard = 0
   while (results.length < count && guard < 120 && cursor >= floorMonth) {
-    const payday = resolvePayday(cursor.getFullYear(), cursor.getMonth(), payCycle.paydayDayOfMonth, payCycle.paydayAdjustForNonWorkingDay)
-    if (payday <= beforeDate && payday >= openingBalanceDate) results.push(payday)
+    // Latest first within the month, since this walks backward.
+    for (const payday of paydaysForMonth(payCycle, cursor.getFullYear(), cursor.getMonth()).reverse()) {
+      if (payday <= beforeDate && payday >= openingBalanceDate && results.length < count) results.push(payday)
+    }
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1)
     guard++
   }
   // Walked backward, so the closest-to-today payday was collected first — reverse to chronological (oldest first, most recent last).
   return results.reverse()
+}
+
+// ── Payday change from a chosen payment (2026-09-16) — see lib/scheduleChange.ts ──
+
+/**
+ * Every payday falling in a calendar month, honouring earlier payday rules
+ * (PayCycleConfig.paydayHistory): a rule governs paydays from the previous
+ * rule's `nextRuleFrom` up to (not including) its own `until`. Usually one
+ * date; a month can hold two, or none, right where a change moved a payday
+ * across a month boundary.
+ */
+export function paydaysForMonth(payCycle: PayCycleConfig, year: number, monthIndex0: number): Date[] {
+  const rules = [
+    ...(payCycle.paydayHistory ?? []),
+    { paydayDayOfMonth: payCycle.paydayDayOfMonth, paydayAdjustForNonWorkingDay: payCycle.paydayAdjustForNonWorkingDay, until: null as string | null, nextRuleFrom: null as string | null },
+  ]
+  const out: Date[] = []
+  let from: string | null = null
+  for (const rule of rules) {
+    const payday = resolvePayday(year, monthIndex0, rule.paydayDayOfMonth, rule.paydayAdjustForNonWorkingDay)
+    const iso = toIso(payday)
+    if ((from === null || iso >= from) && (rule.until === null || iso < rule.until)) out.push(payday)
+    from = rule.nextRuleFrom
+  }
+  return out.sort((a, b) => a.getTime() - b.getTime())
+}
+
+function paydayDates(payCycle: PayCycleConfig, start: Date, end: Date): string[] {
+  const out: string[] = []
+  for (let cursor = new Date(start.getFullYear(), start.getMonth(), 1); cursor <= end; cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)) {
+    for (const payday of paydaysForMonth(payCycle, cursor.getFullYear(), cursor.getMonth())) out.push(toIso(payday))
+  }
+  return out
+}
+
+/** The first payday on or after `dateIso` under the current rules — where a new job's payday change takes effect. */
+export function firstPaydayOnOrAfter(payCycle: PayCycleConfig, dateIso: string): string {
+  const from = parseLocalDate(dateIso)
+  return paydayDates(payCycle, from, new Date(from.getFullYear(), from.getMonth() + 2, 1)).find((d) => d >= dateIso) ?? dateIso
+}
+
+/** The "which payment" picker for a payday change: the most recent payday and the next 3. */
+export function recentAndUpcomingPaydayDates(payCycle: PayCycleConfig, asOfDate: Date): { date: string; isPast: boolean }[] {
+  const asOfIso = toIso(asOfDate)
+  const dates = paydayDates(payCycle, new Date(asOfDate.getFullYear() - 1, asOfDate.getMonth(), 1), new Date(asOfDate.getFullYear() + 1, asOfDate.getMonth(), 1))
+  const past = dates.filter((d) => d <= asOfIso)
+  const upcoming = dates.filter((d) => d > asOfIso)
+  return [...(past.length ? [{ date: past[past.length - 1], isPast: true }] : []), ...upcoming.slice(0, 3).map((date) => ({ date, isPast: false }))]
+}
+
+/**
+ * The payday changed, from a chosen payday. Salary payments from there on
+ * are re-dated, and so is everything keyed on a payday: that person's
+ * SalaryOverrides (bonuses, manual net pay) and, for the primary person,
+ * SalarySorts. Earlier paydays keep resolving on the old rule.
+ *
+ * Pay-cycle WINDOWS (payCycle.ts) are deliberately untouched: they follow
+ * the current payday rule, as they always have.
+ */
+export function applyPaydayChange(
+  payCycle: PayCycleConfig,
+  person: Person,
+  transactions: Transaction[],
+  salarySorts: SalarySort[] | null,
+  next: Pick<PayCycleConfig, 'paydayDayOfMonth' | 'paydayAdjustForNonWorkingDay'>,
+  pickedDate: string,
+  asOfIso: string,
+): { payCycle: PayCycleConfig; person: Person; transactions: Transaction[]; salarySorts: SalarySort[] | null } | null {
+  const belongs = (t: Transaction) => t.type === 'salary' && t.personId === person.id
+  const keyed = [
+    ...transactions.filter(belongs).map((t) => t.date),
+    ...person.salaryOverrides.map((o) => o.payPeriodDate),
+    ...(salarySorts ?? []).map((s) => s.payDate),
+  ]
+  const lastKeyed = keyed.reduce((max, k) => (k > max ? k : max), pickedDate)
+  const picked = parseLocalDate(pickedDate)
+  const start = new Date(picked.getFullYear() - 3, picked.getMonth(), 1)
+  const end = new Date(parseLocalDate(lastKeyed).getFullYear() + 2, 11, 31)
+  const asOccurrences = (dates: string[]) => dates.map((d) => ({ key: d, date: d }))
+  const newRule: PayCycleConfig = { ...payCycle, ...next, paydayHistory: undefined }
+  const plan = planReschedule(asOccurrences(paydayDates(payCycle, start, end)), asOccurrences(paydayDates(newRule, start, end)), pickedDate)
+  if (!plan) return null
+
+  // A rule recorded by an earlier change that this one reaches back past is superseded.
+  const history = (payCycle.paydayHistory ?? []).filter((h) => h.until <= plan.from.date && h.nextRuleFrom <= plan.from.date)
+  return {
+    payCycle: {
+      ...payCycle,
+      ...next,
+      paydayHistory: [...history, { paydayDayOfMonth: payCycle.paydayDayOfMonth, paydayAdjustForNonWorkingDay: payCycle.paydayAdjustForNonWorkingDay, until: plan.from.date, nextRuleFrom: plan.firstNew.date }],
+    },
+    person: { ...person, salaryOverrides: person.salaryOverrides.map((o) => ({ ...o, payPeriodDate: plan.dateMap.get(o.payPeriodDate) ?? o.payPeriodDate })) },
+    transactions: redateStoredPayments(transactions, belongs, plan, asOfIso),
+    salarySorts: salarySorts?.map((s) => ({ ...s, payDate: plan.dateMap.get(s.payDate) ?? s.payDate })) ?? null,
+  }
 }
