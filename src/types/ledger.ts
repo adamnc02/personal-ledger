@@ -1006,7 +1006,18 @@ export interface CreditCard {
   // land in.
   statementStartDay?: number // 1-31, informational — the window's own maths only needs statementEndDay
   statementEndDay?: number // 1-31 — the day a statement closes and its balance is tallied
-  ownerId: string // personal only, no location/payee split
+  ownerId: string // no joint/payee split
+  // 2026-09-16 (Adam-reported) — where the card's MINIMUM PAYMENT is paid
+  // from: Personal (absent, every card before this) or one of the owner's
+  // Pots. Same "extension of location" as Loan.location, and same one-time
+  // rewrite of stored minimum payments from the chosen payment
+  // (LedgerContext.assignCreditCardLocation). Only the minimum payment moves;
+  // logged/lump payments and Clear stay Personal, the way a loan's
+  // overpayments keep their own funding source. No 'joint'.
+  location?: 'personal' | 'pot'
+  potId?: string // set only when location === 'pot'
+  locationEffectiveFrom?: string
+  locationHistory?: LocationChange[]
   // 2026-09-16 — the first date this card's minimum payment generates, set when its schedule
   // is changed from a chosen payment (lib/scheduleChange.ts). Payments before
   // it are stored history and are never re-created on the new schedule, which

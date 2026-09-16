@@ -438,7 +438,8 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
       candidates.push(...generateLoanPaymentTransactions(loan, rangeStart, asOf).filter((t) => t.location === 'personal'))
     }
     for (const card of result.creditCards.filter((c) => c.ownerId === person.id)) {
-      candidates.push(...generateMinimumPaymentTransactions(card, rangeStart, asOf, result.transactions))
+      // Personal rows only; pot-funded ones settle in Step 3 below.
+      candidates.push(...generateMinimumPaymentTransactions(card, rangeStart, asOf, result.transactions).filter((t) => t.location === 'personal'))
     }
     candidates.push(...generateSalaryTransactions(person, payCycle, rangeStart, asOf))
     for (const pension of result.pensions.filter((p) => p.personId === person.id)) {

@@ -22,10 +22,10 @@
 // self-healing backstop for imported/old data; this module is what stops
 // the UI creating the dangling state in the first place.
 
-import type { AppDataV2, Loan, RecurringTemplate, SalarySort, Transaction, TransferLocation } from '../types/ledger'
+import type { AppDataV2, CreditCard, Loan, RecurringTemplate, SalarySort, Transaction, TransferLocation } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { reconcilePersonReferences } from './household'
-import { priorLocationEntry, reassignTransactionsForLocationChange } from './locationChange'
+import { priorLocationEntry, reassignCreditCardPaymentsForLocationChange, reassignTransactionsForLocationChange } from './locationChange'
 import { reassignLoanRecurringOverpaymentTransactions } from './ledgerLoans'
 import { sweepPendingForCreditCard, sweepPendingForLoan, sweepPendingForPot, sweepPendingForSavingsPot, sweepPendingForSource } from './pendingSweep'
 import { categoryForTransfer, locationTypeForTransfer, transferLocationKey, transferLocationLabel, transferTouchesPot, transferTouchesSavingsPot } from './transferLedger'
@@ -193,6 +193,8 @@ export function removePotFromData(prev: AppDataV2, id: string, asOfIso: string =
       }
       return next
     }),
+    // 2026-09-16 — a card whose minimum payment was paid from this pot.
+    creditCards: prev.creditCards.map((c) => (c.location === 'pot' && c.potId === id ? relocateCreditCard(c, 'personal', undefined, asOfIso) : c)),
   })
 }
 
@@ -347,6 +349,10 @@ export function findDeleteBlockers(data: AppDataV2, subject: DeleteSubject): Del
         out.push(blocker('loanRecurringOverpayment', 'loanRecurringOverpayments', l.id, l.name))
       }
     }
+    // 2026-09-16 — a card's minimum payment can be paid from a pot.
+    for (const c of data.creditCards) {
+      if (c.location === 'pot' && c.potId === potId) out.push(blocker('creditCard', 'creditCards', c.id, c.name, 'Its minimum payment'))
+    }
     for (const t of data.transactions) {
       if (isHandLoggedPending(t) && transactionTouchesPot(t, potId)) {
         out.push(blocker('transaction', 'upcomingTransactions', t.id, transactionName(t, data), `${money(t.amount)} on ${t.date}`))
@@ -448,6 +454,10 @@ export function blockerTargetOptions(data: AppDataV2, subject: DeleteSubject, b:
     case 'loan': {
       const l = data.loans.find((x) => x.id === b.id)
       return l ? billLocationOptions(data, l.ownerId, subject) : []
+    }
+    case 'creditCard': {
+      const c = data.creditCards.find((x) => x.id === b.id)
+      return c ? billLocationOptions(data, c.ownerId, subject) : []
     }
     case 'loanRecurringOverpayment': {
       const l = data.loans.find((x) => x.id === b.id)
@@ -610,6 +620,16 @@ function relocateLoan(l: Loan, location: BillLocation, potId: string | undefined
   }
 }
 
+function relocateCreditCard(c: CreditCard, location: 'personal' | 'pot', potId: string | undefined, asOfIso: string): CreditCard {
+  return {
+    ...c,
+    location,
+    potId: location === 'pot' ? potId : undefined,
+    locationEffectiveFrom: asOfIso,
+    locationHistory: [...(c.locationHistory ?? []), priorLocationEntry({ location: c.location ?? 'personal', potId: c.potId, locationEffectiveFrom: c.locationEffectiveFrom }, c.balanceAsOfDate)],
+  }
+}
+
 /**
  * Keeps a rewrite on PENDING rows only. The Bills/Borrowing "move to a
  * pot" flow deliberately rewrites cleared rows from its effective date
@@ -657,6 +677,15 @@ function reassignToLocation(data: AppDataV2, subject: DeleteSubject, b: DeleteBl
         ...data,
         loans: data.loans.map((l) => (l.id === b.id ? relocateLoan(l, next.location, next.potId, asOfIso) : l)),
         transactions: pendingOnly(data.transactions, reassignTransactionsForLocationChange(data.transactions, 'loan', b.id, asOfIso, next.location, next.potId)),
+      }
+    }
+    case 'creditCard': {
+      if (target.type !== 'location') return data
+      const next = billLocationOf(target.location) as { location: 'personal' | 'pot'; potId?: string }
+      return {
+        ...data,
+        creditCards: data.creditCards.map((c) => (c.id === b.id ? relocateCreditCard(c, next.location, next.potId, asOfIso) : c)),
+        transactions: pendingOnly(data.transactions, reassignCreditCardPaymentsForLocationChange(data.transactions, b.id, asOfIso, next.location, next.potId)),
       }
     }
     case 'loanRecurringOverpayment': {

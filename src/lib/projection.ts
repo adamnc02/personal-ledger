@@ -225,7 +225,9 @@ export function computeProjectionToDate(
     // that card, and the visibility floor applied to `stored` above is a
     // display rule for the personal ledger, not a statement of what the
     // card actually owes.
-    generated.push(...generateMinimumPaymentTransactions(card, rangeStart, horizonEndDate, data.transactions))
+    // Personal rows only: a pot-funded minimum payment (CreditCard.location)
+    // is internal to the pot, same as a pot-funded loan payment.
+    generated.push(...generateMinimumPaymentTransactions(card, rangeStart, horizonEndDate, data.transactions).filter((t) => t.location === 'personal'))
   }
   if (person) {
     generated.push(...generateSalaryTransactions(person, payCycle, rangeStart, horizonEndDate))

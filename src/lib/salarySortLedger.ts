@@ -12,6 +12,7 @@ import { cycleBoundsForDate } from './payCycle'
 import { upcomingPaydays } from './salaryLedger'
 import { generateTransactionsForTemplate } from './schedule'
 import { generateLoanPaymentTransactions } from './ledgerLoans'
+import { generateMinimumPaymentTransactions } from './creditCards'
 import { generateJointContributionTransactions } from './jointLedger'
 import { potBillsAndLoans } from './potLedger'
 import { locationsEqual } from './transferLedger'
@@ -81,10 +82,11 @@ export function dueAmountForLocation(data: AppDataV2, location: TransferLocation
   if (location.type === 'pot') {
     const pot = (data.pots ?? []).find((p) => p.id === location.potId)
     if (!pot) return 0
-    const { templates, loans } = potBillsAndLoans(data, pot.id)
+    const { templates, loans, creditCards } = potBillsAndLoans(data, pot.id)
     let total = 0
     for (const template of templates) total += generateTransactionsForTemplate(template, window.start, window.end).reduce((sum, t) => sum + t.amount, 0)
     for (const loan of loans) total += generateLoanPaymentTransactions(loan, window.start, window.end).reduce((sum, t) => sum + t.amount, 0)
+    for (const card of creditCards) total += generateMinimumPaymentTransactions(card, window.start, window.end, data.transactions).reduce((sum, t) => sum + t.amount, 0)
     return round2(total)
   }
   if (location.type === 'joint') {
