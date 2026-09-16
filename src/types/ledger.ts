@@ -336,6 +336,34 @@ export interface Transaction {
     // table anywhere.
     | 'salary_sort'
   sourceId?: string
+  // WHICH occurrence of that source this row is — the natural,
+  // anchor-walked date of its slot, i.e. exactly the `originalDate` key
+  // `RecurringTemplate.occurrenceOverrides` uses. Set only on rows
+  // generated from a RecurringTemplate (sourceType 'recurring_template').
+  //
+  // 2026-09-16 (Adam-reported, single-occurrence date move) — `date`
+  // alone cannot identify a materialized occurrence, because a
+  // per-occurrence date move CHANGES it. reconcileRecurringTemplateTransactions
+  // used to re-find its row by matching either end of a single move
+  // (`o.originalDate === t.date || o.date === t.date`); after a SECOND
+  // move there are three dates in play and the intermediate one is
+  // recorded nowhere, so the stored row was stranded at a date that no
+  // longer corresponded to any occurrence, and the generator — whose
+  // dedupeKey is also keyed on the date — then materialized the same
+  // occurrence a second time. Two cleared rows, both counting against
+  // the balance. This field makes the slot explicit so identity no
+  // longer depends on a mutable value. Same class of bug as
+  // SalarySnapshot.recordedSeq (see DATA-MODEL-REVIEW-2026-09-15.md
+  // §11.7a and PROMPT-02): identity keyed off something that moves.
+  //
+  // Optional because rows materialized before this field existed don't
+  // carry it. They are NOT migrated in ledgerStorage — instead
+  // reconcileRecurringTemplateTransactions stamps each one the first
+  // time it sees it, deriving the slot from the same two-way date match
+  // that worked for a single move, which is all a pre-existing row can
+  // have been through. Treat "absent" as "derive it, then stamp it",
+  // never as "this row has no slot".
+  occurrenceOriginalDate?: string
   // Required when type is 'credit_card_spend' or 'credit_card_payment' —
   // which card this is against. See TransactionType above for how each
   // type does or doesn't affect the ledger balance / Personal card list.

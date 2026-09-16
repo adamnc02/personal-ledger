@@ -266,6 +266,12 @@ export function generateTransactionsForTemplate(
       followsCycleStart: isTransferKind ? template.followsCycleStart : undefined,
       sourceType: 'recurring_template',
       sourceId: template.id,
+      // 2026-09-16 — the occurrence's natural slot, carried through so a
+      // materialized row stays identifiable after its date is moved (and
+      // moved again). See Transaction.occurrenceOriginalDate's own
+      // comment for the full reasoning. Note this is `occ.originalDate`,
+      // NOT `occ.date` — the whole point is that it does not move.
+      occurrenceOriginalDate: occ.originalDate,
       // The specific bill's/recurring transaction's/transfer's own name —
       // without this, a row falls back to its category's name for
       // display, which duplicates the category group header when viewed
@@ -343,7 +349,28 @@ export function scheduledTemplateDates(
   const results: { originalDate: string; date: string }[] = []
   while (cursor <= rangeEnd && iterations < MAX_OCCURRENCES) {
     const originalDate = toIso(cursor)
-    results.push({ originalDate, date: resolveTemplateOccurrenceDate(originalDate, template, payCycle) })
+    // 2026-09-16 (Adam-reported, single-occurrence date move) — the
+    // occurrence's DISPLAY date honours a per-occurrence date override,
+    // exactly as walkOccurrences already does. `originalDate` stays the
+    // natural, unresolved key (see this function's own note above, and
+    // PausedOccurrencesControl's header: identity keys off .originalDate,
+    // only rendering/sorting uses .date).
+    //
+    // This does NOT undo the "deliberately IGNORING occurrenceOverrides"
+    // contract above, which is specifically about `deleted` — a paused
+    // date must still be listed so it can be unchecked, so the entry is
+    // still emitted here either way. Only `date` reads the override.
+    // Before this, "Manage upcoming payments" kept showing a moved
+    // occurrence's OLD date on Bills and recurring Transfers (the two
+    // call sites with onSaveDate wired that render from this function);
+    // recurring Transactions were never affected because their
+    // "Next 12 upcoming" panel renders from templateOccurrencePreviews,
+    // which goes via walkOccurrences and was already override-aware.
+    // Knock-on, now also fixed: PausedOccurrencesControl seeds its date
+    // input and its confirm modal's "from" date from this value, so both
+    // used to name the stale date.
+    const override = template.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
+    results.push({ originalDate, date: resolveTemplateOccurrenceDate(override?.date ?? originalDate, template, payCycle) })
     cursor = nextOccurrence(cursor, template, anchorDay)
     iterations++
   }

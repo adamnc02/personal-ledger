@@ -139,19 +139,41 @@ function reconcileRecurringTemplateTransactions(data: AppDataV2): AppDataV2 {
     if (t.sourceType !== 'recurring_template' || !t.sourceId) return t
     const template = data.recurringTemplates.find((tpl) => tpl.id === t.sourceId)
     if (!template) return t
-    // Matched by EITHER the occurrence's natural originalDate (a
-    // materialized row that predates the override, or whose date has
-    // never been moved) OR its current resolved date (a row already
-    // reconciled onto a moved date on some earlier pass) — checking both
-    // makes the match idempotent regardless of which side of a date move
-    // this runs on.
-    const override = template.occurrenceOverrides?.find((o) => o.originalDate === t.date || o.date === t.date)
+    // WHICH occurrence this row is. 2026-09-16 (Adam-reported, single-
+    // occurrence date move) — this used to be derived purely from the
+    // row's CURRENT date, matching either end of a single move
+    // (`o.originalDate === t.date || o.date === t.date`), with a comment
+    // claiming that made the match idempotent "regardless of which side
+    // of a date move this runs on". It is idempotent for exactly ONE
+    // move. Move the same occurrence twice (1 Jul -> 5 Jul -> 9 Jul) and
+    // the row sits at 5 Jul while the override reads
+    // {originalDate: 1 Jul, date: 9 Jul} — neither branch matches,
+    // because the intermediate date is recorded nowhere. The row was
+    // then stranded forever AND the generator re-materialized the same
+    // occurrence at 9 Jul (dedupeKey is keyed on the date too), leaving
+    // two cleared rows both counting against the balance. Confirmed for
+    // bills, recurring transactions AND recurring transfers — one shared
+    // generator, one shared bug. Moving back to the original date
+    // duplicated as well, so "undo it" was not a workaround either.
+    //
+    // The slot now comes from the row's own stamp when it has one, so it
+    // survives any number of moves. The date match is kept ONLY to
+    // derive the slot for a row materialized before that field existed —
+    // such a row can by definition only have been through the one-move
+    // case the old code handled, so this reads it correctly — and that
+    // row is then stamped below so it never needs deriving again.
+    const slot = t.occurrenceOriginalDate ?? template.occurrenceOverrides?.find((o) => o.originalDate === t.date || o.date === t.date)?.originalDate ?? t.date
+    const override = template.occurrenceOverrides?.find((o) => o.originalDate === slot)
     // A deleted occurrence has no live amount/date to reconcile against —
     // that already-materialized row is a separate, pre-existing gap
     // (deleting a future occurrence doesn't retroactively un-clear a past
     // one), not this fix's concern.
-    if (override?.deleted) return t
-    const amount = override?.amount !== undefined ? override.amount : resolveOccurrenceAmount(template, override?.originalDate ?? t.date)
+    //
+    // Still stamped on the way out when it's missing, so a paused
+    // occurrence that is later unpaused is already slot-identified
+    // rather than falling back to the date derivation again.
+    if (override?.deleted) return stamp(t, slot)
+    const amount = override?.amount !== undefined ? override.amount : resolveOccurrenceAmount(template, slot)
     // 2026-09-14 (Adam-reported, joint account bill date change) — this
     // used to only reconcile amount, never date. A per-occurrence date
     // move (applyTemplateSingleOccurrenceDateChange) correctly redirected
@@ -164,13 +186,29 @@ function reconcileRecurringTemplateTransactions(data: AppDataV2): AppDataV2 {
     // actually moved to today-or-earlier. Now reconciles both fields in
     // one pass, same "materialized rows are never hand-edited, so this is
     // always safe" reasoning the amount fix already relied on.
-    const date = override?.date ?? t.date
-    if (amount <= 0) return t
-    if (amount === t.amount && date === t.date) return t
+    const date = override?.date ?? slot
+    if (amount <= 0) return stamp(t, slot)
+    if (amount === t.amount && date === t.date) return stamp(t, slot)
     changed = true
-    return { ...t, amount, date }
+    return { ...stamp(t, slot), amount, date }
   })
   return changed ? { ...data, transactions } : data
+
+  /**
+   * Backfills Transaction.occurrenceOriginalDate onto a row that predates
+   * the field, using the slot derived above. Deliberately done here on
+   * first sight rather than in migrateLedgerData: this reconciler is the
+   * one place that already has the owning template to hand, it runs on
+   * every load before anything is materialized, and it only ever ADDS a
+   * field — no date, amount or status is touched, so it can't disturb an
+   * already-cleared row (APP-KNOWLEDGE.md §1.1). Idempotent: once stamped,
+   * this returns the row untouched forever after.
+   */
+  function stamp(t: Transaction, slot: string): Transaction {
+    if (t.occurrenceOriginalDate === slot) return t
+    changed = true
+    return { ...t, occurrenceOriginalDate: slot }
+  }
 }
 
 /**
