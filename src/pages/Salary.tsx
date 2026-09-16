@@ -15,6 +15,7 @@ import { DeductionModal } from '../components/DeductionModal'
 import { SwipeToDelete } from '../components/SwipeToDelete'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
 import { ConfirmModal } from '../components/ConfirmModal'
+import { DeleteGuardModal } from '../components/DeleteGuardModal'
 import { FormButtonRow } from '../components/FormButtons'
 import { RecurringChangeConfirmModal, EffectiveDateOccurrenceModal } from '../components/RecurringChangeConfirmModal'
 import { EffectiveDatedChangeFlow, type RecurringChangeField } from '../components/EffectiveDatedChangeFlow'
@@ -1256,7 +1257,7 @@ function SavingsPotRow({
   }, [])
 
   return (
-    <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
+    <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name} deleteGuard={{ type: 'savingsPot', id: pot.id }}>
       <div className="relative rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
         <div className="flex items-center gap-2">
           <button onClick={onToggle} className="flex-1 min-w-0 flex items-center justify-between text-left">
@@ -2064,7 +2065,7 @@ function PotRow({
   }, [])
 
   return (
-    <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
+    <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name} deleteGuard={{ type: 'pot', id: pot.id }}>
       <div className="relative rounded-2xl p-4" style={{ background: 'var(--color-surface)' }}>
         <div className="flex items-center gap-2">
           <button onClick={onToggle} className="flex-1 min-w-0 flex items-center justify-between text-left">
@@ -2174,11 +2175,9 @@ function PeopleModal({
 }) {
   const [newName, setNewName] = useState('')
   // The single highest-consequence delete in the app (UI consistency
-  // review §2/§10 Phase 1) — reassigns everything they own to a fallback
-  // person and, for pensions/savings pots, leaves them unowned entirely.
-  // Given a plain "this can't be undone" undersells what actually
-  // happens, this names the real consequence rather than reusing
-  // SwipeToDelete's generic copy.
+  // review §2/§10 Phase 1). Since PROMPT-05 (2026-09-16) nothing is
+  // reassigned silently: DeleteGuardModal blocks while they still own
+  // anything and lets the user move or delete each item first.
   const [confirmingRemoveId, setConfirmingRemoveId] = useState<string | null>(null)
   const confirmingPerson = people.find((p) => p.id === confirmingRemoveId)
   return createPortal(
@@ -2247,11 +2246,10 @@ function PeopleModal({
         </div>
       </div>
       {confirmingPerson && (
-        <ConfirmModal
-          title={`Remove ${confirmingPerson.name}?`}
-          description="Their bills, loans, credit cards, pensions, and savings pots will all be reassigned to whoever's left. Already-cleared transactions stay exactly as they are, as a historical record."
-          confirmLabel="Remove"
-          tone="danger"
+        <DeleteGuardModal
+          subject={{ type: 'person', id: confirmingPerson.id }}
+          name={confirmingPerson.name}
+          description="Already-cleared transactions stay exactly as they are, as a historical record."
           onConfirm={() => {
             onRemove(confirmingPerson.id)
             setConfirmingRemoveId(null)
