@@ -21,12 +21,13 @@ import { addMonths } from 'date-fns'
 import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 import { generateTransactionsForTemplate } from './schedule'
 import { generateLoanPaymentTransactions } from './ledgerLoans'
+import { generateMinimumPaymentTransactions } from './creditCards'
 import { dedupeKey, horizonCycles, previousCycles, THREE_CYCLES_AHEAD, type ProjectionHorizon } from './projection'
 import { potTransferSignedAmount, transferTouchesPot } from './transferLedger'
 import { nanoid } from 'nanoid'
 import { SAVINGS_CATEGORY_ID } from '../types/ledger'
 import { daysBetweenInclusive, buildDailyBalanceSeries, buildDailySpendSeries, type BalanceSpendGranularity, type BalanceSpendTrendSeries } from './runningBalance'
-import type { AppDataV2, Loan, PayCycleConfig, Pot, RecurringOccurrenceOverride, RecurringTemplate, Transaction } from '../types/ledger'
+import type { AppDataV2, CreditCard, Loan, PayCycleConfig, Pot, RecurringOccurrenceOverride, RecurringTemplate, Transaction } from '../types/ledger'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 const MAX_OCCURRENCES = 2000
@@ -54,10 +55,12 @@ export function newPot(input: { personId: string; name: string; openingBalance: 
 // ── Which bills/loans this pot funds — DERIVED, not stored on the Pot
 // itself (see Pot's own header comment). ───────────────────────────────
 
-export function potBillsAndLoans(data: AppDataV2, potId: string): { templates: RecurringTemplate[]; loans: Loan[] } {
+export function potBillsAndLoans(data: AppDataV2, potId: string): { templates: RecurringTemplate[]; loans: Loan[]; creditCards: CreditCard[] } {
   return {
     templates: data.recurringTemplates.filter((t) => t.location === 'pot' && t.potId === potId),
     loans: data.loans.filter((l) => l.location === 'pot' && l.potId === potId),
+    // 2026-09-16 — credit cards whose minimum payment is paid from this pot.
+    creditCards: data.creditCards.filter((c) => c.location === 'pot' && c.potId === potId),
   }
 }
 
@@ -253,7 +256,7 @@ export function setPausedPotDeposits(pot: Pot, windowDates: string[], pausedDate
  * loan's own regular payment belongs here.
  */
 export function generatePotOutgoingTransactions(data: AppDataV2, pot: Pot, rangeStart: Date, rangeEnd: Date): Omit<Transaction, 'id'>[] {
-  const { templates, loans } = potBillsAndLoans(data, pot.id)
+  const { templates, loans, creditCards } = potBillsAndLoans(data, pot.id)
   const results: Omit<Transaction, 'id'>[] = []
 
   for (const template of templates) {
@@ -269,6 +272,12 @@ export function generatePotOutgoingTransactions(data: AppDataV2, pot: Pot, range
   )
   for (const loan of [...loans, ...overpaymentOnlyLoans]) {
     results.push(...generateLoanPaymentTransactions(loan, rangeStart, rangeEnd).filter((t) => t.location === 'pot' && t.potId === pot.id))
+  }
+  // 2026-09-16 — a card's minimum payment funded from this pot. The full
+  // transaction list goes in: the card's simulated balance must see every
+  // spend and payment against the card, wherever it was paid from.
+  for (const card of creditCards) {
+    results.push(...generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, data.transactions).filter((t) => t.location === 'pot' && t.potId === pot.id))
   }
   return results
 }
@@ -442,7 +451,7 @@ export function schedulePotPreviewWindow(pot: Pot, asOfDate: Date): { start: Dat
 
 export interface PotScheduleRow {
   date: string
-  type: 'pot_deposit' | 'pot_withdrawal' | 'bill_payment' | 'loan_payment'
+  type: 'pot_deposit' | 'pot_withdrawal' | 'bill_payment' | 'loan_payment' | 'credit_card_payment'
   amount: number
   status: 'cleared' | 'pending'
   note?: string
@@ -462,7 +471,11 @@ export function buildPotScheduleRows(data: AppDataV2, pot: Pot, asOfDate: Date =
 
   const generatedDeposits = generatePotDepositTransactions(pot, start, end, data.recurringTemplates, payCycle).filter((t) => !storedKeys.has(`${t.type}:${t.sourceId ?? ''}:${t.date}`))
   const generatedWithdrawals = generatePotWithdrawalTransferTransactions(pot, start, end, data.recurringTemplates, payCycle).filter((t) => !storedKeys.has(`${t.type}:${t.sourceId ?? ''}:${t.date}`))
-  const generatedOutgoing = generatePotOutgoingTransactions(data, pot, start, end).filter((t) => !storedKeys.has(`${t.type}:${t.sourceId ?? ''}:${t.date}`))
+  // Card minimum payments carry no sourceId, so they dedupe on the card id (dedupeKey) instead.
+  const storedCardKeys = new Set(potStored.map(dedupeKey).filter((k): k is string => k !== null))
+  const generatedOutgoing = generatePotOutgoingTransactions(data, pot, start, end).filter((t) =>
+    t.type === 'credit_card_payment' ? !storedCardKeys.has(dedupeKey(t) ?? '') : !storedKeys.has(`${t.type}:${t.sourceId ?? ''}:${t.date}`),
+  )
 
   const rows: PotScheduleRow[] = [
     // `toLocation.type === 'pot'` alone isn't enough to tell deposit from
@@ -479,7 +492,7 @@ export function buildPotScheduleRows(data: AppDataV2, pot: Pot, asOfDate: Date =
     })),
     ...generatedDeposits.map((t) => ({ date: t.date, type: 'pot_deposit' as const, amount: t.amount, status: 'pending' as const, note: t.note })),
     ...generatedWithdrawals.map((t) => ({ date: t.date, type: 'pot_withdrawal' as const, amount: t.amount, status: 'pending' as const, note: t.note })),
-    ...generatedOutgoing.map((t) => ({ date: t.date, type: t.type as 'bill_payment' | 'loan_payment', amount: t.amount, status: 'pending' as const, note: t.note })),
+    ...generatedOutgoing.map((t) => ({ date: t.date, type: t.type as 'bill_payment' | 'loan_payment' | 'credit_card_payment', amount: t.amount, status: 'pending' as const, note: t.note })),
   ]
   return rows.sort((a, b) => a.date.localeCompare(b.date))
 }

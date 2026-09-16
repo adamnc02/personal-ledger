@@ -44,8 +44,12 @@ const REVEAL_WIDTH = 84
 // which is an SVGElement, NOT an HTMLElement (a real, separate branch of
 // the DOM class hierarchy). `Element.closest` exists identically on both
 // HTML and SVG elements.
+//
+// 2026-09-16 (Adam, UAT): `[data-no-swipe]` opts a region out too. A scrollable
+// list inside a swipeable row (the pot's "What this pot pays" checklist) made
+// the first touch ambiguous between scrolling the list and swiping to delete.
 function isNativeControlTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && !!target.closest('select, input, textarea')
+  return target instanceof Element && !!target.closest('select, input, textarea, [data-no-swipe]')
 }
 
 // Anything less than this many px of horizontal movement is still treated

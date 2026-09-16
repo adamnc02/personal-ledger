@@ -191,7 +191,10 @@ export function reconcilePersonReferences(data: AppDataV2): AppDataV2 {
         ? { ...pc, followsIncomeSource: { type: 'salary' } }
         : pc,
     ),
-    creditCards: data.creditCards.map((c) => (validIds.has(c.ownerId) ? c : { ...c, ownerId: fallbackOwnerId })),
+    creditCards: data.creditCards
+      .map((c) => (validIds.has(c.ownerId) ? c : { ...c, ownerId: fallbackOwnerId }))
+      // 2026-09-16 — a minimum payment paid from a pot that no longer exists goes back to Personal.
+      .map((c) => (c.location === 'pot' && !validPotIds.has(c.potId ?? '') ? { ...c, location: 'personal' as const, potId: undefined } : c)),
     // Closes the gap flagged in the UI consistency review (§3/§5 of the
     // data-model review) — these two were the only top-level,
     // personId-owned entities NOT covered here, silently left pointing at

@@ -157,6 +157,7 @@ export function Loans() {
     addCreditCard,
     updateCreditCard,
     updateCreditCardMinimumCharge,
+    assignCreditCardLocation,
     removeCreditCard,
     logCreditCardLumpPayment,
     addCategory,
@@ -427,6 +428,8 @@ export function Loans() {
                 onToggle={() => setExpandedCard(isOpen ? null : card.id)}
                 onRemove={() => removeCreditCard(card.id)}
                 people={data.people}
+                pots={data.pots}
+                onAssignLocation={(location, effectiveFrom, potId) => assignCreditCardLocation(card.id, location, effectiveFrom, potId)}
                 categories={visibleCategoriesFor(data, card.categoryId)}
                 transactions={data.transactions}
                 onAddCategory={addCategory}
@@ -624,6 +627,8 @@ function CreditCardRow({
   onToggle,
   onRemove,
   people,
+  pots,
+  onAssignLocation,
   categories,
   transactions,
   onAddCategory,
@@ -642,6 +647,8 @@ function CreditCardRow({
   onToggle: () => void
   onRemove: () => void
   people: { id: string; name: string }[]
+  pots: Pot[]
+  onAssignLocation: (location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   transactions: Transaction[]
   onAddCategory: (name: string) => { id: string }
@@ -715,6 +722,8 @@ function CreditCardRow({
             isOpen={isOpen}
             transactions={transactions}
             people={people}
+            pots={pots}
+            onAssignLocation={onAssignLocation}
             categories={categories}
             onAddCategory={onAddCategory}
             onSave={(u) => {
@@ -1144,6 +1153,8 @@ function CreditCardEditPanel({
   storedCard,
   transactions,
   people,
+  pots,
+  onAssignLocation,
   categories,
   onAddCategory,
   onSave,
@@ -1158,6 +1169,9 @@ function CreditCardEditPanel({
   storedCard: CreditCard // as persisted — what the draft is seeded from and saved back to
   transactions: Transaction[]
   people: { id: string; name: string }[]
+  pots: Pot[]
+  /** 2026-09-16 — where the minimum payment is paid from, from a chosen payment (see CreditCard.location). */
+  onAssignLocation: (location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>>) => void
@@ -1198,6 +1212,20 @@ function CreditCardEditPanel({
   const { changeCardPaymentDay } = useLedgerData()
   const [choosingPaymentDayFrom, setChoosingPaymentDayFrom] = useState(false)
   const paymentDayOccurrences = recentAndUpcomingCardPaymentDates(storedCard, new Date())
+  // 2026-09-16 (Adam-reported) — moving the minimum payment to a pot uses the
+  // same "which payment → confirm → save" steps as a loan's location change,
+  // and shares the picker with a payment-day change made in the same save.
+  const draftLocation = draft.location ?? 'personal'
+  const storedLocation = storedCard.location ?? 'personal'
+  const locationChanged = draftLocation !== storedLocation || (draftLocation === 'pot' && draft.potId !== storedCard.potId)
+  const paymentDayChanged = draft.paymentDayOfMonth !== storedCard.paymentDayOfMonth
+  const cardLocationLabel = (location: 'personal' | 'pot', potId: string | undefined) => (location === 'pot' ? pots.find((p) => p.id === potId)?.name ?? 'a pot' : 'Personal')
+
+  /** Everything except the location (and, unless told otherwise, the payment day), which the chosen payment applies. One onSave call: the row collapses on each one. */
+  function saveFieldsKeepingSchedule(paymentDayOfMonth = storedCard.paymentDayOfMonth) {
+    const { location: _l, potId: _p, locationEffectiveFrom: _e, locationHistory: _h, ...rest } = draft
+    onSave({ ...rest, paymentDayOfMonth })
+  }
 
   useEffect(() => {
     if (overpaymentPrefill) onPrefillConsumed()
@@ -1349,37 +1377,53 @@ function CreditCardEditPanel({
           of what's picked here — see groupingCategoryId in Home.tsx. */}
       <CategoryPicker categories={categories} value={draft.categoryId} onChange={(categoryId) => update({ categoryId })} onAddCategory={onAddCategory} />
 
-      {people.length > 1 && (
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-[var(--color-ink-muted)]">Owner</span>
-          <select
-            value={draft.ownerId}
-            onChange={(e) => update({ ownerId: e.target.value })}
-            className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-          >
-            {people.map((p) => (
-              <option key={p.id} value={p.id} style={{ color: '#000' }}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
+      {/* 2026-09-16 (Adam-reported) — "Location" (Personal or one of the
+          owner's pots) for the minimum payment, the same flat list a loan
+          uses. No Joint for a card. LocationEditor also renders the Owner
+          field this form used to draw itself, and hides itself when there's
+          nothing to choose. */}
+      <LocationEditor
+        people={people}
+        pots={pots}
+        canBeJoint={false}
+        location={draftLocation}
+        ownerId={draft.ownerId}
+        potId={draft.potId}
+        payee=""
+        payeeSharePercent={100}
+        onChange={(patch) =>
+          update({
+            location: patch.location === 'pot' ? 'pot' : 'personal',
+            potId: patch.location === 'pot' ? patch.potId : undefined,
+            ...(patch.ownerId ? { ownerId: patch.ownerId } : {}),
+          })
+        }
+      />
 
       {choosingPaymentDayFrom && (
         <EffectiveDatedChangeFlow
           occurrences={paymentDayOccurrences}
-          dateStepDescription={`${storedCard.name}'s payment day is changing from the ${ordinalDay(storedCard.paymentDayOfMonth)} to the ${ordinalDay(draft.paymentDayOfMonth)}. Which payment should this start from? Everything before it stays as it was.`}
-          buildChanges={() => [{ label: 'Payment day', from: `The ${ordinalDay(storedCard.paymentDayOfMonth)}`, to: `The ${ordinalDay(draft.paymentDayOfMonth)}` }]}
+          dateStepDescription={
+            paymentDayChanged
+              ? `${storedCard.name}'s payment day is changing from the ${ordinalDay(storedCard.paymentDayOfMonth)} to the ${ordinalDay(draft.paymentDayOfMonth)}. Which payment should this start from? Everything before it stays as it was.`
+              : `${storedCard.name}'s minimum payment is moving to ${cardLocationLabel(draftLocation, draft.potId)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`
+          }
+          buildChanges={() => [
+            ...(paymentDayChanged ? [{ label: 'Payment day', from: `The ${ordinalDay(storedCard.paymentDayOfMonth)}`, to: `The ${ordinalDay(draft.paymentDayOfMonth)}` }] : []),
+            ...(locationChanged ? [{ label: 'Minimum payment paid from', from: cardLocationLabel(storedLocation, storedCard.potId), to: cardLocationLabel(draftLocation, draft.potId) }] : []),
+          ]}
           affectsClearedBalance={(effectiveFrom) => effectiveFrom <= todayIso()}
           onCancelAll={() => {
             setChoosingPaymentDayFrom(false)
             onCancel()
           }}
           onCommit={(pickedDate) => {
-            // Everything else first, keeping the current payment day.
-            onSave({ ...draft, paymentDayOfMonth: storedCard.paymentDayOfMonth })
-            changeCardPaymentDay(storedCard.id, draft.paymentDayOfMonth, pickedDate)
+            // Everything else first, keeping the current payment day and
+            // location. The location rewrite runs before the re-date, so
+            // payments it moves are re-dated with everything else.
+            saveFieldsKeepingSchedule()
+            if (locationChanged) onAssignLocation(draftLocation, pickedDate, draftLocation === 'pot' ? draft.potId : undefined)
+            if (paymentDayChanged) changeCardPaymentDay(storedCard.id, draft.paymentDayOfMonth, pickedDate)
             setChoosingPaymentDayFrom(false)
           }}
         />
@@ -1387,8 +1431,14 @@ function CreditCardEditPanel({
       <FormButtonRow
         onCancel={onCancel}
         onSave={() => {
-          if (draft.paymentDayOfMonth !== storedCard.paymentDayOfMonth && paymentDayOccurrences.length > 0) {
+          if ((paymentDayChanged || locationChanged) && paymentDayOccurrences.length > 0) {
             setChoosingPaymentDayFrom(true)
+            return
+          }
+          if (locationChanged) {
+            // Nothing to anchor to yet: apply from today, as a loan does.
+            saveFieldsKeepingSchedule(draft.paymentDayOfMonth)
+            onAssignLocation(draftLocation, todayIso(), draftLocation === 'pot' ? draft.potId : undefined)
             return
           }
           onSave(draft)

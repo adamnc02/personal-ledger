@@ -428,7 +428,26 @@ export function generateMinimumPaymentTransactions(
   transactions: Transaction[] = [],
   onCycle?: (info: { dateIso: string; statementBalanceBeforePayment: number; workingBalanceBeforePayment: number }) => void,
 ): Omit<Transaction, 'id'>[] {
-  const generated = simulateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions, onCycle)
+  // BUGFIX (2026-09-16, Adam-reported: mum's Santander £91.24 due 14 Oct was
+  // missing from her Personal ledger, while Borrowing showed it). PROMPT-01's
+  // mechanism-6 fix (see buildCreditCardMinimumChargeRows) lived in ONE
+  // caller. projection.ts passes the current cycle's start as rangeStart, and
+  // her cycle starts on 14 Sep, the day her £228.07 payment cleared. The
+  // simulation's opening balance already has that payment deducted
+  // (cardBalanceAsOf is inclusive), then the 14 Sep cycle was charged again:
+  // £0 left on a 100% card, so no October row. Guarded here so every caller
+  // (projection, autoClear, nextMinimumChargeAmount, trends, cycle sections)
+  // gets it. Idempotent: callers that already start the day after pass a
+  // date with no stored payment on it. Compared as local ISO strings (toIso),
+  // never toISOString, which gives the previous day for a BST local midnight.
+  const rangeStartIso = toIso(rangeStart)
+  const paymentAlreadyInOpeningBalance = transactions.some(
+    (t) => t.creditCardId === card.id && t.type === 'credit_card_payment' && !t.sourceType && t.date === rangeStartIso,
+  )
+  const simulationStart = paymentAlreadyInOpeningBalance
+    ? new Date(rangeStart.getFullYear(), rangeStart.getMonth(), rangeStart.getDate() + 1)
+    : rangeStart
+  const generated = simulateMinimumPaymentTransactions(card, simulationStart, rangeEnd, transactions, onCycle)
   const from = card.scheduleFrom
   return from ? generated.filter((t) => t.date >= from) : generated
 }
@@ -797,7 +816,10 @@ function simulateMinimumPaymentTransactions(
           paymentMethod: 'direct_debit',
           status: 'pending',
           type: 'credit_card_payment',
-          location: 'personal',
+          // 2026-09-16 — a card's minimum payment can be paid from a Pot
+          // (CreditCard.location). Absent = Personal, as before.
+          location: card.location === 'pot' && card.potId ? 'pot' : 'personal',
+          potId: card.location === 'pot' && card.potId ? card.potId : undefined,
           ownerId: card.ownerId,
           creditCardId: card.id,
           // The card's own name, with "Minimum Charge" appended — without

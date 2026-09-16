@@ -21,7 +21,7 @@ import type {
 } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { categoryForTransfer, buildTransferTransaction, locationsEqual, locationTypeForTransfer, transferLocationLabel } from '../lib/transferLedger'
-import { reassignTransactionsForLocationChange, priorLocationEntry } from '../lib/locationChange'
+import { applyCreditCardLocationChange, reassignTransactionsForLocationChange, priorLocationEntry } from '../lib/locationChange'
 
 import type { Scenario } from '../types/models'
 import { defaultLedgerData, defaultPayCycleConfig, loadLedgerData, saveLedgerData } from '../lib/ledgerStorage'
@@ -320,6 +320,11 @@ interface LedgerContextValue {
   // settlement, which have their own, independent location handling (see
   // LoanRecurringOverpayment.location's comment, and
   // lib/ledgerLoans.ts's resolveRecurringOverpaymentSource).
+  // 2026-09-16 — where a credit card's MINIMUM PAYMENT is paid from
+  // (Personal or one of the owner's Pots), from a chosen payment. Stored
+  // minimum payments dated on/after it move too, cleared ones included, the
+  // same one-time rewrite assignLoanLocation does.
+  assignCreditCardLocation: (cardId: string, location: 'personal' | 'pot', effectiveFrom: string, potId?: string) => void
   assignLoanLocation: (
     loanId: string,
     location: BillLocation,
@@ -1090,6 +1095,10 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     })
   }
 
+  const assignCreditCardLocation: LedgerContextValue['assignCreditCardLocation'] = (cardId, location, effectiveFrom, potId) => {
+    setDataState((prev) => applyCreditCardLocationChange(prev, cardId, location, effectiveFrom, potId))
+  }
+
   const assignLoanLocation: LedgerContextValue['assignLoanLocation'] = (loanId, location, effectiveFrom, options) => {
     setDataState((prev) => {
       const loan = prev.loans.find((l) => l.id === loanId)
@@ -1216,6 +1225,7 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     logPotDeposit,
     logPotWithdrawal,
     assignRecurringTemplateLocation,
+    assignCreditCardLocation,
     assignLoanLocation,
     assignLoanRecurringOverpaymentLocation,
   }
