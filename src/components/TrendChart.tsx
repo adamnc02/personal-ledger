@@ -280,6 +280,8 @@ export interface SavingsPotPillChartProps {
   onActivePointChange?: (point: SavingsPotPillPoint | null) => void
 }
 
+const MAX_PILL_WIDTH = 24
+
 export function SavingsPotPillChart({ series, color, interactive = false, height = 140, onActivePointChange }: SavingsPotPillChartProps) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
@@ -294,8 +296,11 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
   // the stride exceeded WIDTH / n and the later columns rendered outside the viewBox —
   // invisible and unreachable. Not reachable at today's granularities; latent.
   const stride = points.length > 0 ? WIDTH / points.length : WIDTH
+  // Capped and centred in its slot: with few columns (a pot opened this cycle has ONE Year
+  // column) an uncapped pill spanned the whole chart and rendered as an ellipse. The slot, not
+  // the drawn pill, stays the touch target, so hit-testing below is unchanged.
   const barGap = Math.min(3, stride / 3)
-  const barWidth = stride - barGap
+  const barWidth = Math.min(MAX_PILL_WIDTH, stride - barGap)
 
   // Column heights (Adam, 2026-09-16 — corrects the first build): every
   // column's background track is full height and stands for the highest
@@ -367,7 +372,7 @@ export function SavingsPotPillChart({ series, color, interactive = false, height
     >
       {points.map((p, i) => {
         const h = Math.max(2, fillHeight(p.endBalance))
-        const x = i * stride
+        const x = i * stride + (stride - barWidth) / 2
         const y = height - padBottom - h
         const isActive = activeIndex === i
         return (

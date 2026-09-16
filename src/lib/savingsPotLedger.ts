@@ -732,7 +732,13 @@ export function buildSavingsPotTrendSeries(
   // 'year' — one column per pay cycle, current + 11 before it, offset-labelled.
   const cyclesDesc: { start: Date; end: Date }[] = [savingsPotCycleBounds(data, personId, asOfDate)]
   for (let i = 0; i < 11; i++) cyclesDesc.push(savingsPotCycleBounds(data, personId, addDays(cyclesDesc[cyclesDesc.length - 1].start, -1)))
-  const cyclesAsc = [...cyclesDesc].reverse() // oldest..current
+  // Cycles that ended before the pot opened are hidden (Adam, 2026-09-16), matching This Cycle
+  // (starts at openingDate) and Last 6 Cycles (starts at the week it opened). Previously they
+  // rendered as full columns, because savingsPotBalanceAsOf returns openingBalance for any date,
+  // including dates before the pot existed. The current cycle is always kept.
+  const openingIso = pot.openingDate
+  const allCyclesAsc = [...cyclesDesc].reverse() // oldest..current
+  const cyclesAsc = allCyclesAsc.filter((c, i) => i === allCyclesAsc.length - 1 || toIso(c.end) >= openingIso)
   const rangeStart = new Date(Math.max(cyclesAsc[0].start.getTime(), parseLocalDate(pot.openingDate).getTime()))
   const rangeEnd = cyclesAsc[cyclesAsc.length - 1].end
   const activity = savingsPotActivityForRange(pot, stored, rangeStart, rangeEnd, transferTemplates, payCycle)

@@ -142,6 +142,19 @@ for (const granularity of ['this_cycle', 'last_6_cycles', 'year'] as const) {
 const peakDay = buildSavingsPotTrendSeries(peakData, { ...pot, openingBalance: 0 }, 'this_cycle', asOfDate).points.find((p) => p.periodStart === '2026-09-08')!
 check('Intraday peak: that day\'s column still fills to its £700 end balance', peakDay.endBalance, 700)
 
+// ---- Year hides cycles that ended before the pot opened (Adam, 2026-09-16) ----
+// Calendar-month cycles; asOf 25 Sep 2026. A pot opened 15 Jun 2026 keeps Jun..Sep (4 columns), offsets -3..0.
+const juneOpened = { ...pot, openingDate: '2026-06-15' }
+const juneYear = buildSavingsPotTrendSeries({ ...data, savingsPots: [juneOpened], transactions: [] }, juneOpened, 'year', asOfDate)
+check('Year, pot opened 15 Jun: only cycles from the one containing the opening date', juneYear.points.map((p) => p.periodStart), ['2026-06-01', '2026-07-01', '2026-08-01', '2026-09-01'])
+check('Year, pot opened 15 Jun: offsets still count back from the current cycle', juneYear.points.map((p) => p.axisLabel), ['-3', '-2', '-1', '0'])
+check('Year, pot opened 15 Jun: in/out still reconciles', juneYear.points.every((p) => round2(p.moneyIn - p.moneyOut) === p.netChange), true)
+const todayOpened = { ...pot, openingDate: '2026-09-25' }
+const todayYear = buildSavingsPotTrendSeries({ ...data, savingsPots: [todayOpened], transactions: [] }, todayOpened, 'year', asOfDate)
+check('Year, pot opened today: just the current cycle, labelled 0', todayYear.points.map((p) => p.axisLabel), ['0'])
+const cycleStartOpened = { ...pot, openingDate: '2026-08-31' }
+check('Year, pot opened on the last day of a cycle: that cycle is kept', buildSavingsPotTrendSeries({ ...data, savingsPots: [cycleStartOpened], transactions: [] }, cycleStartOpened, 'year', asOfDate).points[0].periodStart, '2026-08-01')
+
 // ---- Adam's real backup — the acceptance case for Bug B ----
 // His `Savings` pot (3W_cgSam) opened 2026-09-12 with £242.85; `uhyY_plA` moved £242 out to personal
 // on 2026-09-13. That is the drop he described; its period must name it as £242 out on every granularity.
@@ -164,6 +177,7 @@ if (backup) {
     const drop = series.points.find((p) => p.periodStart === periodStart)
     check(`Real backup (${granularity}): the period holding 13 Sep shows £242 withdrawn, £242 out, £0 in`, drop && [drop.netChange, drop.moneyOut, drop.moneyIn], [-242, 242, 0])
     check(`Real backup (${granularity}): full column height = £242.85, the most the pot held`, series.peakBalance, 242.85)
+    if (granularity === 'year') check('Real backup (year): pot opened 12 Sep 2026, so only the current cycle shows — no £242.85 columns back to Sep 2025', series.points.map((p) => [p.axisLabel, p.periodStart, p.endBalance]), [['0', '2026-08-28', 0.85]])
   }
 }
 
