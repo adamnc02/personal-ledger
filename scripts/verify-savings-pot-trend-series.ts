@@ -1,5 +1,7 @@
-import { buildSavingsPotTrendSeries, newSavingsPot } from '../src/lib/savingsPotLedger'
-import { defaultPayCycleConfig } from '../src/lib/ledgerStorage'
+import { readFileSync } from 'fs'
+import { homedir } from 'os'
+import { buildSavingsPotTrendSeries, newSavingsPot, type SavingsPotTrendSeries } from '../src/lib/savingsPotLedger'
+import { defaultPayCycleConfig, parseLedgerBackupJson } from '../src/lib/ledgerStorage'
 import type { AppDataV2, Person, SavingsPot, Transaction } from '../src/types/ledger'
 
 let failures = 0
@@ -70,6 +72,74 @@ check('Year produces 12 columns (current pay cycle + 11 before it)', year.points
 check('The LAST column (current cycle) is offset 0', year.points[year.points.length - 1].axisLabel, '0')
 check('The column before it is offset -1', year.points[year.points.length - 2].axisLabel, '-1')
 check('The final column\'s end balance matches This Cycle\'s own final balance', year.points[year.points.length - 1].endBalance, thisCycle.points[thisCycle.points.length - 1].endBalance)
+
+// ---- PROMPT-04 Bug B (2026-09-16): every point carries the gross money in/out behind its netChange ----
+// The single assertion that catches both mis-bucketing and off-by-one period boundaries: for every
+// point on every granularity, moneyIn - moneyOut must equal that point's own netChange.
+const round2 = (n: number) => Math.round(n * 100) / 100
+function assertFlowsReconcile(label: string, series: SavingsPotTrendSeries) {
+  const bad = series.points.filter((p) => round2(p.moneyIn - p.moneyOut) !== p.netChange || p.moneyIn < 0 || p.moneyOut < 0)
+  check(`${label}: every point's moneyIn - moneyOut equals its netChange (${series.points.length} points)`, bad.map((p) => `${p.periodStart}: in ${p.moneyIn} out ${p.moneyOut} net ${p.netChange}`), [])
+}
+function assertFlowTotals(label: string, series: SavingsPotTrendSeries, expectedIn: number, expectedOut: number) {
+  check(`${label}: total in across all points`, round2(series.points.reduce((s, p) => s + p.moneyIn, 0)), expectedIn)
+  check(`${label}: total out across all points`, round2(series.points.reduce((s, p) => s + p.moneyOut, 0)), expectedOut)
+}
+assertFlowsReconcile('This Cycle', thisCycle)
+assertFlowsReconcile('Last 6 Cycles', last6)
+assertFlowsReconcile('Year', year)
+// Each granularity sees both fixture rows exactly once — not zero (dropped at a boundary), not twice (double-bucketed).
+assertFlowTotals('This Cycle', thisCycle, 100, 40)
+assertFlowTotals('Last 6 Cycles', last6, 100, 40)
+assertFlowTotals('Year', year, 100, 40)
+check('Deposit day: £100 in, £0 out', [depositDay.moneyIn, depositDay.moneyOut], [100, 0])
+check('Withdrawal day: £0 in, £40 out', [withdrawalDay.moneyIn, withdrawalDay.moneyOut], [0, 40])
+const quietDay = thisCycle.points.find((p) => p.periodStart === '2026-09-10')!
+check('A period with no activity carries zero in and zero out', [quietDay.moneyIn, quietDay.moneyOut], [0, 0])
+
+// A deposit and withdrawal that cancel: net 0, but the in/out figures must still show both.
+const cancelData: AppDataV2 = {
+  ...data,
+  transactions: [
+    { id: 'c1', date: '2026-09-08', amount: 75, direction: 'out', categoryId: 'category-savings', paymentMethod: 'bank_transfer', status: 'cleared', type: 'savings_deposit', location: 'personal', ownerId: 'me', savingsPotId: 'sp-1' },
+    { id: 'c2', date: '2026-09-08', amount: 75, direction: 'in', categoryId: 'category-savings', paymentMethod: 'bank_transfer', status: 'cleared', type: 'savings_withdrawal', location: 'personal', ownerId: 'me', savingsPotId: 'sp-1' },
+  ],
+}
+const cancelDay = buildSavingsPotTrendSeries(cancelData, pot, 'this_cycle', asOfDate).points.find((p) => p.periodStart === '2026-09-08')!
+check('Same-day deposit + withdrawal: net 0 but £75 in and £75 out', [cancelDay.netChange, cancelDay.moneyIn, cancelDay.moneyOut], [0, 75, 75])
+
+// Boundary: a row on the LAST day of a week and one on the FIRST day of the next must land in different weeks.
+const boundaryData: AppDataV2 = {
+  ...data,
+  transactions: [
+    { id: 'b1', date: '2026-09-13', amount: 10, direction: 'out', categoryId: 'category-savings', paymentMethod: 'bank_transfer', status: 'cleared', type: 'savings_deposit', location: 'personal', ownerId: 'me', savingsPotId: 'sp-1' },
+    { id: 'b2', date: '2026-09-14', amount: 20, direction: 'out', categoryId: 'category-savings', paymentMethod: 'bank_transfer', status: 'cleared', type: 'savings_deposit', location: 'personal', ownerId: 'me', savingsPotId: 'sp-1' },
+  ],
+}
+const boundaryWeeks = buildSavingsPotTrendSeries(boundaryData, pot, 'last_6_cycles', asOfDate)
+assertFlowsReconcile('Week boundary (Sun 13 / Mon 14 Sep)', boundaryWeeks)
+check('Sunday 13 Sep lands in w/c 7 Sep, Monday 14 Sep in w/c 14 Sep', ['2026-09-07', '2026-09-14'].map((d) => boundaryWeeks.points.find((p) => p.periodStart === d)?.moneyIn), [10, 20])
+
+// ---- Adam's real backup — the acceptance case for Bug B ----
+// His `Savings` pot (3W_cgSam) opened 2026-09-12 with £242.85; `uhyY_plA` moved £242 out to personal
+// on 2026-09-13. That is the drop he described; its period must name it as £242 out on every granularity.
+const backupPath = `${homedir()}/Downloads/finance-ledger-backup-2026-09-15.json`
+let backup: AppDataV2 | null = null
+try {
+  backup = parseLedgerBackupJson(readFileSync(backupPath, 'utf8'))
+} catch {
+  console.log(`(skipped real-backup checks — ${backupPath} not found)`)
+}
+if (backup) {
+  const realPot = backup.savingsPots.find((p) => p.id === '3W_cgSam')!
+  const realAsOf = new Date(2026, 8, 16)
+  for (const [granularity, periodStart] of [['this_cycle', '2026-09-13'], ['last_6_cycles', '2026-09-07'], ['year', '2026-08-28']] as const) {
+    const series = buildSavingsPotTrendSeries(backup, realPot, granularity, realAsOf)
+    assertFlowsReconcile(`Real backup (${granularity})`, series)
+    const drop = series.points.find((p) => p.periodStart === periodStart)
+    check(`Real backup (${granularity}): the period holding 13 Sep shows £242 withdrawn, £242 out, £0 in`, drop && [drop.netChange, drop.moneyOut, drop.moneyIn], [-242, 242, 0])
+  }
+}
 
 if (failures > 0) {
   console.log(`\n${failures} check(s) FAILED.`)

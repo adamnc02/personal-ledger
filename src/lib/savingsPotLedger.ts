@@ -321,12 +321,29 @@ export function savingsPotBalanceAsOf(pot: SavingsPot, activity: Transaction[], 
     .sort((a, b) => a.date.localeCompare(b.date))
 
   let balance = pot.openingBalance
-  for (const t of relevant) {
-    if (t.type === 'savings_deposit' || t.type === 'savings_interest') balance += t.amount
-    else if (t.type === 'savings_withdrawal') balance -= t.amount
-    else if (t.type === 'transfer') balance += savingsPotSignedAmount(t, pot.id)
-  }
+  for (const t of relevant) balance += savingsPotActivityDelta(t, pot.id)
   return round2(balance)
+}
+
+/** How one activity row moves this pot's balance — positive in, negative out, 0 for a type that doesn't touch the balance. The single rule both savingsPotBalanceAsOf and the trend series' in/out totals use, so the two can't disagree. */
+function savingsPotActivityDelta(t: Transaction, savingsPotId: string): number {
+  if (t.type === 'savings_deposit' || t.type === 'savings_interest') return t.amount
+  if (t.type === 'savings_withdrawal') return -t.amount
+  if (t.type === 'transfer') return savingsPotSignedAmount(t, savingsPotId)
+  return 0
+}
+
+/** Money in and out of the pot across [startIso, endIso] inclusive, from the same rows and filter savingsPotBalanceAsOf folds — so for any period, moneyIn - moneyOut equals the change in balance across it. The opening balance is not a flow. */
+function savingsPotFlowsBetween(pot: SavingsPot, activity: Transaction[], startIso: string, endIso: string): { moneyIn: number; moneyOut: number } {
+  let moneyIn = 0
+  let moneyOut = 0
+  for (const t of activity) {
+    if (!transactionTouchesSavingsPot(t, pot.id) || t.date < pot.openingDate || t.date < startIso || t.date > endIso) continue
+    const delta = savingsPotActivityDelta(t, pot.id)
+    if (delta > 0) moneyIn += delta
+    else moneyOut -= delta
+  }
+  return { moneyIn: round2(moneyIn), moneyOut: round2(moneyOut) }
 }
 
 // ── Interest generation ──────────────────────────────────────────────
@@ -561,6 +578,9 @@ export interface SavingsPotPillPoint {
   periodEnd: string
   endBalance: number
   netChange: number // positive = net saved this period, negative = net withdrawn
+  /** Gross money in / out behind netChange (PROMPT-04 Bug B, 2026-09-16): a period can net to £0 or a small figure while hiding a large deposit and withdrawal. Both positive; moneyIn - moneyOut === netChange. */
+  moneyIn: number
+  moneyOut: number
   axisLabel: string // this point's own natural label — the chart component caps how many are actually SHOWN (max 4), per the prompt doc's table
   tooltipLabel: string // fuller label for the tooltip (e.g. "w/c 1 Sep · w/e 7 Sep", or "Jul 2026")
 }
@@ -634,7 +654,7 @@ export function buildSavingsPotTrendSeries(
       const endBalance = savingsPotBalanceAsOf(pot, activity, parseLocalDate(date))
       const netChange = round2(endBalance - prevBalance)
       prevBalance = endBalance
-      return { periodStart: date, periodEnd: date, endBalance, netChange, axisLabel: shortDateLabel(date), tooltipLabel: shortDateLabel(date) }
+      return { periodStart: date, periodEnd: date, endBalance, netChange, ...savingsPotFlowsBetween(pot, activity, date, date), axisLabel: shortDateLabel(date), tooltipLabel: shortDateLabel(date) }
     })
     return { granularity, points }
   }
@@ -667,6 +687,7 @@ export function buildSavingsPotTrendSeries(
         periodEnd: endIso,
         endBalance,
         netChange,
+        ...savingsPotFlowsBetween(pot, activity, startIso, endIso),
         axisLabel: `w/c ${shortDateLabel(startIso)}`,
         tooltipLabel: `w/c ${shortDateLabel(startIso)} · w/e ${shortDateLabel(endIso)}`,
       }
@@ -688,11 +709,13 @@ export function buildSavingsPotTrendSeries(
     const netChange = round2(endBalance - prevBalance)
     prevBalance = endBalance
     const startIso = toIso(cycle.start)
+    const endIso = toIso(cycle.end)
     return {
       periodStart: startIso,
-      periodEnd: toIso(cycle.end),
+      periodEnd: endIso,
       endBalance,
       netChange,
+      ...savingsPotFlowsBetween(pot, activity, startIso, endIso),
       axisLabel: `${offset}`,
       tooltipLabel: `${MONTH_ABBR[cycle.start.getMonth()]} ${cycle.start.getFullYear()}`,
     }
