@@ -31,7 +31,11 @@ import { computeMinimumPaymentAmount, withLiveBalances } from './creditCards'
 const round2 = (n: number) => Math.round(n * 100) / 100
 import { toLocalIsoDate as toIso, parseLocalDate } from './date'
 
-function monthlyEquivalentCost(template: RecurringTemplate): number {
+// Exported for lib/scenarios.ts's savings-pot recurring-deposit-change
+// action, which needs the same weekly/every_n_weeks/quarterly/annual →
+// monthly conversion this file already does for bills, to compare an
+// existing transfer template's amount against a hypothetical new one.
+export function monthlyEquivalentCost(template: RecurringTemplate): number {
   switch (template.frequency) {
     case 'weekly':
       return round2(template.amount * (52 / 12))
@@ -153,5 +157,12 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
     creditCards: withLiveBalances(ledgerData.creditCards.filter((c) => c.active), ledgerData.transactions),
     scenarios: ledgerData.scenarios,
     primaryPersonId: ledgerData.primaryPersonId,
+
+    // Savings pots (PROMPT-07 Part 1) — real shapes, not adapted. See
+    // AppData.savingsPots's own comment for why.
+    savingsPots: ledgerData.savingsPots.filter((p) => p.active),
+    transactions: ledgerData.transactions,
+    recurringTemplates: ledgerData.recurringTemplates,
+    payCycles: ledgerData.payCycles,
   }
 }

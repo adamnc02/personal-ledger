@@ -1,11 +1,14 @@
-import { addMonths } from 'date-fns'
+import { addMonths, addYears, differenceInCalendarMonths } from 'date-fns'
 import type { AppData, Bill, Loan, Scenario, ScenarioTargetKind } from '../types/models'
-import type { CreditCard } from '../types/ledger'
+import type { CreditCard, RecurringTemplate } from '../types/ledger'
 import { summarizeLoan, currentLoanMonthlyCost, estimateSettlementFigure, simulateScenarioLoan, scheduleEntryAsOf, type ScenarioLoanEvent } from './loans'
 import { computeMinimumPaymentAmount, simulateCardPayoffMonths } from './creditCards'
 import { costForPerson } from './bills'
 import { calculateNetSalary } from './tax'
 import { todayIso, toLocalIsoDate, parseLocalDate } from './date'
+import { monthlyEquivalentCost } from './legacyBridge'
+import { savingsPotBalanceAsOf, projectedBalanceAt, projectedTargetDate } from './savingsPotLedger'
+import { SAVINGS_CATEGORY_ID } from '../types/ledger'
 
 export interface LoanImpact {
   // Despite the name (kept for minimal disruption to existing call sites),
@@ -42,6 +45,41 @@ export interface SalaryChangeImpact {
   delta: number
 }
 
+// PROMPT-07 Part 1 — a savings pot lump sum, withdrawal, or recurring-
+// deposit-amount change. Unlike LoanImpact, these figures never depend
+// on which person is "viewing" (a pot belongs to exactly one person, so
+// its balance/projection is the same fact from anyone's screen) — only
+// whether the recurring-deposit-change action's monthly cost counts
+// toward THIS view's available cash differs, same rule salary_change
+// already uses (personId === the pot owner).
+export interface SavingsPotImpact {
+  savingsPotId: string
+  potName: string
+  personId: string
+  kind: 'lump_sum' | 'withdrawal' | 'recurring_deposit_change'
+  balanceNow: number
+  // Immediate balance change — unchanged from balanceNow for
+  // recurring_deposit_change, since nothing lands today.
+  balanceAfter: number
+  // A fixed 12-month projection horizon, folding in the real transfer
+  // templates + pay cycle (Batch 21 — see APP-KNOWLEDGE.md §1.13a) so a
+  // follows-payday deposit isn't silently dropped from the "before"
+  // figure either.
+  projectedAtDate: string
+  projectedBalanceBefore: number
+  projectedBalanceAfter: number
+  // Only set when the pot has a targetAmount — null otherwise, never a
+  // fabricated date.
+  originalTargetDate: string | null
+  newTargetDate: string | null
+  // Positive = reaches the target sooner, negative = later (a
+  // withdrawal can push it back). Always 0 when the pot has no target.
+  monthsSaved: number
+  // recurring_deposit_change only.
+  oldRecurringMonthlyAmount?: number
+  newRecurringMonthlyAmount?: number
+}
+
 export interface ScenarioImpact {
   oneOffCashImpact: number // one-time proceeds/costs, including any lump sum beyond what a loan/card needed
   monthlyAvailableBefore: number
@@ -49,6 +87,7 @@ export interface ScenarioImpact {
   monthlyImpact: number // recurring monthly change, from loans, cards, new/cancelled costs, or a salary change
   loanImpacts: LoanImpact[]
   salaryChangeImpact: SalaryChangeImpact | null
+  savingsPotImpacts: SavingsPotImpact[]
 }
 
 /** A credit card's monthly cost has no location/split concept (CreditCard.ownerId is the sole owner, always) — so unlike a loan/bill this is either the full amount or nothing, never a partial share. */
@@ -67,6 +106,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
   let oneOffCashImpact = 0
   let monthlyImpact = 0
   const loanImpacts: LoanImpact[] = []
+  const savingsPotImpacts: SavingsPotImpact[] = []
   let salaryChangeImpact: SalaryChangeImpact | null = null
 
   // All keyed by `${kind}:${id}` so a loan and a credit card can never
@@ -261,6 +301,70 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         salaryChangeImpact = { personId: targetPersonId, personName: person.name, oldNetMonthly: oldNetPerPeriod, newNetMonthly: newNetPerPeriod, delta }
         // Only affects the available-cash total for the person actually viewing this scenario
         if (targetPersonId === personId) monthlyImpact += delta
+      }
+    } else if (action.type === 'savings_pot_lump_sum' || action.type === 'savings_pot_withdrawal' || action.type === 'savings_pot_recurring_deposit_change') {
+      const pot = data.savingsPots.find((p) => p.id === action.savingsPotId)
+      if (!pot) continue
+
+      const today = new Date()
+      const horizon = addYears(today, 1)
+      const payCycle = data.payCycles.find((c) => c.personId === pot.personId)
+      const balanceNow = round2(savingsPotBalanceAsOf(pot, data.transactions, today))
+
+      if (action.type === 'savings_pot_lump_sum') {
+        const balanceAfter = round2(balanceNow + action.value)
+        oneOffCashImpact -= action.value
+        savingsPotImpacts.push(
+          buildSavingsPotImpact(pot, 'lump_sum', balanceNow, balanceAfter, today, horizon, data.transactions, data.recurringTemplates, payCycle),
+        )
+      } else if (action.type === 'savings_pot_withdrawal') {
+        const applied = round2(Math.min(action.value, balanceNow))
+        const balanceAfter = round2(balanceNow - applied)
+        oneOffCashImpact += applied
+        savingsPotImpacts.push(
+          buildSavingsPotImpact(pot, 'withdrawal', balanceNow, balanceAfter, today, horizon, data.transactions, data.recurringTemplates, payCycle),
+        )
+      } else {
+        // recurring_deposit_change — find the pot's existing transfer-in
+        // template, if any; build a hypothetical templates array with its
+        // amount replaced (or a new template added if the pot has none
+        // yet), used only for this action's own projections below.
+        const existing = data.recurringTemplates.find(
+          (t) => t.kind === 'transfer' && t.active && t.transferTo?.type === 'savings' && t.transferTo.savingsPotId === pot.id,
+        )
+        const oldMonthly = existing ? monthlyEquivalentCost(existing) : 0
+        const newMonthly = action.value
+        const hypotheticalTemplate: RecurringTemplate = existing
+          ? { ...existing, amount: action.value }
+          : {
+              id: `action:${action.id}`,
+              name: `${pot.name} deposit (what-if)`,
+              amount: action.value,
+              categoryId: SAVINGS_CATEGORY_ID,
+              paymentMethod: 'bank_transfer',
+              frequency: 'monthly',
+              anchorDate: todayIso(),
+              location: 'personal',
+              ownerId: pot.personId,
+              payee: '',
+              payeeSharePercent: 100,
+              kind: 'transfer',
+              transferFrom: { type: 'personal' },
+              transferTo: { type: 'savings', savingsPotId: pot.id },
+              active: true,
+            }
+        const hypotheticalTemplates = existing
+          ? data.recurringTemplates.map((t) => (t.id === existing.id ? hypotheticalTemplate : t))
+          : [...data.recurringTemplates, hypotheticalTemplate]
+
+        const impact = buildSavingsPotImpact(pot, 'recurring_deposit_change', balanceNow, balanceNow, today, horizon, data.transactions, data.recurringTemplates, payCycle, hypotheticalTemplates)
+        impact.oldRecurringMonthlyAmount = oldMonthly
+        impact.newRecurringMonthlyAmount = newMonthly
+        savingsPotImpacts.push(impact)
+
+        // Counts against the OWNER's available cash only, same rule as
+        // salary_change's targetPersonId === personId check.
+        if (pot.personId === personId) monthlyImpact -= round2(newMonthly - oldMonthly)
       }
     }
   }
@@ -560,6 +664,55 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
     monthlyImpact: round2(monthlyImpact),
     loanImpacts,
     salaryChangeImpact,
+    savingsPotImpacts,
+  }
+}
+
+/**
+ * Builds one SavingsPotImpact record — the "before" projection always uses
+ * the REAL recurring templates; "after" uses `overrideTemplates` when
+ * given (recurring_deposit_change only), otherwise the same real
+ * templates with `balanceAfter` as the new starting point (lump_sum/
+ * withdrawal — nothing about the schedule itself changes, only today's
+ * balance). Always reuses savingsPotLedger.ts's own helpers — never
+ * re-derives balance/interest maths here (PROMPT-07's own instruction).
+ */
+function buildSavingsPotImpact(
+  pot: AppData['savingsPots'][number],
+  kind: SavingsPotImpact['kind'],
+  balanceNow: number,
+  balanceAfter: number,
+  today: Date,
+  horizon: Date,
+  transactions: AppData['transactions'],
+  realTemplates: AppData['recurringTemplates'],
+  payCycle: AppData['payCycles'][number] | undefined,
+  overrideTemplates?: AppData['recurringTemplates'],
+): SavingsPotImpact {
+  const afterTemplates = overrideTemplates ?? realTemplates
+  const afterStartBalance = overrideTemplates ? balanceNow : balanceAfter
+
+  const projectedBalanceBefore = round2(projectedBalanceAt(pot, balanceNow, transactions, today, horizon, realTemplates, payCycle))
+  const projectedBalanceAfter = round2(projectedBalanceAt(pot, afterStartBalance, transactions, today, horizon, afterTemplates, payCycle))
+
+  const hasTarget = Boolean(pot.targetAmount)
+  const originalTargetDate = hasTarget ? projectedTargetDate(pot, balanceNow, transactions, today, realTemplates, payCycle) : null
+  const newTargetDate = hasTarget ? projectedTargetDate(pot, afterStartBalance, transactions, today, afterTemplates, payCycle) : null
+  const monthsSaved = originalTargetDate && newTargetDate ? differenceInCalendarMonths(parseLocalDate(originalTargetDate), parseLocalDate(newTargetDate)) : 0
+
+  return {
+    savingsPotId: pot.id,
+    potName: pot.name,
+    personId: pot.personId,
+    kind,
+    balanceNow,
+    balanceAfter,
+    projectedAtDate: toLocalIsoDate(horizon),
+    projectedBalanceBefore,
+    projectedBalanceAfter,
+    originalTargetDate,
+    newTargetDate,
+    monthsSaved,
   }
 }
 
@@ -621,6 +774,11 @@ export function calculateHouseholdScenarioImpact(scenario: Scenario, data: AppDa
     monthlyImpact,
     loanImpacts: Array.from(loanImpactsByKey.values()),
     salaryChangeImpact: perPerson.find((r) => r.salaryChangeImpact)?.salaryChangeImpact ?? null,
+    // Unlike loanImpacts, these never depend on which person the
+    // per-person calc was run "for" (a pot belongs to one person — see
+    // SavingsPotImpact's own comment) — every entry is identical across
+    // perPerson, so the first is enough, not a sum.
+    savingsPotImpacts: perPerson[0]?.savingsPotImpacts ?? [],
   }
 }
 
