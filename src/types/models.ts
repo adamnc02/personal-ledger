@@ -1,5 +1,5 @@
 import type { PayFrequency, SalaryDeduction, StudentLoanPlan } from '../lib/tax'
-import type { CreditCard } from './ledger'
+import type { CreditCard, PayCycleConfig, RecurringTemplate, SavingsPot, Transaction } from './ledger'
 
 export interface Person {
   id: string
@@ -100,6 +100,17 @@ export type ScenarioActionType =
   | 'loan_overpayment' // a recurring extra amount on top of a loan or credit card's normal payment
   | 'salary_change' // hypothetical new gross annual salary, for a chosen person
   | 'purchase' // buying a one-off thing on a specific DATE — see purchaseImpact.ts
+  // Savings pot actions (PROMPT-07 Part 1, rebuilt against real savings
+  // pots after Q6's legacy savings-goal removal took out the old
+  // savings-lump-sum action — see DECISIONS-2026-09-15.md Q6). All three
+  // point at `savingsPotId`
+  // below and are modelled as happening TODAY (no `date` field, unlike
+  // pay_off_loan/loan_overpayment) — a pot deposit/withdrawal has no
+  // real-money settlement-timing sensitivity the way a loan lump sum
+  // does, so "if this happened now" is the simplest useful answer.
+  | 'savings_pot_lump_sum' // one-off deposit into a pot
+  | 'savings_pot_withdrawal' // one-off withdrawal from a pot, capped to its current balance
+  | 'savings_pot_recurring_deposit_change' // hypothetical new monthly amount for the pot's recurring transfer-in (added if none exists yet)
 
 // What kind of real thing a scenario action's target points at — a loan or
 // a credit card. Both are valid targets for pay_off_loan/exclude_loan/
@@ -153,6 +164,11 @@ export interface Scenario {
     // — so it's always treated as reduce_term regardless of this field.
     recastMode?: 'reduce_term' | 'reduce_payment'
     personId?: string // for 'salary_change' — whose salary this applies to (defaults to the viewer)
+    // Used by the three 'savings_pot_*' actions — which pot this action
+    // targets. The pot's own `personId` (in AppData.savingsPots) is what
+    // scopes the recurring-deposit-change action's monthly cash impact to
+    // its owner's view, mirroring salary_change's personId/viewer check.
+    savingsPotId?: string
     // Used by 'new_bill' and 'new_finance_agreement' — where the new cost sits and how it's split
     name?: string
     location?: BillLocation
@@ -182,4 +198,26 @@ export interface AppData {
   scenarios: Scenario[]
   // which person's "personal" view is currently active (the app's owner/user)
   primaryPersonId: string
+
+  // ── Savings pots (PROMPT-07 Part 1) ──────────────────────────────────
+  // Real SavingsPot/RecurringTemplate/Transaction/PayCycleConfig shapes,
+  // unlike the rest of this legacy AppData — reused as-is rather than
+  // adapted, because the balance/projection maths lives in
+  // savingsPotLedger.ts and scenarios.ts must call it directly, not
+  // re-derive it (Batch 21 lesson: a projection built without the real
+  // transfer templates AND the pay cycle silently drops
+  // follows-payday/follows-cycle-start deposits — see APP-KNOWLEDGE.md
+  // §1.13a). Active pots for BOTH people (household What-if scope), not
+  // just the primary person.
+  savingsPots: SavingsPot[]
+  // The full real transaction list — savingsPotBalanceAsOf/
+  // projectedBalanceAt/projectedTargetDate each filter it down to the one
+  // pot they're asked about internally, same as Home.tsx passes
+  // `data.transactions` wholesale.
+  transactions: Transaction[]
+  // Active recurring templates, so a pot's transfer-in template can be
+  // found (for the recurring-deposit-change action) and so the deposit/
+  // withdrawal generators see every transfer template touching a pot.
+  recurringTemplates: RecurringTemplate[]
+  payCycles: PayCycleConfig[]
 }

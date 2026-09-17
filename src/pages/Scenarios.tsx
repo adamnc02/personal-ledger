@@ -29,9 +29,22 @@ const ACTION_LABELS: Record<ScenarioActionType, string> = {
   loan_overpayment: 'Regular extra payment on a loan/credit card',
   salary_change: 'Salary change',
   purchase: 'Buy something',
+  savings_pot_lump_sum: 'Lump sum into a savings pot',
+  savings_pot_withdrawal: 'Withdrawal from a savings pot',
+  savings_pot_recurring_deposit_change: "Change a pot's recurring deposit",
 }
 
-const NEEDS_VALUE: ScenarioActionType[] = ['sell_asset', 'pay_off_loan', 'new_bill', 'loan_overpayment', 'salary_change', 'purchase']
+const NEEDS_VALUE: ScenarioActionType[] = [
+  'sell_asset',
+  'pay_off_loan',
+  'new_bill',
+  'loan_overpayment',
+  'salary_change',
+  'purchase',
+  'savings_pot_lump_sum',
+  'savings_pot_withdrawal',
+  'savings_pot_recurring_deposit_change',
+]
 const NEEDS_SPLIT: ScenarioActionType[] = ['new_bill', 'new_finance_agreement']
 // The only action type anchored to a real calendar date via purchaseDate
 // — see lib/purchaseImpact.ts for why a purchase needs one and nothing
@@ -55,7 +68,14 @@ const VALUE_LABELS: Partial<Record<ScenarioActionType, string>> = {
   loan_overpayment: 'Extra per month (£)',
   salary_change: 'New gross annual salary (£)',
   purchase: 'Cost (£)',
+  savings_pot_lump_sum: 'Lump sum (£)',
+  savings_pot_withdrawal: 'Withdrawal (£)',
+  savings_pot_recurring_deposit_change: 'New monthly deposit (£)',
 }
+
+// A pot has nowhere to send money without one picked — same reasoning as
+// REQUIRES_LOAN_TARGET.
+const REQUIRES_SAVINGS_POT_TARGET: ScenarioActionType[] = ['savings_pot_lump_sum', 'savings_pot_withdrawal', 'savings_pot_recurring_deposit_change']
 
 export function Scenarios() {
   const { data: ledgerData, addScenario, updateScenario, removeScenario } = useLedgerData()
@@ -621,6 +641,68 @@ function ImpactSummary({
         </div>
       ))}
 
+      {impact.savingsPotImpacts.map((si) => (
+        <div key={`${si.savingsPotId}-${si.kind}`} className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
+          <p className="text-sm font-medium text-[var(--color-ink)] mb-2">
+            {si.potName}
+            {si.kind === 'withdrawal' && (
+              <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-coral)' }}>
+                Withdrawal
+              </span>
+            )}
+            {si.kind === 'recurring_deposit_change' && (
+              <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-ink-faint)' }}>
+                Recurring deposit
+              </span>
+            )}
+          </p>
+
+          {si.kind !== 'recurring_deposit_change' && (
+            <>
+              <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
+                <span>Balance now</span>
+                <span className="font-mono">£{formatCurrency(si.balanceNow)}</span>
+              </div>
+              <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
+                <span>Balance after</span>
+                <span className="font-mono">£{formatCurrency(si.balanceAfter)}</span>
+              </div>
+            </>
+          )}
+
+          {si.kind === 'recurring_deposit_change' && (
+            <div className="flex justify-between text-xs mt-1" style={{ color: (si.newRecurringMonthlyAmount ?? 0) >= (si.oldRecurringMonthlyAmount ?? 0) ? 'var(--color-negative)' : 'var(--color-positive)' }}>
+              <span>Monthly deposit</span>
+              <span className="font-mono">
+                £{formatCurrency(si.oldRecurringMonthlyAmount ?? 0)} → £{formatCurrency(si.newRecurringMonthlyAmount ?? 0)}/mo
+              </span>
+            </div>
+          )}
+
+          <div className="flex justify-between text-xs mt-1 text-[var(--color-ink-muted)]">
+            <span>Projected {formatFullDate(si.projectedAtDate)}</span>
+            <span className="font-mono">
+              £{formatCurrency(si.projectedBalanceBefore)} → £{formatCurrency(si.projectedBalanceAfter)}
+            </span>
+          </div>
+
+          {si.newTargetDate && (
+            <div className="flex justify-between text-xs mt-1" style={{ color: 'var(--color-positive)' }}>
+              <span>New target date</span>
+              <span className="font-mono">{formatFullDate(si.newTargetDate)}</span>
+            </div>
+          )}
+          {si.monthsSaved !== 0 && (
+            <div className="flex justify-between text-xs mt-1" style={{ color: si.monthsSaved > 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
+              <span>{si.monthsSaved > 0 ? 'Time saved' : 'Time added'}</span>
+              <span className="font-mono">
+                {Math.abs(si.monthsSaved)} month{Math.abs(si.monthsSaved) === 1 ? '' : 's'}
+              </span>
+            </div>
+          )}
+        </div>
+      ))}
+
       {/* BUGFIX (Adam-reported, 2026-09 session — "I still see the bottom
           Available impact on cash even though it is zero, this should
           not show if the value is 0") — the whole card now only renders
@@ -714,6 +796,8 @@ function ScenarioForm({
   // A lump-sum/exclude/recurring-overpayment action with nothing linked is
   // never valid to save — see REQUIRES_LOAN_TARGET.
   const actionsAllLinkedWhereRequired = actions.every((a) => !REQUIRES_LOAN_TARGET.includes(a.type) || resolveTargets(a).length > 0)
+  // Same idea for the three savings-pot actions — see REQUIRES_SAVINGS_POT_TARGET.
+  const savingsPotActionsHaveTarget = actions.every((a) => !REQUIRES_SAVINGS_POT_TARGET.includes(a.type) || Boolean(a.savingsPotId))
   // A purchase without a date or a cost has nothing to compute against —
   // it would save as a silently inert action, which is exactly the kind
   // of "saved but does nothing" state this app has been bitten by before.
@@ -785,6 +869,7 @@ function ScenarioForm({
         const showSingleLoanPicker = action.type === 'exclude_loan' || action.type === 'loan_overpayment'
         const showFullPayoffHint = showMultiLoanPicker && currentTargets.length > 0
         const showPersonPicker = action.type === 'salary_change'
+        const showSavingsPotPicker = REQUIRES_SAVINGS_POT_TARGET.includes(action.type)
         const showValue = NEEDS_VALUE.includes(action.type)
         const showSplit = NEEDS_SPLIT.includes(action.type)
         const showDate = NEEDS_DATE.includes(action.type)
@@ -847,7 +932,7 @@ function ScenarioForm({
                 placeholder={VALUE_LABELS[action.type] ?? 'Value (£)'}
                 value={action.value || ''}
                 onChange={(e) => updateAction({ value: Number(e.target.value) })}
-                className={`w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono ${showMultiLoanPicker || showSingleLoanPicker || showPersonPicker || showDate ? '' : 'col-span-2'}`}
+                className={`w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm font-mono ${showMultiLoanPicker || showSingleLoanPicker || showPersonPicker || showSavingsPotPicker || showDate ? '' : 'col-span-2'}`}
               />
             )}
 
@@ -969,6 +1054,41 @@ function ScenarioForm({
                   </option>
                 ))}
               </select>
+            )}
+
+            {showSavingsPotPicker && (
+              <>
+                <select
+                  value={action.savingsPotId ?? ''}
+                  onChange={(e) => updateAction({ savingsPotId: e.target.value || undefined })}
+                  className="col-span-2 w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                >
+                  <option value="">Choose a savings pot…</option>
+                  {people.map((p) => {
+                    const potsForPerson = data.savingsPots.filter((pot) => pot.personId === p.id)
+                    if (potsForPerson.length === 0) return null
+                    return (
+                      <optgroup key={p.id} label={p.name}>
+                        {potsForPerson.map((pot) => (
+                          <option key={pot.id} value={pot.id}>
+                            {pot.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )
+                  })}
+                </select>
+                {data.savingsPots.length === 0 && (
+                  <p className="col-span-2 text-[11px]" style={{ color: 'var(--color-negative)' }}>
+                    No savings pots yet — add one on the Wallet page first.
+                  </p>
+                )}
+                {data.savingsPots.length > 0 && !action.savingsPotId && (
+                  <p className="col-span-2 text-[11px]" style={{ color: 'var(--color-negative)' }}>
+                    Select which savings pot this applies to.
+                  </p>
+                )}
+              </>
             )}
 
             {showSingleLoanPicker && (
@@ -1163,7 +1283,7 @@ function ScenarioForm({
         </button>
       </div>
       <button
-        disabled={!name.trim() || actions.length === 0 || !actionsAllLinkedWhereRequired || !purchasesComplete || !loanActionsHaveDateWhereNeeded}
+        disabled={!name.trim() || actions.length === 0 || !actionsAllLinkedWhereRequired || !savingsPotActionsHaveTarget || !purchasesComplete || !loanActionsHaveDateWhereNeeded}
         onClick={() => {
           onSave({
             name: name.trim(),

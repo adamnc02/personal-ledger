@@ -103,6 +103,7 @@ const ledgerData: AppDataV2 = {
   creditCards: [card],
   transactions: [],
   payCycles: [],
+  savingsPots: [],
   scenarios: [testScenario],
   primaryPersonId: 'me',
 }
