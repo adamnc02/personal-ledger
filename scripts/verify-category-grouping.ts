@@ -84,11 +84,6 @@ check(
   'category-seed-streaming',
 )
 check(
-  'A savings_contribution groups under Savings, same as always (no rule change here)',
-  groupingCategoryId({ type: 'savings_contribution', paymentMethod: 'bank_transfer', categoryId: SAVINGS_CATEGORY_ID }),
-  SAVINGS_CATEGORY_ID,
-)
-check(
   'A plain expense paid by bank transfer groups under its own real category',
   groupingCategoryId({ type: 'expense', paymentMethod: 'bank_transfer', categoryId: 'category-seed-food' }),
   'category-seed-food',

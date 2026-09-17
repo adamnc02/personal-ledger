@@ -30,11 +30,9 @@ import { generateLoanPaymentTransactions, resolveRecurringOverpaymentSource } fr
 import { generateMinimumPaymentTransactions } from './creditCards'
 import { computeNetPayForPeriod, generateSalaryTransactions } from './salaryLedger'
 import { resolvePensionOccurrenceAmount, generatePensionTransactions } from './pensionLedger'
-import { generateSavingsContributions } from './savingsLedger'
 import { generateSavingsDepositTransactions, generateSavingsInterestTransactions, generateSavingsWithdrawalTransactions, resolveSavingsPotDepositOccurrenceAmount } from './savingsPotLedger'
 import { generatePotDepositTransactions, generatePotOutgoingTransactions, resolvePotDepositOccurrenceAmount } from './potLedger'
 import { dedupeKey } from './projection'
-import { applyClearSideEffects } from './clearTransaction'
 import { toLocalIsoDate, parseLocalDate } from './date'
 import type { AppDataV2, Transaction } from '../types/ledger'
 
@@ -153,11 +151,9 @@ function reconcilePensionTransactions(data: AppDataV2): AppDataV2 {
  * direction deliberately stays with Step 1, which runs after every
  * reconciler and already handles a date moved back into the past.
  *
- * No side effect needs unwinding: applyClearSideEffects only acts on
- * savings_contribution/savings_entry rows, which are never sourced from a
- * RecurringTemplate. Savings-pot and credit-card balances are derived
- * from the transactions themselves, so flipping the status back to
- * pending is the whole of the correction there too.
+ * No side effect needs unwinding: clearing has none. Savings-pot and
+ * credit-card balances are derived from the transactions themselves, so
+ * flipping the status back to pending is the whole of the correction.
  */
 function reconcileRecurringTemplateTransactions(data: AppDataV2, asOfIso: string): AppDataV2 {
   let changed = false
@@ -379,14 +375,13 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
   }
 
   // Step 1 — settle anything already stored that's still pending but due.
-  // Applies to every pending transaction regardless of type or owner;
-  // applyClearSideEffects itself is the thing that decides whether a
-  // given type actually has a side effect to run (most don't, and this
-  // is just a status flip for those).
+  // Applies to every pending transaction regardless of type or owner. It's
+  // a status flip only: no transaction type has a clear-time side effect
+  // (balances are derived from the transactions themselves).
   for (const t of result.transactions) {
     if (t.status !== 'pending' || t.date > asOfIso) continue
     const cleared: Transaction = { ...t, status: 'cleared' }
-    result = applyClearSideEffects({ ...result, transactions: result.transactions.map((tx) => (tx.id === t.id ? cleared : tx)) }, cleared)
+    result = { ...result, transactions: result.transactions.map((tx) => (tx.id === t.id ? cleared : tx)) }
     changed = true
   }
 
@@ -445,7 +440,6 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
     for (const pension of result.pensions.filter((p) => p.personId === person.id)) {
       candidates.push(...generatePensionTransactions(pension, rangeStart, asOf))
     }
-    candidates.push(...generateSavingsContributions(person, payCycle, rangeStart, asOf))
     // BUGFIX (2026-09-02, reported by Adam — "monthly deposit rate
     // changing to a number I didn't select"): recurring savings-pot
     // deposits (and their interest) were never wired into THIS
@@ -498,7 +492,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
       if (key && globalExistingKeys.has(key)) continue // already materialized (or logged by hand) — don't duplicate, wherever it currently lives
 
       const real: Transaction = { ...candidate, id: nanoid(8), status: 'cleared' }
-      result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
+      result = { ...result, transactions: [...result.transactions, real] }
       if (key) globalExistingKeys.add(key)
       changed = true
     }
@@ -525,7 +519,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
         if (key && globalExistingKeys.has(key)) continue
 
         const real: Transaction = { ...candidate, id: nanoid(8), status: 'cleared' }
-        result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
+        result = { ...result, transactions: [...result.transactions, real] }
         if (key) globalExistingKeys.add(key)
         changed = true
       }
@@ -558,7 +552,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
           if (key && globalExistingKeys.has(key)) continue
 
           const real: Transaction = { ...candidate, id: nanoid(8), status: 'cleared' }
-          result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
+          result = { ...result, transactions: [...result.transactions, real] }
           if (key) globalExistingKeys.add(key)
           changed = true
         }
@@ -604,7 +598,7 @@ export function autoClearDuePayments(data: AppDataV2, asOf: Date = new Date()): 
           if (key && globalExistingKeys.has(key)) continue
 
           const real: Transaction = { ...candidate, id: nanoid(8), status: 'cleared' }
-          result = applyClearSideEffects({ ...result, transactions: [...result.transactions, real] }, real)
+          result = { ...result, transactions: [...result.transactions, real] }
           if (key) globalExistingKeys.add(key)
           changed = true
         }

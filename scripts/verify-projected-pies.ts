@@ -1,12 +1,11 @@
 // Sanity checks for the "Next 3 cycles" projected-segment math added to
 // the Home page's Loans/Savings pie charts. No DOM here, so this exercises
 // the underlying calculations (summarizeLoan-at-a-future-date, and the
-// pending-savings_contribution-sum-within-horizon logic) the component
+// three-cycle horizon) the component
 // reads from directly — not the SVG rendering itself.
 
 import { summarizeLoan } from '../src/lib/ledgerLoans'
-import { computeProjection, horizonRangeEnd, THREE_CYCLES_AHEAD } from '../src/lib/projection'
-import { monthlyAmountForEntry } from '../src/lib/savings'
+import { computeProjection, horizonRangeEnd } from '../src/lib/projection'
 import { withLiveBalance } from '../src/lib/creditCards'
 import type { AppDataV2, CreditCard, Loan, Person, PayCycleConfig, Transaction } from '../src/types/ledger'
 import { defaultLedgerData } from '../src/lib/ledgerStorage'
@@ -54,7 +53,7 @@ check(
   100,
 )
 
-// ── Savings projection: pending contributions within the horizon, not double-counted against `currentAmount` ──
+// ── Horizon: the savings goal checks that used this setup were removed with savingsEntries (2026-09-17) ──
 const person: Person = {
   id: 'adam',
   name: 'Adam',
@@ -63,9 +62,6 @@ const person: Person = {
     { id: 's1', personId: 'adam', effectiveFrom: '2026-01-01', grossAnnual: 40000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [], employerPensionPercent: 0 },
   ],
   salaryOverrides: [],
-  savingsEntries: [
-    { id: 'goal-1', type: 'goal', name: 'Holiday', includeInSummary: true, targetAmount: 2000, currentAmount: 500, targetDate: '2027-06-01' },
-  ],
 }
 
 const payCycle: PayCycleConfig = {
@@ -84,29 +80,13 @@ const asOf = new Date('2026-06-15')
 const threeCycleEnd = horizonRangeEnd(data, 'adam', 'three_cycles', asOf)
 const projection = computeProjection(data, 'adam', payCycle, 'three_cycles', asOf)
 
-const goalContributions = projection.transactions.filter((t) => t.type === 'savings_contribution' && t.sourceId === 'goal-1' && t.status === 'pending')
-// 4 now, not 3: the three_cycles horizon covers the current cycle plus
-// THREE_CYCLES_AHEAD, so from 15 June that's Jun, Jul, Aug AND Sep.
-check('Projection window covers 4 upcoming paydays worth of contributions (Jun, Jul, Aug, Sep)', goalContributions.length, 1 + THREE_CYCLES_AHEAD)
-
-// generateSavingsContributions computes each contribution's amount via
-// monthlyAmountForEntry(entry) using ITS OWN default `asOf` (real
-// "today"), not the historical `asOf` this test walks the projection
-// from — matching that exactly here rather than assuming otherwise.
-const expectedMonthly = monthlyAmountForEntry(person.savingsEntries[0])
-check('Each generated contribution equals the goal-required monthly amount', goalContributions.every((t) => t.amount === expectedMonthly), true)
-
-const projectedTotal = 500 + goalContributions.reduce((sum, t) => sum + t.amount, 0)
-check('Projected goal total = 500 existing + one required monthly amount per cycle in the horizon', projectedTotal, 500 + expectedMonthly * (1 + THREE_CYCLES_AHEAD))
-check('Projected total is comfortably under the £2000 target (percent calc will clamp correctly, not overflow)', projectedTotal <= 2000, true)
-
 // NB: date-only formatting here MUST go through the shared toLocalIsoDate
 // helper (src/lib/date.ts), never `d.toISOString().slice(0, 10)` — this
 // test previously reimplemented that exact banned pattern locally, which
 // silently rolled threeCycleEnd back a day during BST (Aug 31 -> Aug 30)
 // since toISOString() converts to UTC first. threeCycleEnd itself was
 // always correct; only this comparison's own formatting was broken.
-check('Horizon end used for the loan check and the savings check is the same kind of date (three_cycles)', toLocalIsoDate(threeCycleEnd), projection.horizonEnd)
+check('Horizon end used for the loan check is the same kind of date (three_cycles)', toLocalIsoDate(threeCycleEnd), projection.horizonEnd)
 
 // ── Credit card: Home page hero card / pie chart, "Next 3 cycles" (Batch 8, 2026-09-07, Bug 9.1) ──
 // The bug: a purchase dated LATER in the current cycle (or in a future

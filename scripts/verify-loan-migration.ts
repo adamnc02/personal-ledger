@@ -34,7 +34,7 @@ const preExistingLoan = {
 
 const rawData = {
   primaryPersonId: 'me',
-  people: [{ id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }],
+  people: [{ id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }],
   categories: defaultCategories(),
   recurringTemplates: [],
   loans: [preExistingLoan],

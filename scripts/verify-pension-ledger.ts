@@ -118,7 +118,7 @@ const built = newPension({ personId: 'p1', name: 'Test', amount: 100, frequency:
 check('newPension defaults to active', built.active, true)
 
 // ---- 9. autoClearDuePayments actually materializes a due pension payment ----
-const person: Person = { id: 'p1', name: 'Pat', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+const person: Person = { id: 'p1', name: 'Pat', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }
 const payCycle = { ...defaultPayCycleConfig('p1'), openingBalanceDate: '2026-01-01' }
 const baseData: AppDataV2 = {
   people: [person],
@@ -206,7 +206,7 @@ check('Monthly-pension cycle start is 15 March', toIso(monthlyCycle.start), '202
 check('Monthly-pension cycle end is the day before 15 April', toIso(monthlyCycle.end), '2026-04-14')
 
 // ---- 14. resolveCycleBounds — the actual dispatcher every call site now goes through ----
-const personForCycles: Person = { id: 'p1', name: 'Pat', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+const personForCycles: Person = { id: 'p1', name: 'Pat', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }
 const salaryPayCycle: PayCycleConfig = { ...defaultPayCycleConfig('p1'), paydayDayOfMonth: 28, paydayAdjustForNonWorkingDay: true, cycleStartDayOfMonth: 1 }
 const baseDataForCycles: AppDataV2 = {
   people: [personForCycles],

@@ -65,7 +65,6 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
             employerPensionPercent: snapshot.employerPensionPercent,
           }
         : { grossAnnual: 0, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] },
-      savingsEntries: p.savingsEntries,
     }
   })
 

@@ -77,7 +77,7 @@ const jointBill: RecurringTemplate = {
 
 const data: AppDataV2 = {
   ...base,
-  people: [...base.people, { id: ellaId, name: 'Ella', color: '#7c6fe0', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }],
+  people: [...base.people, { id: ellaId, name: 'Ella', color: '#7c6fe0', salaryHistory: [], salaryOverrides: [] }],
   pots: [billsPot],
   savingsPots: [savings, ellaSavings],
   recurringTemplates: [potBill, jointBill],

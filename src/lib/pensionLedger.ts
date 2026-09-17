@@ -8,7 +8,7 @@
 // identical (same frequency stepping, same amount-history resolution, same
 // occurrence-override shape) — only the field set differs — so this file
 // mirrors schedule.ts's structure closely on purpose, the same way
-// salaryLedger.ts and savingsLedger.ts each already implement their own
+// salaryLedger.ts and savingsPotLedger.ts each already implement their own
 // variant of "walk paydays forward" rather than sharing one.
 
 import { addMonths, addQuarters, addWeeks, addYears, addDays, startOfDay } from 'date-fns'

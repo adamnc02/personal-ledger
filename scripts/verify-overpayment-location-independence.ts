@@ -38,7 +38,7 @@ const payCycle: PayCycleConfig = {
   paydayAdjustForNonWorkingDay: true,
   cycleStartDayOfMonth: 1,
 }
-const person: Person = { id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+const person: Person = { id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }
 const billsPot: Pot = { id: 'pot-bills', personId: 'me', name: 'Bills', openingBalance: 500, openingDate: '2026-01-01', active: true }
 
 // A loan paid from the Bills pot, but its recurring overpayment is

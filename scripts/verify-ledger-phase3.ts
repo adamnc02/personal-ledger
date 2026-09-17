@@ -25,7 +25,6 @@ const person: Person = {
     { id: 's2', personId: 'me', effectiveFrom: '2026-07-01', grossAnnual: 45000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] },
   ],
   salaryOverrides: [],
-  savingsEntries: [],
 }
 
 check('findApplicableSnapshot picks the £40k snapshot for a June date', findApplicableSnapshot(person, '2026-06-15')?.id, 's1')
@@ -187,8 +186,8 @@ check('An even 50/50 split: the other person also gets exactly half', personShar
 check('An uneven 70/30 split: the payee gets 70%', personShareOfJointAmount(1000, 'alice', 70, 'alice'), 700)
 check('An uneven 70/30 split: the other person gets the remaining 30%', personShareOfJointAmount(1000, 'alice', 70, 'bob'), 300)
 
-const alice: Person = { id: 'alice', name: 'Alice', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
-const bob: Person = { id: 'bob', name: 'Bob', color: '#4cd08a', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+const alice: Person = { id: 'alice', name: 'Alice', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }
+const bob: Person = { id: 'bob', name: 'Bob', color: '#4cd08a', salaryHistory: [], salaryOverrides: [] }
 
 const jointRent: RecurringTemplate = {
   id: 'joint-rent',

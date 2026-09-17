@@ -27,7 +27,7 @@ function check(label: string, actual: unknown, expected: unknown, tolerance = 0.
 const base = defaultLedgerData()
 const ledgerDataWithCalibratedLoan: AppDataV2 = {
   ...base,
-  people: [{ id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory: [{ id: 's1', personId: 'me', effectiveFrom: '2020-01-01', grossAnnual: 40000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] }], salaryOverrides: [], savingsEntries: [] }],
+  people: [{ id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory: [{ id: 's1', personId: 'me', effectiveFrom: '2020-01-01', grossAnnual: 40000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] }], salaryOverrides: [] }],
   primaryPersonId: 'me',
   loans: [
     {

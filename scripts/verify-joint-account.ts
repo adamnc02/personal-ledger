@@ -22,7 +22,7 @@ const CATS = defaultCategories()
 const BILLS_CAT = CATS.find((c) => c.name === 'Bills')!.id
 
 function person(id: string, name: string): Person {
-  return { id, name, color: '#000000', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+  return { id, name, color: '#000000', salaryHistory: [], salaryOverrides: [] }
 }
 
 const personA = person('a', 'Adam')

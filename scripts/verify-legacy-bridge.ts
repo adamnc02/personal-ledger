@@ -19,7 +19,6 @@ const me: Person = {
   color: '#ff5b4c',
   salaryHistory: [{ id: 's1', personId: 'me', effectiveFrom: '2026-01-01', grossAnnual: 40000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] }],
   salaryOverrides: [],
-  savingsEntries: [{ id: 'g1', type: 'goal', name: 'House deposit', includeInSummary: true, targetAmount: 20000, currentAmount: 5000, targetDate: '2028-01-01' }],
 }
 
 const carLoan: Loan = {

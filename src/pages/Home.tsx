@@ -140,7 +140,7 @@ const JOINT_ACCOUNT_GROUP_CATEGORY_ID = seededCategoryIdForIcon('joint')
  * or "how much went on the card" stays answerable in one place, while
  * each loan/card/bill is still free to carry its own category for its
  * own icon everywhere else. Savings intentionally isn't handled here:
- * savings_contribution transactions already always carry
+ * generated savings transactions already always carry
  * SAVINGS_CATEGORY_ID directly (no separate real category to preserve),
  * so grouping by `categoryId` already does the right thing for them.
  */

@@ -25,7 +25,6 @@ const person: Person = {
   color: '#ff5b4c',
   salaryHistory: [{ id: 's1', personId: 'me', effectiveFrom: '2026-01-01', grossAnnual: 40000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] }],
   salaryOverrides: [],
-  savingsEntries: [{ id: 'goal-1', type: 'goal', name: 'House deposit', includeInSummary: true, targetAmount: 5000, currentAmount: 0, targetDate: '2028-01-01' }],
 }
 
 const monthlyBill: RecurringTemplate = {
@@ -86,11 +85,7 @@ check('None of the materialized occurrences are dated after asOf', clearedBills.
 const clearedSalary = settled.transactions.filter((t) => t.type === 'salary')
 check('Salary paydays that have passed are also auto-cleared (not just outgoing types)', clearedSalary.length > 0 && clearedSalary.every((t) => t.status === 'cleared'), true)
 
-// ---- 2. Side effects actually apply — the whole point of this over the old tap mechanism ----
-const clearedContribution = settled.transactions.find((t) => t.type === 'savings_contribution')
-check('A savings contribution that came due was materialized', !!clearedContribution, true)
-const updatedGoal = settled.people[0].savingsEntries.find((e) => e.id === 'goal-1')
-check("Clearing it quietly increased the goal's currentAmount (the side effect actually ran, automatically)", (updatedGoal?.currentAmount ?? 0) > 0, true)
+// ---- 2. Card payments are materialized too, with no clear-time side effect ----
 
 const clearedCardPayment = settled.transactions.find((t) => t.type === 'credit_card_payment' && t.creditCardId === 'card-1')
 check('A credit card minimum payment that came due was materialized', !!clearedCardPayment, true)

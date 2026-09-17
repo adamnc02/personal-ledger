@@ -10,7 +10,6 @@ import { formatFullDate } from '../lib/format'
 import { calculateNetSalary } from '../lib/tax'
 import { personalBillsTotal, jointContributionForPerson } from '../lib/bills'
 import { summarizeLoan, combineBillsWithLoans } from '../lib/loans'
-import { totalMonthlySavingsForPerson } from '../lib/savings'
 import { calculateHouseholdFigures, legacyPeopleWithSalaryCount } from '../lib/household'
 import { calculateFinanceAgreement } from '../lib/finance'
 import { Plus, Trash2, ChevronDown, ChevronUp, Layers, Pencil } from 'lucide-react'
@@ -29,11 +28,10 @@ const ACTION_LABELS: Record<ScenarioActionType, string> = {
   exclude_loan: "Exclude a loan/credit card (what if it just didn't count)",
   loan_overpayment: 'Regular extra payment on a loan/credit card',
   salary_change: 'Salary change',
-  savings_lump_sum: 'Lump sum toward a savings goal',
   purchase: 'Buy something',
 }
 
-const NEEDS_VALUE: ScenarioActionType[] = ['sell_asset', 'pay_off_loan', 'new_bill', 'loan_overpayment', 'salary_change', 'savings_lump_sum', 'purchase']
+const NEEDS_VALUE: ScenarioActionType[] = ['sell_asset', 'pay_off_loan', 'new_bill', 'loan_overpayment', 'salary_change', 'purchase']
 const NEEDS_SPLIT: ScenarioActionType[] = ['new_bill', 'new_finance_agreement']
 // The only action type anchored to a real calendar date via purchaseDate
 // — see lib/purchaseImpact.ts for why a purchase needs one and nothing
@@ -56,7 +54,6 @@ const VALUE_LABELS: Partial<Record<ScenarioActionType, string>> = {
   new_bill: 'Monthly cost (£)',
   loan_overpayment: 'Extra per month (£)',
   salary_change: 'New gross annual salary (£)',
-  savings_lump_sum: 'Lump sum (£)',
   purchase: 'Cost (£)',
 }
 
@@ -95,8 +92,7 @@ export function Scenarios() {
   const personalAvailableBefore = me
     ? calculateNetSalary(me.salary).netPerPeriod -
       personalBillsTotal(allBills, me.id) -
-      jointContributionForPerson(allBills, me.id, data.people) -
-      totalMonthlySavingsForPerson(me)
+      jointContributionForPerson(allBills, me.id, data.people)
     : 0
   const householdAvailableBefore = calculateHouseholdFigures(data).totalAvailable
   const monthlyAvailableBefore = viewMode === 'household' ? householdAvailableBefore : personalAvailableBefore
@@ -533,36 +529,6 @@ function ImpactSummary({
         <PurchaseCard key={p.actionId} purchase={p} />
       ))}
 
-      {impact.savingsImpacts.map((si, i) => (
-        <div key={i} className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
-          <p className="text-sm font-medium text-[var(--color-ink)] mb-2">
-            {si.personName}'s {si.goalName}
-          </p>
-          <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
-            <span>Lump sum</span>
-            <span className="font-mono">£{formatCurrency(si.lumpSumApplied)}</span>
-          </div>
-          <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
-            <span>Remaining now</span>
-            <span className="font-mono">£{formatCurrency(si.originalRemaining)}</span>
-          </div>
-          <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
-            <span>Remaining after</span>
-            <span className="font-mono">£{formatCurrency(si.newRemaining)}</span>
-          </div>
-          {si.hasTargetDate ? (
-            si.monthsSaved > 0 && (
-              <div className="flex justify-between text-xs mt-1" style={{ color: 'var(--color-positive)' }}>
-                <span>Time saved</span>
-                <span className="font-mono">{si.monthsSaved} month{si.monthsSaved === 1 ? '' : 's'}</span>
-              </div>
-            )
-          ) : (
-            <p className="text-[11px] text-[var(--color-ink-faint)] mt-1">No target date set, so time saved can't be calculated.</p>
-          )}
-        </div>
-      ))}
-
       {impact.salaryChangeImpact && (
         <div className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
           <p className="text-sm font-medium text-[var(--color-ink)] mb-2">{impact.salaryChangeImpact.personName}'s salary change</p>
@@ -739,7 +705,6 @@ function ScenarioForm({
   const data = useMemo(() => buildLegacyAppData(ledgerData), [ledgerData])
   const [name, setName] = useState(initial?.name ?? '')
   const [actions, setActions] = useState<Scenario['actions']>(initial?.actions ?? [])
-  const hasAnySavingsGoal = data.people.some((p) => p.savingsEntries.some((e) => e.type === 'goal'))
   // Same rule as the Bills/Loans location pickers — "Joint" only makes
   // sense once 2+ people actually have a salary configured, not just 2+
   // people existing. See lib/household.ts's legacyPeopleWithSalaryCount
@@ -819,8 +784,7 @@ function ScenarioForm({
         const showMultiLoanPicker = action.type === 'sell_asset' || action.type === 'pay_off_loan'
         const showSingleLoanPicker = action.type === 'exclude_loan' || action.type === 'loan_overpayment'
         const showFullPayoffHint = showMultiLoanPicker && currentTargets.length > 0
-        const showPersonPicker = action.type === 'salary_change' || action.type === 'savings_lump_sum'
-        const showSavingsPicker = action.type === 'savings_lump_sum'
+        const showPersonPicker = action.type === 'salary_change'
         const showValue = NEEDS_VALUE.includes(action.type)
         const showSplit = NEEDS_SPLIT.includes(action.type)
         const showDate = NEEDS_DATE.includes(action.type)
@@ -845,13 +809,11 @@ function ScenarioForm({
                 onChange={(e) => updateAction({ type: e.target.value as ScenarioActionType })}
                 className="flex-1 min-w-0 bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
               >
-                {Object.entries(ACTION_LABELS)
-                  .filter(([value]) => value !== 'savings_lump_sum' || hasAnySavingsGoal)
-                  .map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
+                {Object.entries(ACTION_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
               </select>
               <button onClick={() => setActions((prev) => prev.filter((_, idx) => idx !== i))} className="text-[var(--color-ink-faint)]" title="Remove action">
                 <Trash2 size={14} />
@@ -998,7 +960,7 @@ function ScenarioForm({
             {showPersonPicker && (
               <select
                 value={action.personId || people[0]?.id || ''}
-                onChange={(e) => updateAction({ personId: e.target.value, savingsEntryId: undefined })}
+                onChange={(e) => updateAction({ personId: e.target.value })}
                 className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
               >
                 {people.map((p) => (
@@ -1008,33 +970,6 @@ function ScenarioForm({
                 ))}
               </select>
             )}
-
-            {showSavingsPicker &&
-              (() => {
-                const targetPersonId = action.personId || people[0]?.id || ''
-                const goals = data.people.find((p) => p.id === targetPersonId)?.savingsEntries.filter((e) => e.type === 'goal') ?? []
-                if (goals.length === 0) {
-                  return (
-                    <p className="col-span-2 text-xs text-[var(--color-ink-faint)]">
-                      No savings goals for this person yet — add one on the Salary tab first.
-                    </p>
-                  )
-                }
-                return (
-                  <select
-                    value={action.savingsEntryId ?? ''}
-                    onChange={(e) => updateAction({ savingsEntryId: e.target.value })}
-                    className="col-span-2 w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
-                  >
-                    <option value="">Choose a savings goal…</option>
-                    {goals.map((g) => (
-                      <option key={g.id} value={g.id}>
-                        {g.name || 'Unnamed goal'}
-                      </option>
-                    ))}
-                  </select>
-                )
-              })()}
 
             {showSingleLoanPicker && (
               <>

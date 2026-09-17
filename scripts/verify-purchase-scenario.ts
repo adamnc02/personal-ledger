@@ -71,7 +71,7 @@ function tx(id: string, date: string, amount: number, status: 'cleared' | 'pendi
 
 const data: AppDataV2 = {
   primaryPersonId: 'p1',
-  people: [{ id: 'p1', name: 'Test', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }],
+  people: [{ id: 'p1', name: 'Test', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }],
   categories: [],
   recurringTemplates: [],
   loans: [],
@@ -228,7 +228,7 @@ check('a scenario with no purchases at all returns an empty list', computePurcha
 // lump sum, or the existing summary silently under-reports.
 
 const legacyData: AppData = {
-  people: [{ id: 'p1', name: 'Test', color: '#ff5b4c', salary: { grossAnnual: 0, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] }, savingsEntries: [] }],
+  people: [{ id: 'p1', name: 'Test', color: '#ff5b4c', salary: { grossAnnual: 0, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] } }],
   bills: [],
   loans: [],
   creditCards: [],

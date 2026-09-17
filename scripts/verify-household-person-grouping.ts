@@ -71,8 +71,8 @@ function assertReconciles(label: string, pps: HouseholdPersonProjection[], cycle
 }
 
 // ── 1. Synthetic: two people, rows in two cycles ─────────────────────────
-const adam: Person = { id: 'adam', name: 'Adam', color: '#fff', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
-const ella: Person = { id: 'ella', name: 'Ella', color: '#000', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+const adam: Person = { id: 'adam', name: 'Adam', color: '#fff', salaryHistory: [], salaryOverrides: [] }
+const ella: Person = { id: 'ella', name: 'Ella', color: '#000', salaryHistory: [], salaryOverrides: [] }
 
 function row(id: string, date: string, amount: number, direction: 'in' | 'out', ownerId: string, status: 'cleared' | 'pending'): Transaction {
   return { id, date, amount, direction, categoryId: 'category-shopping', paymentMethod: 'card', status, type: direction === 'in' ? 'income' : 'expense', location: 'personal', ownerId }

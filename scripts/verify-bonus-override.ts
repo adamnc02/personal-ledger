@@ -25,7 +25,6 @@ const person: Person = {
     },
   ],
   salaryOverrides: [],
-  savingsEntries: [],
 }
 
 const baseNet = computeSnapshotNetPayForPeriod(person, '2026-09-30')!

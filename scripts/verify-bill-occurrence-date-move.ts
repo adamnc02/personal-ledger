@@ -54,7 +54,7 @@ const payCycle: PayCycleConfig = {
   paydayAdjustForNonWorkingDay: true,
   cycleStartDayOfMonth: 1,
 }
-const person: Person = { id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+const person: Person = { id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }
 const savingsPot: SavingsPot = { id: 'sp1', personId: 'me', name: 'Rainy day', openingBalance: 0, openingDate: '2026-01-01', active: true, color: '#888', interestMethod: { type: 'none' } as never }
 const pot: Pot = { id: 'pot1', personId: 'me', name: 'Bills pot', openingBalance: 500, openingDate: '2026-01-01', active: true, color: '#999' }
 

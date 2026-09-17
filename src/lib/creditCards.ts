@@ -3,9 +3,9 @@
 //  - PURE, non-mutating schedule generation (generateMinimumPaymentTransactions)
 //    — same "compute what should exist, caller dedupes" contract as
 //    schedule.ts / ledgerLoans.ts. These produce PENDING transactions and
-//    do NOT touch currentBalance directly — that happens later, uniformly,
-//    via applyClearSideEffects once a transaction actually clears (see
-//    clearTransaction.ts and autoClear.ts).
+//    do NOT touch currentBalance directly — the balance is derived from
+//    the transactions themselves (cardBalanceAsOf), so a payment existing
+//    is its whole effect once it clears (autoClear.ts).
 //  - RECORDING functions (recordCreditCardSpend, recordCreditCardLumpPayment)
 //    for things the user is telling the app already happened. NEITHER
 //    of these writes to card.currentBalance any more — see below.
@@ -86,8 +86,8 @@ export function minimumPaymentForBalance(minimumPayment: CreditCard['minimumPaym
  * is calculated — real statements work the same way: interest posts to
  * the balance, THEN the minimum payment is calculated against that new,
  * interest-inflated statement balance. currentBalance itself already
- * reflects every PAST cycle's interest (applied when each prior payment
- * cleared, see applyClearSideEffects in clearTransaction.ts) — this one
+ * reflects every PAST cycle's interest (derived from each prior billing
+ * date, see cardBalanceAsOf) — this one
  * extra application projects one cycle further, for the payment that
  * hasn't happened yet.
  */
@@ -892,9 +892,9 @@ export function recordCreditCardSpend(
  */
 /**
  * Logs an ad-hoc/lump payment toward this card. Doesn't touch
- * currentBalance directly — that's applyClearSideEffects's job now,
- * applied immediately by the caller if the date is today/past, or later
- * by the automatic date-based clearing pass if it's a future date. Only
+ * currentBalance directly — the derived balance (cardBalanceAsOf) picks
+ * the transaction up once it clears, immediately if the date is
+ * today/past, or later via the automatic date-based clearing pass. Only
  * the LumpPayment log record itself is added right away, regardless of
  * date — that's just "you told the app about this payment," not a
  * balance effect.

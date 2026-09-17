@@ -50,7 +50,7 @@ const payCycle: PayCycleConfig = {
   paydayAdjustForNonWorkingDay: true,
   cycleStartDayOfMonth: 1,
 }
-const person: Person = { id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+const person: Person = { id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }
 
 const baseData: AppDataV2 = {
   people: [person],

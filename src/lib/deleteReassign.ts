@@ -372,7 +372,7 @@ export function findDeleteBlockers(data: AppDataV2, subject: DeleteSubject): Del
   }
   for (const t of data.transactions) {
     // A pending row carrying this pot's own savingsPotId but no transfer
-    // endpoint pointing here (a legacy savings_contribution) belongs to the
+    // endpoint pointing here (a legacy savings_deposit) belongs to the
     // pot itself and is swept with it, so only transfers are listed.
     if (isHandLoggedPending(t) && t.type === 'transfer' && transferTouchesSavingsPot(t.fromLocation, t.toLocation, savingsPotId)) {
       out.push(blocker('transaction', 'upcomingTransactions', t.id, transactionName(t, data), `${money(t.amount)} on ${t.date}`))
