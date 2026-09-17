@@ -182,7 +182,13 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
   // the EARLIEST start date if more than one recurring-overpayment action
   // targets the same loan, since that's the date its combined effect
   // first actually changes anything.
-  const firstOverpaymentDateByLoan = new Map<string, string>()
+  // CHANGED 2026-09-17 (Adam-reported): this used to track the EARLIEST
+  // start date, so a loan with two recurring overpayments starting on
+  // different dates (£200 from March, £250 from April) reported the payment
+  // as it stands in March — £200 extra, never £450. The steady-state monthly
+  // cost, which is what "impact on available cash" means, is the payment once
+  // every one of them has started, so this now tracks the LATEST.
+  const lastOverpaymentDateByLoan = new Map<string, string>()
 
   function targetKey(kind: ScenarioTargetKind, id: string): string {
     return `${kind}:${id}`
@@ -330,8 +336,8 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         // events the moment the balance actually reaches zero.
         if (target.kind === 'loan' && action.value > 0) {
           const startDate = action.date || todayIso()
-          const existingStart = firstOverpaymentDateByLoan.get(target.id)
-          if (!existingStart || startDate < existingStart) firstOverpaymentDateByLoan.set(target.id, startDate)
+          const existingStart = lastOverpaymentDateByLoan.get(target.id)
+          if (!existingStart || startDate > existingStart) lastOverpaymentDateByLoan.set(target.id, startDate)
           const start = parseLocalDate(startDate)
           for (let i = 0; i < 600; i++) {
             addLoanEvent(target.id, { date: toLocalIsoDate(addMonths(start, i)), amount: action.value, recastMode: 'reduce_term' })
@@ -592,7 +598,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
       // into overpaymentApplied). Reading scheduledPayment alone made
       // "new monthly payment" look identical to the original, silently
       // erasing the very cost this card exists to show.
-      const asOfStart = outcome.hasSchedule ? scheduleEntryAsOf(outcome.schedule, firstOverpaymentDateByLoan.get(id) ?? todayIso()) : undefined
+      const asOfStart = outcome.hasSchedule ? scheduleEntryAsOf(outcome.schedule, lastOverpaymentDateByLoan.get(id) ?? todayIso()) : undefined
       const fullyPaidOff = outcome.hasSchedule ? outcome.fullyPaidOff : false
       const newMonthlyPayment = asOfStart ? asOfStart.scheduledPayment + asOfStart.overpaymentApplied : loan.monthlyPayment + extraPerMonth
       const newMonthsRemaining = outcome.hasSchedule

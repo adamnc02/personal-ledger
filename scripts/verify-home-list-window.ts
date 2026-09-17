@@ -112,6 +112,12 @@ console.log('\n4b. Home default view (2026-09-17)')
   const labels = src.slice(src.indexOf('function activeFilterLabels'), src.indexOf('function activeFilterLabels') + 1200)
   check('The non-default counter matches those defaults', /grouping !== 'list'/.test(labels) && /order !== 'date'/.test(labels) && /if \(showCleared\)/.test(labels) && /if \(!cycleTotals\)/.test(labels) && /if \(groupByDirection\)/.test(labels))
   check('...and ignores the horizon, which is its own pill', !/horizon/.test(labels))
+  // 2026-09-17 (Adam-reported): This cycle fell back to the flat list because
+  // cycle-end totals required the three_cycles horizon, so the default view
+  // was not the collapsed pill he asked for.
+  const canShow = src.slice(src.indexOf('function canShowCycleTotals'), src.indexOf('function canShowCycleTotals') + 500)
+  check('Cycle-end totals no longer require the Next 3 cycles range', !/three_cycles/.test(canShow))
+  check('...but still require list/person grouping and date order', /order === 'date'/.test(canShow) && /grouping !== 'category'/.test(canShow))
   const reset = src.slice(src.indexOf('function resetToDefault'), src.indexOf('function resetToDefault') + 400)
   check('Reset restores those same defaults and leaves the horizon alone', /setShowCleared\(false\)/.test(reset) && /setCycleTotals\(true\)/.test(reset) && !/setHorizon/.test(reset))
 }

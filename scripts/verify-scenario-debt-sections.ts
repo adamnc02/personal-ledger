@@ -142,6 +142,17 @@ console.log('1. Synthetic loan and credit card')
   check('Recurring: no one-off cash, it is a monthly commitment', rs.oneOffCash, 0)
   checkTrue('Recurring: finishes sooner', rs.monthsSaved > 0, rs.monthsSaved)
 
+  // Regression (Adam-reported, 2026-09-17): two recurring overpayments
+  // starting on different dates. The scenario total used to read the loan's
+  // payment at the EARLIEST start, so £200 from March + £250 from April
+  // reported -£200, never -£450. "Impact on available cash" is the
+  // steady-state cost once both have started.
+  const twoOverpayments = run(overpay(200, d1), overpay(250, d2))
+  const tos = twoOverpayments.debtImpacts[0]
+  check('Two overpayments: each section shows its own step', tos.sections.map((x) => x.monthlyCashChange), [-200, -250])
+  check('Two overpayments: the card total is the full -£450', tos.totalMonthlyCashChange, -450)
+  check('Two overpayments: the scenario total agrees with the card', twoOverpayments.monthlyImpact, -450)
+
   // ---- Two dates build on each other ----
   const combined = run(lump(2000, d1), overpay(100, d2))
   const cs = combined.debtImpacts[0].sections

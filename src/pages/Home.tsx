@@ -1184,6 +1184,15 @@ function DeckDetail(props: {
  * 2026-09-16 on Household, Person grouping is a fixed cycle-outer view
  * that ignores this toggle — see JointDetail/HouseholdDetail.)
  *
+ * 2026-09-17 (Adam-specified): the horizon no longer matters. This used to
+ * require 'three_cycles', on the reasoning that "this cycle" is a single
+ * span with nothing to subtotal — but that made the toggle grey out and
+ * fall back to the flat list exactly when This cycle became the default
+ * view. One cycle still subtotals perfectly well, and renders as the same
+ * collapsed pill the current cycle gets under Next 3 cycles, which is the
+ * point. `horizon` stays in the signature (unused) so every call site
+ * keeps reading the same way.
+ *
  * Widened again (Adam-specified, 2026-09-08) for 'credit_card' — a
  * genuinely different case from the other four, which all share one
  * grouping/order toolkit built around the household's OWN pay cycle.
@@ -1201,11 +1210,10 @@ function DeckDetail(props: {
  * that group, unlike a credit card's own billing-cycle dates, which stay
  * untouched by this change.
  */
-function canShowCycleTotals(entry: DeckEntry, horizon: ProjectionHorizon, grouping: Grouping, order: Order): boolean {
+function canShowCycleTotals(entry: DeckEntry, _horizon: ProjectionHorizon, grouping: Grouping, order: Order): boolean {
   if (entry.kind === 'credit_card') return order === 'date' && grouping !== 'category'
   return (
     (entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot' || entry.kind === 'savings_pot') &&
-    horizon === 'three_cycles' &&
     order === 'date' &&
     grouping !== 'category'
   )
@@ -1489,10 +1497,10 @@ function FiltersSheet({
   // for whether Cycle-end totals currently applies — only what happens
   // when it's false changed (disabled, not omitted).
   //
-  // Cycle-end totals only means anything in the one view that has
-  // multiple cycles to bound (three_cycles) AND a continuous date-ordered
-  // running balance to take a subtotal FROM (list + date) — see
-  // canShowCycleTotals' own comment.
+  // Cycle-end totals needs a continuous date-ordered running balance to
+  // take a subtotal FROM (list + date) — see canShowCycleTotals' own
+  // comment. It no longer needs multiple cycles: under "This cycle" it
+  // renders that one cycle as the same collapsed pill (Adam, 2026-09-17).
   const cycleTotalsApplicable = canShowCycleTotals(entry, horizon, grouping, order)
   // Independent of Cycle-end totals, but still only meaningful for 'list'
   // grouping + 'date' order on a Group-by/Order-by card: 'category'/
