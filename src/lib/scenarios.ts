@@ -101,9 +101,10 @@ export interface ScenarioImpact {
   monthlyAvailableBefore: number
   monthlyAvailableAfter: number
   monthlyImpact: number // recurring monthly change, from loans, cards, new/cancelled costs, or a salary change
-  loanImpacts: LoanImpact[]
+  loanImpacts: LoanImpact[] // exclusions keep their own card; lump sums/overpayments are in debtImpacts
   salaryChangeImpact: SalaryChangeImpact | null
   savingsPotImpacts: SavingsPotImpact[]
+  debtImpacts: DebtImpact[]
 }
 
 /** A credit card's monthly cost has no location/split concept (CreditCard.ownerId is the sole owner, always) — so unlike a loan/bill this is either the full amount or nothing, never a partial share. */
@@ -187,6 +188,20 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
     return `${kind}:${id}`
   }
 
+  // Every dated lump sum / recurring overpayment landing on a debt, kept
+  // alongside the untouched loanImpacts above purely so the card can show
+  // one section per date (Adam, 2026-09-17: match the savings pot layout).
+  // Recorded from INSIDE the pool cascade, so a section's lump sum is the
+  // amount that target actually absorbed, not the action's raw value. A
+  // credit card has no dated maths, so its actions all land on today.
+  const debtActions = new Map<string, { kind: ScenarioTargetKind; id: string; actions: DebtAction[] }>()
+  function recordDebtAction(kind: ScenarioTargetKind, id: string, entry: DebtAction) {
+    const key = targetKey(kind, id)
+    const existing = debtActions.get(key) ?? { kind, id, actions: [] }
+    existing.actions.push(entry)
+    debtActions.set(key, existing)
+  }
+
   function workingRemaining(kind: ScenarioTargetKind, id: string): number {
     const key = targetKey(kind, id)
     if (!workingRemainingMap.has(key)) {
@@ -243,6 +258,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         // decide HOW MUCH goes where (unchanged), but what happens to the
         // loan afterward is now genuinely simulated from action.date, not
         // assumed to happen today.
+        if (applied > 0) recordDebtAction(kind, id, { date: kind === 'loan' ? action.date || todayStr : todayStr, lumpSum: applied, recastMode: action.recastMode ?? 'reduce_term' })
         if (kind === 'loan' && applied > 0) {
           const eventDate = action.date || todayIso()
           addLoanEvent(id, { date: eventDate, amount: applied, recastMode: action.recastMode ?? 'reduce_term' })
@@ -285,6 +301,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
       if (target) {
         const key = targetKey(target.kind, target.id)
         overpayments.set(key, (overpayments.get(key) ?? 0) + action.value)
+        if (action.value > 0) recordDebtAction(target.kind, target.id, { date: target.kind === 'loan' ? action.date || todayStr : todayStr, overpayment: action.value })
 
         // Loan targets: also materialize this as a monthly SERIES of real
         // dated events (recastMode always 'reduce_term' — a recurring
@@ -637,6 +654,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
     loanImpacts,
     salaryChangeImpact,
     savingsPotImpacts,
+    debtImpacts: buildDebtImpacts(debtActions, data, personId, todayStr),
   }
 }
 
@@ -819,6 +837,225 @@ function buildSavingsPotImpact(pot: AppData['savingsPots'][number], actions: Dat
   }
 }
 
+interface DebtAction {
+  date: string
+  lumpSum?: number
+  overpayment?: number
+  recastMode?: 'reduce_term' | 'reduce_payment'
+}
+
+/**
+ * One date's changes to a loan or credit card, in the same shape the
+ * savings pot card uses (Adam, 2026-09-17). Sections build on each other:
+ * "before" is the debt with the earlier sections' actions applied, "after"
+ * adds this date's.
+ */
+export interface DebtSection {
+  date: string
+  lumpSum: number
+  recastMode: 'reduce_term' | 'reduce_payment' | null // lump sums only
+  newRecurringOverpayment: number | null // extra per month starting this date
+  balanceOnDateBefore: number
+  balanceOnDateAfter: number
+  monthlyPaymentBefore: number
+  monthlyPaymentAfter: number
+  // Loans only; a credit card's payoff maths has no dates, so it reports
+  // months rather than a finish date.
+  finishDateBefore: string | null
+  finishDateAfter: string | null
+  monthsRemainingBefore: number
+  monthsRemainingAfter: number
+  monthsSaved: number
+  fullyPaidOff: boolean
+  /** The viewer's own share of the monthly payment change: positive frees cash, negative costs it. */
+  monthlyCashChange: number
+}
+
+/** ONE record per loan or credit card a scenario acts on: where it stands now, one section per date, and all changes against now. Excluded debts are not here — they keep their own card (Adam: "leave exclude as it is"). */
+export interface DebtImpact {
+  targetKind: ScenarioTargetKind
+  targetId: string
+  targetName: string
+  dated: boolean // false for a credit card: its one section is always today
+  balanceNow: number
+  monthlyPaymentNow: number
+  finishDateNow: string | null
+  monthsRemainingNow: number
+  sections: DebtSection[]
+  balanceAfterAll: number
+  finishDateAfterAll: string | null
+  monthsRemainingAfterAll: number
+  totalMonthsSaved: number
+  totalLumpSum: number
+  totalMonthlyCashChange: number
+  fullyPaidOff: boolean
+}
+
+/**
+ * Builds the sectioned view of every loan/credit card a scenario touches.
+ *
+ * Deliberately a SEPARATE pass from the loanImpacts loops above, which are
+ * untouched: those own every figure that feeds monthlyImpact/
+ * oneOffCashImpact (and the verify scripts that guard them), while this
+ * only derives what the card displays. The two share their inputs — the
+ * amounts here come from the pool cascade itself (recordDebtAction), not a
+ * second allocation.
+ *
+ * A loan runs through the real amortisation engine once per section:
+ * simulateScenarioLoan with the actions dated on/before that section
+ * ("after") and strictly before it ("before"). A recurring overpayment is
+ * materialized the same way the loanImpacts path does, so both agree.
+ */
+function buildDebtImpacts(
+  debtActions: Map<string, { kind: ScenarioTargetKind; id: string; actions: DebtAction[] }>,
+  data: AppData,
+  personId: string,
+  todayStr: string,
+): DebtImpact[] {
+  const impacts: DebtImpact[] = []
+
+  for (const { kind, id, actions } of debtActions.values()) {
+    const dates = [...new Set(actions.map((a) => a.date))].sort()
+
+    if (kind === 'credit_card') {
+      const card = data.creditCards.find((c) => c.id === id)
+      if (!card) continue
+      const lumpSum = round2(actions.reduce((s, a) => s + (a.lumpSum ?? 0), 0))
+      const overpayment = round2(actions.reduce((s, a) => s + (a.overpayment ?? 0), 0))
+      const balanceAfter = round2(Math.max(0, card.currentBalance - lumpSum))
+      const fullyPaidOff = balanceAfter <= 0
+      const minimumNow = computeMinimumPaymentAmount(card)
+      const paymentAfter = fullyPaidOff ? 0 : round2(Math.min(computeMinimumPaymentAmount({ ...card, currentBalance: balanceAfter }) + overpayment, balanceAfter))
+      const payoffNow = simulateCardPayoffMonths(card, 0)
+      const payoffAfter = fullyPaidOff ? { months: 0 } : simulateCardPayoffMonths({ ...card, currentBalance: balanceAfter }, overpayment)
+      const monthlyCashChange = round2(cardMonthlyCostForPerson(card, minimumNow, personId) - cardMonthlyCostForPerson(card, paymentAfter, personId))
+      impacts.push({
+        targetKind: kind,
+        targetId: id,
+        targetName: card.name,
+        dated: false,
+        balanceNow: card.currentBalance,
+        monthlyPaymentNow: minimumNow,
+        finishDateNow: null,
+        monthsRemainingNow: payoffNow.months,
+        sections: [
+          {
+            date: todayStr,
+            lumpSum,
+            recastMode: null,
+            newRecurringOverpayment: overpayment > 0 ? overpayment : null,
+            balanceOnDateBefore: card.currentBalance,
+            balanceOnDateAfter: balanceAfter,
+            monthlyPaymentBefore: minimumNow,
+            monthlyPaymentAfter: paymentAfter,
+            finishDateBefore: null,
+            finishDateAfter: null,
+            monthsRemainingBefore: payoffNow.months,
+            monthsRemainingAfter: payoffAfter.months,
+            monthsSaved: Math.max(0, payoffNow.months - payoffAfter.months),
+            fullyPaidOff,
+            monthlyCashChange,
+          },
+        ],
+        balanceAfterAll: balanceAfter,
+        finishDateAfterAll: null,
+        monthsRemainingAfterAll: payoffAfter.months,
+        totalMonthsSaved: Math.max(0, payoffNow.months - payoffAfter.months),
+        totalLumpSum: lumpSum,
+        totalMonthlyCashChange: monthlyCashChange,
+        fullyPaidOff,
+      })
+      continue
+    }
+
+    const loan = data.loans.find((l) => l.id === id)
+    if (!loan) continue
+    const original = summarizeLoan(loan)
+
+    const eventsFor = (subset: DebtAction[]): ScenarioLoanEvent[] =>
+      subset.flatMap((a) => {
+        if (a.lumpSum) return [{ date: a.date, amount: a.lumpSum, recastMode: a.recastMode ?? 'reduce_term' }]
+        if (!a.overpayment) return []
+        // Same 600-month materialization the loanImpacts path uses.
+        const start = parseLocalDate(a.date)
+        return Array.from({ length: 600 }, (_, i) => ({ date: toLocalIsoDate(addMonths(start, i)), amount: a.overpayment!, recastMode: 'reduce_term' as const }))
+      })
+
+    // The state of the loan with a given set of actions applied, read at
+    // `date`. The payment is read a month AFTER the section's own date: at
+    // the date itself a lump sum still sits in overpaymentApplied, which is
+    // a one-off, not the ongoing monthly cost.
+    const stateAt = (subset: DebtAction[], date: string) => {
+      const outcome = subset.length > 0 ? simulateScenarioLoan(loan, eventsFor(subset)) : null
+      if (!outcome?.hasSchedule) {
+        return { balance: original.remaining, payment: currentLoanMonthlyCost(loan), finishDate: original.finalPaymentDate, monthsRemaining: original.monthsRemaining, fullyPaidOff: false }
+      }
+      const atDate = scheduleEntryAsOf(outcome.schedule, date)
+      const nextPeriod = scheduleEntryAsOf(outcome.schedule, toLocalIsoDate(addMonths(parseLocalDate(date), 1)))
+      const recurringStillRunning = subset.some((a) => a.overpayment && a.date <= date)
+      const payment = outcome.fullyPaidOff && (nextPeriod?.balanceAfter ?? 0) <= 0.005 ? 0 : nextPeriod ? round2(nextPeriod.scheduledPayment + (recurringStillRunning ? nextPeriod.overpaymentApplied : 0)) : 0
+      return {
+        balance: round2(Math.max(0, atDate?.balanceAfter ?? original.remaining)),
+        payment,
+        finishDate: outcome.finalPaymentDate,
+        monthsRemaining: outcome.monthsRemaining,
+        fullyPaidOff: outcome.fullyPaidOff,
+      }
+    }
+
+    const monthlyShare = (payment: number) => costForPerson(virtualLoanBill(loan, payment), personId, data.people)
+    const sections: DebtSection[] = []
+    for (const date of dates) {
+      const before = actions.filter((a) => a.date < date)
+      const after = actions.filter((a) => a.date <= date)
+      const onDate = actions.filter((a) => a.date === date)
+      const stateBefore = stateAt(before, date)
+      const stateAfter = stateAt(after, date)
+      const lumpSum = round2(onDate.reduce((s, a) => s + (a.lumpSum ?? 0), 0))
+      const overpayment = round2(onDate.reduce((s, a) => s + (a.overpayment ?? 0), 0))
+      sections.push({
+        date,
+        lumpSum,
+        recastMode: lumpSum > 0 ? onDate.find((a) => a.lumpSum)?.recastMode ?? 'reduce_term' : null,
+        newRecurringOverpayment: overpayment > 0 ? overpayment : null,
+        balanceOnDateBefore: stateBefore.balance,
+        balanceOnDateAfter: stateAfter.balance,
+        monthlyPaymentBefore: stateBefore.payment,
+        monthlyPaymentAfter: stateAfter.payment,
+        finishDateBefore: stateBefore.finishDate,
+        finishDateAfter: stateAfter.finishDate,
+        monthsRemainingBefore: stateBefore.monthsRemaining,
+        monthsRemainingAfter: stateAfter.monthsRemaining,
+        monthsSaved: Math.max(0, stateBefore.monthsRemaining - stateAfter.monthsRemaining),
+        fullyPaidOff: stateAfter.fullyPaidOff && stateAfter.balance <= 0.005,
+        monthlyCashChange: round2(monthlyShare(stateBefore.payment) - monthlyShare(stateAfter.payment)),
+      })
+    }
+
+    const last = sections[sections.length - 1]
+    impacts.push({
+      targetKind: kind,
+      targetId: id,
+      targetName: loan.name,
+      dated: true,
+      balanceNow: original.remaining,
+      monthlyPaymentNow: currentLoanMonthlyCost(loan),
+      finishDateNow: original.finalPaymentDate,
+      monthsRemainingNow: original.monthsRemaining,
+      sections,
+      balanceAfterAll: last?.balanceOnDateAfter ?? original.remaining,
+      finishDateAfterAll: last?.finishDateAfter ?? original.finalPaymentDate,
+      monthsRemainingAfterAll: last?.monthsRemainingAfter ?? original.monthsRemaining,
+      totalMonthsSaved: Math.max(0, original.monthsRemaining - (last?.monthsRemainingAfter ?? original.monthsRemaining)),
+      totalLumpSum: round2(actions.reduce((s, a) => s + (a.lumpSum ?? 0), 0)),
+      totalMonthlyCashChange: round2(sections.reduce((s, x) => s + x.monthlyCashChange, 0)),
+      fullyPaidOff: (last?.fullyPaidOff ?? false) && (last?.balanceOnDateAfter ?? 1) <= 0.005,
+    })
+  }
+
+  return impacts
+}
+
 /** A loan's monthly payment represented as a Bill, so it can reuse the same person-split logic. */
 function virtualLoanBill(loan: Loan, cost: number): Bill {
   return {
@@ -870,12 +1107,30 @@ export function calculateHouseholdScenarioImpact(scenario: Scenario, data: AppDa
     }
   }
 
+  // Same treatment for the sectioned debt cards: every figure except the
+  // viewer's own share of the payment is identical across perPerson, so the
+  // first result is taken and only monthlyCashChange is summed back up.
+  const debtImpactsByKey = new Map<string, DebtImpact>()
+  for (const result of perPerson) {
+    for (const di of result.debtImpacts) {
+      const key = `${di.targetKind}:${di.targetId}`
+      const existing = debtImpactsByKey.get(key)
+      if (existing) {
+        existing.totalMonthlyCashChange = round2(existing.totalMonthlyCashChange + di.totalMonthlyCashChange)
+        existing.sections = existing.sections.map((s, i) => ({ ...s, monthlyCashChange: round2(s.monthlyCashChange + (di.sections[i]?.monthlyCashChange ?? 0)) }))
+      } else {
+        debtImpactsByKey.set(key, { ...di, sections: di.sections.map((s) => ({ ...s })) })
+      }
+    }
+  }
+
   return {
     oneOffCashImpact,
     monthlyAvailableBefore,
     monthlyAvailableAfter: round2(monthlyAvailableBefore + monthlyImpact),
     monthlyImpact,
     loanImpacts: Array.from(loanImpactsByKey.values()),
+    debtImpacts: Array.from(debtImpactsByKey.values()),
     salaryChangeImpact: perPerson.find((r) => r.salaryChangeImpact)?.salaryChangeImpact ?? null,
     // Unlike loanImpacts, these never depend on which person the
     // per-person calc was run "for" (a pot belongs to one person — see

@@ -4,7 +4,7 @@ import { toLocalIsoDate, todayIso } from '../lib/date'
 import { useNavigate } from 'react-router-dom'
 import { useLedgerData } from '../context/LedgerContext'
 import { buildLegacyAppData } from '../lib/legacyBridge'
-import { calculateScenarioImpact, calculateHouseholdScenarioImpact, mergeScenarios, resolveTargets, type ScenarioImpact, type LoanImpact, type SavingsPotImpact } from '../lib/scenarios'
+import { calculateScenarioImpact, calculateHouseholdScenarioImpact, mergeScenarios, resolveTargets, type ScenarioImpact, type LoanImpact, type SavingsPotImpact, type DebtImpact } from '../lib/scenarios'
 import { computePurchaseImpacts, computePurchaseImpactsForScenarios, type PurchaseImpact } from '../lib/purchaseImpact'
 import { formatFullDate } from '../lib/format'
 import { calculateNetSalary } from '../lib/tax'
@@ -575,77 +575,31 @@ function ImpactSummary({
         </div>
       )}
 
-      {impact.loanImpacts.map((li) => (
-        <div key={`${li.loanId}-${li.kind}`} className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
-          <p className="text-sm font-medium text-[var(--color-ink)] mb-2">
-            {li.loanName}
-            {li.fullyPaidOff && (
-              <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-positive)' }}>
-                Paid off
-              </span>
-            )}
-            {li.kind === 'exclude' && (
+      {impact.loanImpacts
+        .filter((li) => li.kind === 'exclude')
+        .map((li) => (
+          <div key={`${li.targetKind}-${li.loanId}-exclude`} className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
+            <p className="text-sm font-medium text-[var(--color-ink)] mb-2">
+              {li.loanName}
               <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-ink-faint)' }}>
                 Excluded
               </span>
-            )}
-            {li.kind === 'overpayment' && (
-              <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-coral)' }}>
-                Overpaying
-              </span>
-            )}
-          </p>
-
-          {li.kind === 'payoff' && (
-            <>
-              <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
-                <span>Remaining now</span>
-                <span className="font-mono">£{formatCurrency(li.originalRemaining)}</span>
-              </div>
-              <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
-                <span>Remaining after</span>
-                <span className="font-mono">£{formatCurrency(li.newRemaining)}</span>
-              </div>
-            </>
-          )}
-
-          {li.kind === 'exclude' && (
+            </p>
             <p className="text-xs text-[var(--color-ink-muted)]">
               Balance unchanged (£{formatCurrency(li.originalRemaining)}) — this just stops counting toward your monthly outgoings.
             </p>
-          )}
+            {li.originalMonthlyCostForPerson !== li.newMonthlyCostForPerson && (
+              <CardRow
+                label={viewerId ? 'Your payment' : 'Household payment'}
+                value={`£${formatCurrency(li.originalMonthlyCostForPerson)} → £${formatCurrency(li.newMonthlyCostForPerson)}/mo`}
+                color={'var(--color-positive)'}
+              />
+            )}
+          </div>
+        ))}
 
-          {li.kind === 'overpayment' && (
-            <div className="flex justify-between text-xs mt-1" style={{ color: 'var(--color-negative)' }}>
-              <span>Impact on monthly cash</span>
-              <span className="font-mono">-£{formatCurrency(li.overpaymentPerMonth)}/mo</span>
-            </div>
-          )}
-
-          {li.monthsSaved > 0 && (
-            <div className="flex justify-between text-xs mt-1" style={{ color: 'var(--color-positive)' }}>
-              <span>Time saved</span>
-              <span className="font-mono">{li.monthsSaved} month{li.monthsSaved === 1 ? '' : 's'}</span>
-            </div>
-          )}
-          {li.newEndDate && (
-            <div className="flex justify-between text-xs mt-1" style={{ color: 'var(--color-positive)' }}>
-              <span>New end date</span>
-              <span className="font-mono">{formatFullDate(li.newEndDate)}</span>
-            </div>
-          )}
-          {li.originalMonthlyCostForPerson !== li.newMonthlyCostForPerson && (
-            <div className="flex justify-between text-xs mt-1" style={{ color: li.newMonthlyCostForPerson < li.originalMonthlyCostForPerson ? 'var(--color-positive)' : 'var(--color-negative)' }}>
-              <span>{viewerId ? 'Your payment' : 'Household payment'}</span>
-              <span className="font-mono">
-                £{formatCurrency(li.originalMonthlyCostForPerson)} → £{formatCurrency(li.newMonthlyCostForPerson)}/mo
-              </span>
-            </div>
-          )}
-          {onMakeReal && (li.kind === 'payoff' || (li.kind === 'overpayment' && li.targetKind === 'loan')) && (
-            <MakeRealButton impact={li} onMakeReal={onMakeReal} />
-          )}
-        </div>
+      {impact.debtImpacts.map((di) => (
+        <DebtCard key={`${di.targetKind}-${di.targetId}`} impact={di} viewerId={viewerId} onMakeReal={onMakeReal} loanImpacts={impact.loanImpacts} />
       ))}
 
       {impact.savingsPotImpacts.map((si) => (
@@ -717,6 +671,116 @@ function CardRow({ label, value, color }: { label: string; value: string; color?
     <div className="flex justify-between gap-3 text-xs mt-1" style={{ color: color ?? 'var(--color-ink-muted)' }}>
       <span>{label}</span>
       <span className="font-mono text-right">{value}</span>
+    </div>
+  )
+}
+
+/** One card per loan or credit card: where it stands now, one section per date (each building on the ones before), then all changes against now. Same layout as SavingsPotCard (Adam, 2026-09-17). */
+function DebtCard({
+  impact: di,
+  viewerId,
+  onMakeReal,
+  loanImpacts,
+}: {
+  impact: DebtImpact
+  viewerId?: string
+  onMakeReal?: (li: LoanImpact) => void
+  loanImpacts: LoanImpact[]
+}) {
+  const positive = 'var(--color-positive)'
+  const negative = 'var(--color-negative)'
+  const paymentLabel = viewerId ? 'Your payment' : 'Household payment'
+  const finishLabel = (date: string | null, months: number) => (date ? formatFullDate(date) : months > 0 ? `${monthsLabel(months)} left` : 'Paid off')
+
+  function finishRows(dateBefore: string | null, dateAfter: string | null, monthsBefore: number, monthsAfter: number, monthsSaved: number) {
+    const before = finishLabel(dateBefore, monthsBefore)
+    const after = finishLabel(dateAfter, monthsAfter)
+    if (before === after) return null
+    return (
+      <>
+        <CardRow label={di.dated ? 'Finishes' : 'Paid off in'} value={`${before} → ${after}`} color={positive} />
+        {monthsSaved > 0 && <CardRow label="" value={`${monthsLabel(monthsSaved)} sooner`} color={positive} />}
+      </>
+    )
+  }
+
+  return (
+    <div className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
+      <p className="text-sm font-medium text-[var(--color-ink)] mb-1">
+        {di.targetName}
+        {di.fullyPaidOff && (
+          <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: positive }}>
+            Paid off
+          </span>
+        )}
+      </p>
+
+      <CardRow label="Balance now" value={`£${formatCurrency(di.balanceNow)}`} />
+      <CardRow label={di.targetKind === 'credit_card' ? 'Minimum payment' : 'Monthly payment'} value={`£${formatCurrency(di.monthlyPaymentNow)}/mo`} />
+      {di.finishDateNow && <CardRow label="Finishes" value={formatFullDate(di.finishDateNow)} />}
+      <CardRow label="Months remaining" value={`${di.monthsRemainingNow}`} />
+
+      {di.sections.map((s) => {
+        const matchingImpact = loanImpacts.find((li) => li.loanId === di.targetId && li.targetKind === di.targetKind && (s.lumpSum > 0 ? li.kind === 'payoff' : li.kind === 'overpayment'))
+        return (
+          <div key={s.date}>
+            <div className="flex items-center gap-2 mt-3 mb-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-ink-faint)] whitespace-nowrap">
+                {di.dated ? `${s.newRecurringOverpayment !== null && s.lumpSum === 0 ? 'From ' : ''}${formatFullDate(s.date)}` : 'Today'}
+              </span>
+              <div className="h-px flex-1" style={{ background: 'var(--color-track)' }} />
+            </div>
+
+            {s.lumpSum > 0 && <CardRow label="Lump sum" value={`£${formatCurrency(s.lumpSum)}`} />}
+            {s.lumpSum > 0 && s.recastMode && di.targetKind === 'loan' && (
+              <CardRow label="Then" value={s.recastMode === 'reduce_payment' ? 'Lower the payment' : 'Finish sooner'} />
+            )}
+            {s.newRecurringOverpayment !== null && <CardRow label="Extra per month" value={`£${formatCurrency(s.newRecurringOverpayment)}/mo`} />}
+            {s.balanceOnDateBefore !== s.balanceOnDateAfter && (
+              <CardRow
+                label={di.dated ? `Balance on ${formatFullDate(s.date)}` : 'Balance after'}
+                value={`£${formatCurrency(s.balanceOnDateBefore)} → £${formatCurrency(s.balanceOnDateAfter)}`}
+                color={positive}
+              />
+            )}
+            {finishRows(s.finishDateBefore, s.finishDateAfter, s.monthsRemainingBefore, s.monthsRemainingAfter, s.monthsSaved)}
+            {s.monthlyPaymentBefore !== s.monthlyPaymentAfter && (
+              <CardRow
+                label={paymentLabel}
+                value={`£${formatCurrency(s.monthlyPaymentBefore)} → £${formatCurrency(s.monthlyPaymentAfter)}/mo`}
+                color={s.monthlyPaymentAfter < s.monthlyPaymentBefore ? positive : negative}
+              />
+            )}
+            {s.monthlyCashChange !== 0 && (
+              <CardRow
+                label="Available cash"
+                value={`${s.monthlyCashChange > 0 ? '+' : '-'}£${formatCurrency(Math.abs(s.monthlyCashChange))}/month`}
+                color={s.monthlyCashChange > 0 ? positive : negative}
+              />
+            )}
+            {onMakeReal && matchingImpact && <MakeRealButton impact={matchingImpact} onMakeReal={onMakeReal} />}
+          </div>
+        )
+      })}
+
+      {di.sections.length >= 2 && (
+        <>
+          <div className="flex items-center gap-2 mt-3 mb-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-ink-faint)] whitespace-nowrap">All changes</span>
+            <div className="h-px flex-1" style={{ background: 'var(--color-track)' }} />
+          </div>
+          {di.totalLumpSum > 0 && <CardRow label="Lump sums" value={`£${formatCurrency(di.totalLumpSum)}`} />}
+          <CardRow label="Balance" value={`£${formatCurrency(di.balanceNow)} → £${formatCurrency(di.balanceAfterAll)}`} color={positive} />
+          {finishRows(di.finishDateNow, di.finishDateAfterAll, di.monthsRemainingNow, di.monthsRemainingAfterAll, di.totalMonthsSaved)}
+          {di.totalMonthlyCashChange !== 0 && (
+            <CardRow
+              label="Available cash"
+              value={`${di.totalMonthlyCashChange > 0 ? '+' : '-'}£${formatCurrency(Math.abs(di.totalMonthlyCashChange))}/month`}
+              color={di.totalMonthlyCashChange > 0 ? positive : negative}
+            />
+          )}
+        </>
+      )}
     </div>
   )
 }
