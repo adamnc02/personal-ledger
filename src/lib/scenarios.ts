@@ -440,7 +440,13 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
 
       const originalMonthlyCostForPerson = costForPerson(virtualLoanBill(loan, currentLoanMonthlyCost(loan)), personId, data.people)
       const newMonthlyCostForPerson = costForPerson(virtualLoanBill(loan, newMonthlyPayment), personId, data.people)
-      monthlyImpact += originalMonthlyCostForPerson - newMonthlyCostForPerson
+      // The monthly effect is folded in ONCE per target, from debtImpacts
+      // below, not here: a target with both a lump sum and a recurring
+      // overpayment used to add "original − after" from each loop, so the
+      // original was counted twice (Adam-reported 2026-09-17: clearing
+      // mum's Natwest card AND overpaying it netted to £0 monthly, while
+      // the card itself correctly showed +£200).
+
 
       loanImpacts.push({
         loanId: id,
@@ -470,7 +476,13 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
       const newMinimum = computeMinimumPaymentAmount({ ...card, currentBalance: newRemaining })
       const originalMonthlyCostForPerson = cardMonthlyCostForPerson(card, originalMinimum, personId)
       const newMonthlyCostForPerson = fullyPaidOff ? 0 : cardMonthlyCostForPerson(card, newMinimum, personId)
-      monthlyImpact += originalMonthlyCostForPerson - newMonthlyCostForPerson
+      // The monthly effect is folded in ONCE per target, from debtImpacts
+      // below, not here: a target with both a lump sum and a recurring
+      // overpayment used to add "original − after" from each loop, so the
+      // original was counted twice (Adam-reported 2026-09-17: clearing
+      // mum's Natwest card AND overpaying it netted to £0 monthly, while
+      // the card itself correctly showed +£200).
+
 
       const originalPayoff = simulateCardPayoffMonths(card, 0)
       const newPayoff = fullyPaidOff ? { months: 0, totalInterestPaid: 0 } : simulateCardPayoffMonths({ ...card, currentBalance: newRemaining }, 0)
@@ -609,8 +621,13 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
 
       const originalMonthlyCostForPerson = costForPerson(virtualLoanBill(loan, currentLoanMonthlyCost(loan)), personId, data.people)
       const newMonthlyCostForPerson = costForPerson(virtualLoanBill(loan, Math.min(newMonthlyPayment, original.remaining)), personId, data.people)
-      // Overpaying costs more per month now (a negative to available cash)
-      monthlyImpact += originalMonthlyCostForPerson - newMonthlyCostForPerson
+      // The monthly effect is folded in ONCE per target, from debtImpacts
+      // below, not here: a target with both a lump sum and a recurring
+      // overpayment used to add "original − after" from each loop, so the
+      // original was counted twice (Adam-reported 2026-09-17: clearing
+      // mum's Natwest card AND overpaying it netted to £0 monthly, while
+      // the card itself correctly showed +£200).
+
 
       loanImpacts.push({
         loanId: id,
@@ -638,7 +655,13 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
       // Actual new monthly outlay — minimum plus the overpayment, capped to
       // what's actually owed (mirrors the loan case's own capping).
       const newMonthlyCostForPerson = cardMonthlyCostForPerson(card, Math.min(originalMinimum + extraPerMonth, card.currentBalance), personId)
-      monthlyImpact += originalMonthlyCostForPerson - newMonthlyCostForPerson
+      // The monthly effect is folded in ONCE per target, from debtImpacts
+      // below, not here: a target with both a lump sum and a recurring
+      // overpayment used to add "original − after" from each loop, so the
+      // original was counted twice (Adam-reported 2026-09-17: clearing
+      // mum's Natwest card AND overpaying it netted to £0 monthly, while
+      // the card itself correctly showed +£200).
+
 
       const originalPayoff = simulateCardPayoffMonths(card, 0)
       const newPayoff = simulateCardPayoffMonths(card, extraPerMonth)
@@ -663,6 +686,11 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
     }
   }
 
+  // One monthly figure per debt, computed from its final state rather than
+  // summed per action — see the note in the payoff/overpayment loops above.
+  const debtImpacts = buildDebtImpacts(debtActions, data, personId, todayStr)
+  for (const di of debtImpacts) monthlyImpact += di.totalMonthlyCashChange
+
   return {
     oneOffCashImpact: round2(oneOffCashImpact),
     monthlyAvailableBefore,
@@ -671,7 +699,7 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
     loanImpacts,
     salaryChangeImpact,
     savingsPotImpacts,
-    debtImpacts: buildDebtImpacts(debtActions, data, personId, todayStr),
+    debtImpacts,
   }
 }
 

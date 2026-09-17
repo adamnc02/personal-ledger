@@ -172,6 +172,22 @@ console.log('1. Synthetic loan and credit card')
   check('Summary months saved equals the payoff record when that is the only action', single.debtImpacts[0].totalMonthsSaved, single.loanImpacts.find((li) => li.kind === 'payoff')!.monthsSaved)
   check('Monthly impact still matches the sections', rec.monthlyImpact, rs.monthlyCashChange)
 
+  // Regression (Adam-reported, 2026-09-17, mum's backup): with BOTH a lump
+  // sum and a recurring overpayment on one target, the scenario total added
+  // "original − after" from each of the two loops, counting the original
+  // twice. Clearing her Natwest card and overpaying it netted to £0 while
+  // the card itself said +£200. The monthly effect is now folded in once
+  // per debt, from its own final state.
+  for (const [label, imp] of [
+    ['loan, lump + overpayment', run(lump(2000, d1), overpay(100, d2))],
+    ['loan, reduce_payment lump + overpayment', run(lump(2000, d1, 'car-loan', 'loan', 'reduce_payment'), overpay(100, d2))],
+    ['card, lump + overpayment', run(lump(5000, d1, 'card-1', 'credit_card'), overpay(100, d1, 'card-1', 'credit_card'))],
+  ] as [string, ReturnType<typeof run>][]) {
+    check(`Scenario total matches the card (${label})`, imp.monthlyImpact, imp.debtImpacts[0].totalMonthlyCashChange)
+  }
+  const clearedCard = run(lump(5000, d1, 'card-1', 'credit_card'), overpay(100, d1, 'card-1', 'credit_card'))
+  checkTrue('Clearing a card and overpaying it frees the minimum payment, not £0', clearedCard.monthlyImpact > 0, clearedCard.monthlyImpact)
+
   // ---- Credit card: one undated section ----
   const cardImpact = run(lump(500, d1, 'card-1', 'credit_card')).debtImpacts[0]
   check('Credit card: undated, one section dated today', [cardImpact.dated, cardImpact.sections.length, cardImpact.sections[0].date], [false, 1, todayIso()])
