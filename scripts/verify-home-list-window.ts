@@ -102,5 +102,19 @@ console.log('\n3. Home.tsx: every list is bounded')
   check('Personal breakdown passes a window to computeCycleSummary', /computeCycleSummary\(projection\.transactions, projection\.clearedBalance, \{/.test(src))
 }
 
+console.log('\n4b. Home default view (2026-09-17)')
+{
+  const src = readFileSync(new URL('../src/pages/Home.tsx', import.meta.url), 'utf8')
+  check("Default horizon is This cycle", /useState<ProjectionHorizon>\('current_cycle'\)/.test(src))
+  check('Default grouping is list, order is date', /useState<Grouping>\('list'\)/.test(src) && /useState<Order>\('date'\)/.test(src))
+  check('Show cleared defaults off, cycle-end totals default on (so This cycle is one collapsed pill)', /const \[showCleared, setShowCleared\] = useState\(false\)/.test(src) && /const \[cycleTotals, setCycleTotals\] = useState\(true\)/.test(src))
+  check('Group by direction and the forecast default off', /const \[groupByDirection, setGroupByDirection\] = useState\(false\)/.test(src) && /const \[averageSpendForecast, setAverageSpendForecast\] = useState\(false\)/.test(src))
+  const labels = src.slice(src.indexOf('function activeFilterLabels'), src.indexOf('function activeFilterLabels') + 1200)
+  check('The non-default counter matches those defaults', /grouping !== 'list'/.test(labels) && /order !== 'date'/.test(labels) && /if \(showCleared\)/.test(labels) && /if \(!cycleTotals\)/.test(labels) && /if \(groupByDirection\)/.test(labels))
+  check('...and ignores the horizon, which is its own pill', !/horizon/.test(labels))
+  const reset = src.slice(src.indexOf('function resetToDefault'), src.indexOf('function resetToDefault') + 400)
+  check('Reset restores those same defaults and leaves the horizon alone', /setShowCleared\(false\)/.test(reset) && /setCycleTotals\(true\)/.test(reset) && !/setHorizon/.test(reset))
+}
+
 console.log(failures === 0 ? '\nAll Home list window checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

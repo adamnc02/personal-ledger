@@ -1,7 +1,7 @@
 import { addMonths, differenceInCalendarMonths } from 'date-fns'
 import type { AppData, Bill, Loan, Scenario, ScenarioTargetKind } from '../types/models'
 import type { CreditCard, RecurringTemplate } from '../types/ledger'
-import { summarizeLoan, currentLoanMonthlyCost, estimateSettlementFigure, simulateScenarioLoan, scheduleEntryAsOf, type ScenarioLoanEvent } from './loans'
+import { summarizeLoan, currentLoanMonthlyCost, estimateSettlementFigure, simulateScenarioLoan, scheduleEntryAsOf, baselineLoanSchedule, type ScenarioLoanEvent } from './loans'
 import { computeMinimumPaymentAmount, simulateCardPayoffMonths } from './creditCards'
 import { costForPerson } from './bills'
 import { calculateNetSalary } from './tax'
@@ -986,9 +986,25 @@ function buildDebtImpacts(
     // the date itself a lump sum still sits in overpaymentApplied, which is
     // a one-off, not the ongoing monthly cost.
     const stateAt = (subset: DebtAction[], date: string) => {
+      // With nothing applied yet, the loan still runs down on its own, so
+      // "before" reads the untouched schedule at that date — not today's
+      // balance (Adam-reported, 2026-09-17: the first section's before/after
+      // was today's balance → the balance after the lump AND every payment
+      // in between, so a £3,000 lump looked like £4,040).
       const outcome = subset.length > 0 ? simulateScenarioLoan(loan, eventsFor(subset)) : null
-      if (!outcome?.hasSchedule) {
+      const schedule = outcome?.hasSchedule ? outcome.schedule : baselineLoanSchedule(loan)
+      if (schedule.length === 0) {
         return { balance: original.remaining, payment: currentLoanMonthlyCost(loan), finishDate: original.finalPaymentDate, monthsRemaining: original.monthsRemaining, fullyPaidOff: false }
+      }
+      if (!outcome?.hasSchedule) {
+        const atBaseline = scheduleEntryAsOf(schedule, date)
+        return {
+          balance: round2(Math.max(0, atBaseline?.balanceAfter ?? original.remaining)),
+          payment: currentLoanMonthlyCost(loan),
+          finishDate: original.finalPaymentDate,
+          monthsRemaining: original.monthsRemaining,
+          fullyPaidOff: false,
+        }
       }
       const atDate = scheduleEntryAsOf(outcome.schedule, date)
       const nextPeriod = scheduleEntryAsOf(outcome.schedule, toLocalIsoDate(addMonths(parseLocalDate(date), 1)))

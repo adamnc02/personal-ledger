@@ -234,7 +234,12 @@ export function Home() {
   // which are themselves already the defaults below, so this combination
   // renders the cycle-grouped view immediately rather than the plain
   // date-ordered one.
-  const [horizon, setHorizon] = useState<ProjectionHorizon>('three_cycles')
+  // 2026-09-17 (Adam): the default view is This cycle. With cycleTotals on
+  // (also default), it renders as the SAME collapsed cycle pill the Next 3
+  // cycles view shows for the current cycle — one pill instead of three.
+  // The horizon is a pill of its own, not a filter, so it is deliberately
+  // absent from activeFilterLabels and from resetToDefault.
+  const [horizon, setHorizon] = useState<ProjectionHorizon>('current_cycle')
   const [grouping, setGrouping] = useState<Grouping>('list')
   const [order, setOrder] = useState<Order>('date')
   const [cycleTotals, setCycleTotals] = useState(true)

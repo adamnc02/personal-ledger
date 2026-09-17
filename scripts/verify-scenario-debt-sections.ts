@@ -11,12 +11,12 @@
 // debtImpact (Adam: "leave exclude as it is").
 
 import { readFileSync } from 'node:fs'
-import { addMonths, startOfMonth } from 'date-fns'
+import { addMonths, differenceInCalendarMonths, startOfMonth } from 'date-fns'
 import { migrateLedgerData } from '../src/lib/ledgerStorage'
 import { buildLegacyAppData } from '../src/lib/legacyBridge'
 import { calculateScenarioImpact, calculateHouseholdScenarioImpact } from '../src/lib/scenarios'
 import { summarizeLoan } from '../src/lib/loans'
-import { toLocalIsoDate, todayIso } from '../src/lib/date'
+import { toLocalIsoDate, todayIso, parseLocalDate } from '../src/lib/date'
 import type { AppDataV2, CreditCard, Loan, Person } from '../src/types/ledger'
 import type { AppData, Scenario } from '../src/types/models'
 
@@ -106,6 +106,13 @@ console.log('1. Synthetic loan and credit card')
   const s = di.sections
   check('Lump sum: one section on its date', [s.length, s[0].date], [1, d1])
   check('Lump sum: amount is what the target absorbed', s[0].lumpSum, 2000)
+  // Regression (Adam-reported, 2026-09-17): the first section's "before"
+  // used today's balance, not the scheduled balance on its own date, so a
+  // £2,000 lump sum looked like it removed £2,000 plus every payment in
+  // between. The loan keeps paying down on its own before the lump lands.
+  const monthsUntil = Math.max(0, differenceInCalendarMonths(parseLocalDate(d1), new Date()))
+  checkTrue('Lump sum: "before" is the scheduled balance on that date, not today\'s', s[0].balanceOnDateBefore < di.balanceNow, { balanceNow: di.balanceNow, before: s[0].balanceOnDateBefore, monthsUntil })
+  check('Lump sum: before − after is exactly the lump sum', round2(s[0].balanceOnDateBefore - s[0].balanceOnDateAfter), 2000)
   checkTrue('Lump sum: balance on that date drops by about the lump sum', s[0].balanceOnDateBefore - s[0].balanceOnDateAfter >= 1900, { before: s[0].balanceOnDateBefore, after: s[0].balanceOnDateAfter })
   checkTrue('Lump sum: finishes sooner', s[0].monthsSaved > 0 && Boolean(s[0].finishDateAfter && s[0].finishDateBefore && s[0].finishDateAfter < s[0].finishDateBefore), s[0])
   check('Lump sum (reduce_term): the monthly payment is unchanged', s[0].monthlyPaymentAfter, s[0].monthlyPaymentBefore)
@@ -189,6 +196,8 @@ console.log("\n2. Adam's real backup")
   check("The overpayment's cash change matches the viewer's share in the untouched loanImpacts path (£0 here: the loan is the other person's)", di.sections[1].monthlyCashChange, round2(impact.loanImpacts.find((li) => li.kind === 'overpayment')!.originalMonthlyCostForPerson - impact.loanImpacts.find((li) => li.kind === 'overpayment')!.newMonthlyCostForPerson))
   check('The overpayment still raises the payment shown on the card', round2(di.sections[1].monthlyPaymentAfter - di.sections[1].monthlyPaymentBefore), 50)
   check('Lump sums agree with the loanImpacts path', di.totalLumpSum, impact.loanImpacts.find((li) => li.kind === 'payoff')!.lumpSumApplied)
+  check("The lump sum's section removes exactly the lump sum, no more", round2(di.sections[0].balanceOnDateBefore - di.sections[0].balanceOnDateAfter), 500)
+  checkTrue('...and the balance before it is lower than today (payments in between)', di.sections[0].balanceOnDateBefore < di.balanceNow, { now: di.balanceNow, before: di.sections[0].balanceOnDateBefore })
   checkTrue("Every existing saved scenario still computes without throwing", data.scenarios.every((sc) => Boolean(calculateScenarioImpact(sc, data, data.primaryPersonId, 0))), data.scenarios.map((s) => s.name))
 }
 
