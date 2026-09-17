@@ -665,7 +665,7 @@ function ImpactSummary({
               </div>
               <p className="text-[11px] text-[var(--color-ink-faint)] mt-1 leading-relaxed">
                 A single payment, not a monthly change, so it's kept separate from the figures above — whatever's left
-                after every linked loan target and savings goal in this scenario has taken what it needs.
+                after every linked loan target in this scenario has taken what it needs.
               </p>
             </>
           )}
