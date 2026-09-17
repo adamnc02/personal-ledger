@@ -18,6 +18,7 @@ const freshCard: CreditCard = {
   color: '#8b5cf6',
   interestRatePercent: 15.2,
   currentBalance: 1000,
+  balanceAsOfDate: '2026-08-19', // created today, per the scenario
   minimumPayment: { type: 'percent_of_balance', percent: 5 },
   paymentDayOfMonth: 25,
   ownerId: 'p1',
@@ -34,7 +35,7 @@ check("This month's still-upcoming charge (25 Aug) IS still included — the fix
 
 // An ESTABLISHED card, by contrast, should still show its real past —
 // anchored to its own earliest real transaction, not an arbitrary window.
-const establishedCard: CreditCard = { ...freshCard, id: 'natwest2' }
+const establishedCard: CreditCard = { ...freshCard, id: 'natwest2', balanceAsOfDate: '2026-03-01' }
 const oldRealTransaction = {
   id: 't1',
   date: '2026-03-25',

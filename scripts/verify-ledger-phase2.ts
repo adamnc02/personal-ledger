@@ -254,7 +254,7 @@ check('A one-off logged overpayment is STILL its own separate transaction, unaff
 // its own dedicated test group below).
 const compoundingCard: CreditCard = {
   id: 'card-compound', name: 'Amex', categoryId: CREDIT_CARD_CATEGORY_ID, color: '#8b5cf6',
-  interestRatePercent: 0, currentBalance: 500,
+  interestRatePercent: 0, currentBalance: 500, balanceAsOfDate: '2026-08-01',
   minimumPayment: { type: 'percent_of_balance', percent: 5 },
   paymentDayOfMonth: 6, ownerId: 'me', lumpPayments: [], active: true,
 }

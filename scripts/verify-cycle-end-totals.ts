@@ -17,10 +17,11 @@ import { migrateLedgerData } from '../src/lib/ledgerStorage'
 import type { AppDataV2, Loan, Transaction } from '../src/types/ledger'
 
 // Reads a real backup so the fixtures are authoritative app state rather
-// than a hand-built approximation. Defaults to the committed copy under
-// scripts/fixtures; point LEDGER_BACKUP at a fresher export to re-run
-// these checks against current data.
-const BACKUP = process.env.LEDGER_BACKUP ?? new URL('./fixtures/backup-2026-08-24.json', import.meta.url).pathname
+// than a hand-built approximation. Defaults to mum's real 15 Sep 2026 export
+// (the original scripts/fixtures/backup-2026-08-24.json was never committed,
+// so this crashed on every machine from 2026-09-05 until 2026-09-17). Point
+// LEDGER_BACKUP at a fresher export to re-run these checks against current data.
+const BACKUP = process.env.LEDGER_BACKUP ?? '/Users/adamcox/Downloads/App Development & Bug Tracking/shared-finance-ledger/finance-ledger-backup-2026-09-15-mum.json'
 const data = migrateLedgerData(JSON.parse(readFileSync(BACKUP, 'utf8')) as AppDataV2)
 const payCycle = data.payCycles[0]
 const personId = payCycle.personId
@@ -30,11 +31,11 @@ let failures = 0
 function check(label: string, actual: unknown, expected: unknown) {
   const ok = JSON.stringify(actual) === JSON.stringify(expected)
   if (!ok) failures++
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${ok ? '' : `\n        expected ${JSON.stringify(expected)}\n        actual   ${JSON.stringify(actual)}`}`)
+  console.log(`${ok ? '✓' : '✗'}  ${label}${ok ? '' : `\n        expected ${JSON.stringify(expected)}\n        actual   ${JSON.stringify(actual)}`}`)
 }
 function assert(label: string, cond: boolean, detail = '') {
   if (!cond) failures++
-  console.log(`${cond ? 'PASS' : 'FAIL'}  ${label}${cond || !detail ? '' : `\n        ${detail}`}`)
+  console.log(`${cond ? '✓' : '✗'}  ${label}${cond || !detail ? '' : `\n        ${detail}`}`)
 }
 
 // Several dates, so the results don't depend on today happening to sit
@@ -119,7 +120,11 @@ for (const asOf of asOfDates) {
 
 console.log('\n=== 6. Pre-opening-balance overpayment stays out of cleared ===')
 const OPENING = payCycle.openingBalance
-const asOf = new Date(2026, 7, 24)
+// The backup's own export date. An earlier "as of" (this used 24 Aug) sees
+// payments that had already cleared by the export as if they were in the
+// future, which no real device ever does: the card "next charge" and the
+// loan-overpayment checks then fail for reasons that aren't bugs.
+const asOf = new Date(2026, 8, 15)
 const baseline = computeProjection(data, personId, payCycle, 'three_cycles', asOf)
 const mkOverpayment = (date: string): Transaction =>
   ({
@@ -149,9 +154,16 @@ check(`${onIso} overpayment (on the boundary): counted`, on.clearedBalance, roun
 
 // And the loan itself still sees it, which was the whole point of the
 // original exemption. This must hold regardless of the ledger floor.
+// Compared against the loan with NO overpayments: mum has since logged this
+// exact £40 on 22 Feb 2025 for real, so replacing her list with it (as this
+// used to) compared the loan with itself. The loan now carries a calibrated
+// interest rate, so £40 off the balance also saves the interest on it, and
+// the capital drops by at least £40, not exactly £40.
 const hi = data.loans.find((l) => l.name === 'Home Improvements')!
+const noOp: Loan = { ...hi, overpayments: [] }
 const withOp: Loan = { ...hi, overpayments: [{ id: 'op1', date: '2025-02-22', amount: 40, recastMode: 'reduce_term' }] }
-check('loan capital still reduced by the pre-floor overpayment', round2(summarizeLoanProgress(hi, asOf).capitalRemaining - summarizeLoanProgress(withOp, asOf).capitalRemaining), 40)
+const capitalSaved = round2(summarizeLoanProgress(noOp, asOf).capitalRemaining - summarizeLoanProgress(withOp, asOf).capitalRemaining)
+assert('loan capital still reduced by the pre-floor overpayment (by at least £40)', capitalSaved >= 40, `saved ${capitalSaved}`)
 check('opening balance itself untouched', baseline.openingBalance, OPENING)
 
 console.log('\n=== 7. Credit card "due" figures agree across every surface ===')

@@ -80,6 +80,7 @@ const card: CreditCard = {
   color: '#8b5cf6',
   interestRatePercent: 20,
   currentBalance: 1000,
+  balanceAsOfDate: '2026-01-01',
   minimumPayment: { type: 'fixed', amount: 40 },
   paymentDayOfMonth: 15,
   ownerId: 'me',
