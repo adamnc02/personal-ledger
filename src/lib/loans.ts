@@ -242,6 +242,22 @@ export interface ScenarioLoanOutcome {
  * (the loan was already fully paid off by then) — same fallback
  * simulateScenarioLoan's own internal landing-index lookup already uses.
  */
+/**
+ * The loan's own schedule with NO hypothetical events on it — the same
+ * entries simulateScenarioLoan produces, so a What-if section's "before"
+ * figures can be read with scheduleEntryAsOf exactly like its "after" ones.
+ *
+ * 2026-09-17 (Adam-reported): without this, a scenario's FIRST section had
+ * no schedule to read (simulateScenarioLoan returns nothing for an empty
+ * event list) and fell back to today's balance, so "balance on 14 Jan 2027"
+ * showed today's £6,854.55 rather than £5,814.55 — four monthly payments
+ * later — making the lump sum look like it removed £4,040.
+ */
+export function baselineLoanSchedule(loan: Loan): LoanScheduleEntry[] {
+  if (loan.calibratedMonthlyRate == null) return []
+  return buildLedgerLoanSchedule(toSyntheticLedgerLoan(loan))
+}
+
 export function scheduleEntryAsOf(schedule: LoanScheduleEntry[], date: string): LoanScheduleEntry | undefined {
   if (schedule.length === 0) return undefined
   const index = schedule.findIndex((e) => e.date >= date)

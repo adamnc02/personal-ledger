@@ -4,7 +4,7 @@ import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso, parseLocalDate } from '../lib/date'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
-import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
+import { computeProjection, horizonCycles, inCycleWindow, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
 import { averageAdHocSpendForCycle, daysOfSpendHistory, forecastSpendForCycle, hasAnyMatchingSpend, hasSpendHistory, MIN_SPEND_HISTORY_DAYS, type SpendScope } from '../lib/averageSpendForecast'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary, buildJointPersonGroups, type JointPersonGroup } from '../lib/jointLedger'
@@ -34,7 +34,7 @@ import { ProgressRing } from '../components/ProgressRing'
 import { CategoryIcon } from '../components/CategoryIcon'
 import { BalanceSpendChart, SavingsPotPillChart, shortDayLabel, type BalanceSpendView } from '../components/TrendChart'
 import { SAVINGS_CATEGORY_ID, CREDIT_CARD_CATEGORY_ID } from '../types/ledger'
-import { seededCategoryIdForIcon, DEFAULT_POT_CATEGORY_ICON, DEFAULT_POT_CATEGORY_ICON_COLOR } from '../lib/categories'
+import { seededCategoryIdForIcon, distinctByCategory, DEFAULT_POT_CATEGORY_ICON, DEFAULT_POT_CATEGORY_ICON_COLOR } from '../lib/categories'
 import type { AppDataV2, CreditCard, Loan, Pot, SavingsPot, Transaction } from '../types/ledger'
 
 // ── Deck construction — doc addendum on Summary card visibility ────────
@@ -234,7 +234,12 @@ export function Home() {
   // which are themselves already the defaults below, so this combination
   // renders the cycle-grouped view immediately rather than the plain
   // date-ordered one.
-  const [horizon, setHorizon] = useState<ProjectionHorizon>('three_cycles')
+  // 2026-09-17 (Adam): the default view is This cycle. With cycleTotals on
+  // (also default), it renders as the SAME collapsed cycle pill the Next 3
+  // cycles view shows for the current cycle — one pill instead of three.
+  // The horizon is a pill of its own, not a filter, so it is deliberately
+  // absent from activeFilterLabels and from resetToDefault.
+  const [horizon, setHorizon] = useState<ProjectionHorizon>('current_cycle')
   const [grouping, setGrouping] = useState<Grouping>('list')
   const [order, setOrder] = useState<Order>('date')
   const [cycleTotals, setCycleTotals] = useState(true)
@@ -748,7 +753,11 @@ function SalaryBreakdownCard({ data, horizon }: { data: AppDataV2; horizon: Proj
   const summary = useMemo(() => {
     if (!payCycle) return null
     const projection = computeProjection(data, data.primaryPersonId, payCycle, horizon)
-    return computeCycleSummary(projection.transactions, projection.clearedBalance)
+    const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
+    return computeCycleSummary(projection.transactions, projection.clearedBalance, {
+      startIso: toLocalIsoDate(cycles[0].start),
+      endIso: toLocalIsoDate(cycles[cycles.length - 1].end),
+    })
   }, [data, payCycle, horizon])
 
   if (!summary) return null
@@ -1175,6 +1184,15 @@ function DeckDetail(props: {
  * 2026-09-16 on Household, Person grouping is a fixed cycle-outer view
  * that ignores this toggle — see JointDetail/HouseholdDetail.)
  *
+ * 2026-09-17 (Adam-specified): the horizon no longer matters. This used to
+ * require 'three_cycles', on the reasoning that "this cycle" is a single
+ * span with nothing to subtotal — but that made the toggle grey out and
+ * fall back to the flat list exactly when This cycle became the default
+ * view. One cycle still subtotals perfectly well, and renders as the same
+ * collapsed pill the current cycle gets under Next 3 cycles, which is the
+ * point. `horizon` stays in the signature (unused) so every call site
+ * keeps reading the same way.
+ *
  * Widened again (Adam-specified, 2026-09-08) for 'credit_card' — a
  * genuinely different case from the other four, which all share one
  * grouping/order toolkit built around the household's OWN pay cycle.
@@ -1192,11 +1210,10 @@ function DeckDetail(props: {
  * that group, unlike a credit card's own billing-cycle dates, which stay
  * untouched by this change.
  */
-function canShowCycleTotals(entry: DeckEntry, horizon: ProjectionHorizon, grouping: Grouping, order: Order): boolean {
+function canShowCycleTotals(entry: DeckEntry, _horizon: ProjectionHorizon, grouping: Grouping, order: Order): boolean {
   if (entry.kind === 'credit_card') return order === 'date' && grouping !== 'category'
   return (
     (entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot' || entry.kind === 'savings_pot') &&
-    horizon === 'three_cycles' &&
     order === 'date' &&
     grouping !== 'category'
   )
@@ -1480,10 +1497,10 @@ function FiltersSheet({
   // for whether Cycle-end totals currently applies — only what happens
   // when it's false changed (disabled, not omitted).
   //
-  // Cycle-end totals only means anything in the one view that has
-  // multiple cycles to bound (three_cycles) AND a continuous date-ordered
-  // running balance to take a subtotal FROM (list + date) — see
-  // canShowCycleTotals' own comment.
+  // Cycle-end totals needs a continuous date-ordered running balance to
+  // take a subtotal FROM (list + date) — see canShowCycleTotals' own
+  // comment. It no longer needs multiple cycles: under "This cycle" it
+  // renders that one cycle as the same collapsed pill (Adam, 2026-09-17).
   const cycleTotalsApplicable = canShowCycleTotals(entry, horizon, grouping, order)
   // Independent of Cycle-end totals, but still only meaningful for 'list'
   // grouping + 'date' order on a Group-by/Order-by card: 'category'/
@@ -1902,9 +1919,15 @@ function TrendsModal({
 /** Category icons + net signed movement for whatever ledger-eligible transactions landed on `dateIso` — the Balance/Spend chart tooltip's requirement (icons per the prompt doc; the net "£X IN/OUT" figure per the reference screenshots, shown left of the icons). */
 function dayDetailsForDay(transactions: Transaction[], categories: AppDataV2['categories'], dateIso: string): { icons: { key: string; node: ReactNode }[]; netAmount: number } {
   const dayTx = transactions.filter((t) => t.date === dateIso && isLedgerTransaction(t))
-  const icons = dayTx.map((t) => {
+  // One icon per CATEGORY, not per transaction (Adam, 2026-09-17): three
+  // shops on the same day used to show the same icon three times, which says
+  // nothing the first one didn't. Keyed by category so the row stays a
+  // distinct list; first occurrence wins, so the order still follows the
+  // day's own transaction order. An uncategorised row (no matching category)
+  // collapses under one key for the same reason.
+  const icons = distinctByCategory(dayTx).map((t) => {
     const category = categories.find((c) => c.id === t.categoryId)
-    return { key: t.id, node: <CategoryIcon category={category} size={16} /> }
+    return { key: t.categoryId || 'uncategorised', node: <CategoryIcon category={category} size={16} /> }
   })
   const netAmount = dayTx.reduce((sum, t) => sum + signedAmount(t), 0)
   return { icons, netAmount }
@@ -2564,6 +2587,7 @@ function DateOrderedList({
   forecast,
   forecastEndIso,
   cycleStartIso,
+  cycleEndIso,
 }: {
   transactions: Transaction[]
   data: AppDataV2
@@ -2585,6 +2609,8 @@ function DateOrderedList({
    * caller now passes it.
    */
   cycleStartIso?: string
+  /** The last cycle end (2026-09-17, Adam-reported): without it, a row dated after the horizon (e.g. another household member whose own pay cycle ends later) showed here but not in CycleGroupedList. */
+  cycleEndIso?: string
   /**
    * 2026-09-14 (Adam-reported, "This cycle" horizon) — the average spend
    * forecast used to only ever appear inside CycleGroupedList, which
@@ -2612,7 +2638,7 @@ function DateOrderedList({
     running += sign(t)
     return { t, running }
   })
-  const visible = withRunning.filter(({ t }) => (showCleared || t.status !== 'cleared') && (!cycleStartIso || t.date >= cycleStartIso))
+  const visible = withRunning.filter(({ t }) => (showCleared || t.status !== 'cleared') && (!cycleStartIso || t.date >= cycleStartIso) && (!cycleEndIso || t.date <= cycleEndIso))
   const hasForecast = !!forecast && forecast.forecastAmount > 0
   const finalRunning = visible.length > 0 ? visible[visible.length - 1].running : openingRunningBalance
 
@@ -2827,9 +2853,9 @@ function PersonalDetail({
         </p>
 
         {grouping === 'category' ? (
-          <CategoryGroupedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
+          <CategoryGroupedList transactions={inCycleWindow(ledgerTxns, cycles)} data={data} showCleared={showCleared} />
         ) : order === 'amount' ? (
-          <AmountOrderedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
+          <AmountOrderedList transactions={inCycleWindow(ledgerTxns, cycles)} data={data} showCleared={showCleared} />
         ) : cycleTotals ? (
           <CycleGroupedList
             transactions={ledgerTxns}
@@ -2848,6 +2874,7 @@ function PersonalDetail({
             showCleared={showCleared}
             groupByDirection={groupByDirection}
             cycleStartIso={toLocalIsoDate(cycles[0].start)}
+            cycleEndIso={toLocalIsoDate(cycles[cycles.length - 1].end)}
             forecast={forecastByCycle?.get(toLocalIsoDate(cycles[0].start))}
             forecastEndIso={toLocalIsoDate(cycles[0].end)}
           />
@@ -3128,9 +3155,9 @@ function JointDetail({
               groupByPerson
             />
           ) : grouping === 'category' ? (
-            <CategoryGroupedList transactions={jointProjection.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
+            <CategoryGroupedList transactions={inCycleWindow(jointProjection.transactions, cycles)} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
           ) : order === 'amount' ? (
-            <AmountOrderedList transactions={jointProjection.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
+            <AmountOrderedList transactions={inCycleWindow(jointProjection.transactions, cycles)} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
           ) : cycleTotals ? (
             <CycleGroupedList
               transactions={jointProjection.transactions}
@@ -3151,6 +3178,7 @@ function JointDetail({
               amountSign={jointAccountSignedAmount}
               groupByDirection={groupByDirection}
               cycleStartIso={toLocalIsoDate(cycles[0].start)}
+              cycleEndIso={toLocalIsoDate(cycles[cycles.length - 1].end)}
               forecast={forecastByCycle?.get(toLocalIsoDate(cycles[0].start))}
               forecastEndIso={toLocalIsoDate(cycles[0].end)}
             />
@@ -3243,9 +3271,9 @@ function PotDetail({
         </p>
 
         {grouping === 'category' ? (
-          <CategoryGroupedList transactions={projection.transactions} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
+          <CategoryGroupedList transactions={inCycleWindow(projection.transactions, cycles)} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
         ) : order === 'amount' ? (
-          <AmountOrderedList transactions={projection.transactions} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
+          <AmountOrderedList transactions={inCycleWindow(projection.transactions, cycles)} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
         ) : cycleTotals ? (
           <CycleGroupedList
             transactions={projection.transactions}
@@ -3265,6 +3293,7 @@ function PotDetail({
             amountSign={potSignedAmount}
             groupByDirection={groupByDirection}
             cycleStartIso={toLocalIsoDate(cycles[0].start)}
+            cycleEndIso={toLocalIsoDate(cycles[cycles.length - 1].end)}
           />
         )}
       </HomeSection>
@@ -3376,9 +3405,9 @@ function HouseholdDetail({
             buildPersonGroups={(rows) => buildHouseholdPersonGroups(personProjections, rows)}
           />
         ) : grouping === 'category' ? (
-          <CategoryGroupedList transactions={combinedTransactions} data={data} showCleared={showCleared} />
+          <CategoryGroupedList transactions={inCycleWindow(combinedTransactions, combinedCycles)} data={data} showCleared={showCleared} />
         ) : order === 'amount' ? (
-          <AmountOrderedList transactions={combinedTransactions} data={data} showCleared={showCleared} />
+          <AmountOrderedList transactions={inCycleWindow(combinedTransactions, combinedCycles)} data={data} showCleared={showCleared} />
         ) : cycleTotals ? (
           <CycleGroupedList
             transactions={combinedTransactions}
@@ -3389,7 +3418,7 @@ function HouseholdDetail({
             groupByDirection={groupByDirection}
           />
         ) : (
-          <DateOrderedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} showCleared={showCleared} groupByDirection={groupByDirection} cycleStartIso={toLocalIsoDate(combinedCycles[0].start)} />
+          <DateOrderedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} showCleared={showCleared} groupByDirection={groupByDirection} cycleStartIso={toLocalIsoDate(combinedCycles[0].start)} cycleEndIso={toLocalIsoDate(combinedCycles[combinedCycles.length - 1].end)} />
         )}
       </HomeSection>
 

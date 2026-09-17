@@ -39,6 +39,18 @@ export type ProjectionHorizon = 'current_cycle' | 'three_cycles'
  */
 export const THREE_CYCLES_AHEAD = 3
 
+/**
+ * The rows a card should DISPLAY for its horizon: first cycle start to last
+ * cycle end. A projection's transaction list reaches back to the account's
+ * opening-balance date because the running balance needs those rows, so any
+ * list or total built straight from it shows history from before the cycle.
+ */
+export function inCycleWindow<T extends { date: string }>(rows: T[], cycles: { start: Date; end: Date }[]): T[] {
+  const startIso = toIso(cycles[0].start)
+  const endIso = toIso(cycles[cycles.length - 1].end)
+  return rows.filter((r) => r.date >= startIso && r.date <= endIso)
+}
+
 /** Every cycle window inside the horizon, in order, starting with the one containing `asOfDate`. The Summary page's cycle-end grouping folds its rows against exactly these bounds, so grouping and totals can't disagree with the horizon they're drawn from. */
 export function horizonCycles(data: AppDataV2, personId: string, horizon: ProjectionHorizon, asOfDate: Date): { start: Date; end: Date }[] {
   const cycles = [resolveCycleBounds(data, personId, asOfDate)]

@@ -13,6 +13,7 @@ import { schedulePotPreviewWindow, scheduledPotDepositDates, potDepositOccurrenc
 import { FormButtonRow } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { visibleCategoriesFor, seededCategoryIdForIcon } from '../lib/categories'
+import { suggestCategoryForName, type CategorySuggestion } from '../lib/categorySuggestion'
 import {
   recentAndUpcomingOccurrences,
   applyTemplateAmountChange,
@@ -1010,6 +1011,20 @@ function ExpenseForm({
   const [categoryId, setCategoryId] = useState(
     visibleCategoriesFor(data).some((c) => c.id === defaultCategoryId) ? defaultCategoryId : (visibleCategoriesFor(data)[0]?.id ?? ''),
   )
+  // 2026-09-17 (Adam) — the category step starts on the category of the most
+  // recent past transaction with a similar name (lib/categorySuggestion.ts),
+  // recomputed each time the name step is left. Once the person picks a
+  // category themselves, their choice stands even if they go back and edit
+  // the name.
+  const [suggestion, setSuggestion] = useState<CategorySuggestion | null>(null)
+  const [categoryPickedByHand, setCategoryPickedByHand] = useState(false)
+  function applyCategorySuggestion() {
+    if (categoryPickedByHand) return
+    const allowed = new Set(visibleCategoriesFor(data).map((c) => c.id))
+    const match = suggestCategoryForName(name, data.transactions, allowed)
+    setSuggestion(match)
+    if (match) setCategoryId(match.categoryId)
+  }
 
   // 2026-09-13 (dev.md item 5, Adam-specified) — "location" here reuses
   // the exact same flat option list recurring transfers pick from
@@ -1169,7 +1184,15 @@ function ExpenseForm({
           </button>
         </div>
         <EditField label="Name" type="text" value={name} onChange={setName} />
-        <FormButtonRow onCancel={onCancel} onSave={() => setStep('category')} saveLabel="Continue" saveDisabled={!name.trim()} />
+        <FormButtonRow
+          onCancel={onCancel}
+          onSave={() => {
+            applyCategorySuggestion()
+            setStep('category')
+          }}
+          saveLabel="Continue"
+          saveDisabled={!name.trim()}
+        />
       </div>
     )
   }
@@ -1183,7 +1206,20 @@ function ExpenseForm({
             <X size={16} />
           </button>
         </div>
-        <CategoryPicker categories={visibleCategoriesFor(data)} value={categoryId} onChange={setCategoryId} onAddCategory={onAddCategory} />
+        <CategoryPicker
+          categories={visibleCategoriesFor(data)}
+          value={categoryId}
+          onChange={(id) => {
+            setCategoryPickedByHand(true)
+            setCategoryId(id)
+          }}
+          onAddCategory={onAddCategory}
+        />
+        {suggestion && !categoryPickedByHand && categoryId === suggestion.categoryId && (
+          <p className="text-[11px] text-[var(--color-ink-faint)] -mt-1">
+            From your last "{suggestion.matchedName}" on {formatFullDate(suggestion.matchedDate)}
+          </p>
+        )}
         <FormButtonRow
           onCancel={onCancel}
           onSave={() => (skipPaymentMethodStep ? commitSave(type, 'card', creditCardId) : setStep('payment_method'))}

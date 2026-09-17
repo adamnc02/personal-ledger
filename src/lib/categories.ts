@@ -202,3 +202,21 @@ export function defaultCategories(): Category[] {
 export function seededCategoryIdForIcon(icon: BillIconKey): string {
   return `category-seed-${icon}`
 }
+
+/**
+ * One row per category, first occurrence kept (2026-09-17, Adam): the trend
+ * tooltip shows a category icon per contributing transaction, so three shops
+ * on the same day repeated the same icon three times. Rows with no category
+ * collapse under one key for the same reason.
+ */
+export function distinctByCategory<T extends { categoryId?: string }>(rows: T[]): T[] {
+  // Not `new Map(rows.map(...))`: that keeps the LAST row of each category,
+  // which silently reorders the icons by where each category last appeared.
+  const seen = new Set<string>()
+  return rows.filter((r) => {
+    const key = r.categoryId || 'uncategorised'
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}

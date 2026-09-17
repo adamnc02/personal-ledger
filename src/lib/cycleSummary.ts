@@ -81,7 +81,12 @@ function isPotSavingsJointTransfer(t: Transaction): boolean {
   return t.type === 'savings_deposit' || t.type === 'savings_withdrawal' || t.type === 'joint_deposit' || t.type === 'joint_withdrawal' || t.type === 'pot_deposit' || t.type === 'pot_withdrawal'
 }
 
-export function computeCycleSummary(transactions: Transaction[], clearedBalance: number): CycleSummary {
+/**
+ * `window` bounds the income/outgoings buckets to the rows the card shows
+ * (see inCycleWindow). Pending is never bounded: Available = current
+ * balance + every pending row, whatever its date.
+ */
+export function computeCycleSummary(transactions: Transaction[], clearedBalance: number, window?: { startIso: string; endIso: string }): CycleSummary {
   const ledger = transactions.filter(isLedgerTransaction)
 
   let salary = 0
@@ -95,6 +100,7 @@ export function computeCycleSummary(transactions: Transaction[], clearedBalance:
 
   for (const t of ledger) {
     if (t.status === 'pending') pendingDelta += signedAmount(t)
+    if (window && (t.date < window.startIso || t.date > window.endIso)) continue
 
     if (t.direction === 'in') {
       // Pension income counted in the same bucket as salary/bonus — same

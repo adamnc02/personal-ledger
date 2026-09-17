@@ -103,14 +103,10 @@ export type ScenarioActionType =
   // Savings pot actions (PROMPT-07 Part 1, rebuilt against real savings
   // pots after Q6's legacy savings-goal removal took out the old
   // savings-lump-sum action — see DECISIONS-2026-09-15.md Q6). All three
-  // point at `savingsPotId`
-  // below and are modelled as happening TODAY (no `date` field, unlike
-  // pay_off_loan/loan_overpayment) — a pot deposit/withdrawal has no
-  // real-money settlement-timing sensitivity the way a loan lump sum
-  // does, so "if this happened now" is the simplest useful answer.
-  | 'savings_pot_lump_sum' // one-off deposit into a pot
-  | 'savings_pot_withdrawal' // one-off withdrawal from a pot, capped to its current balance
-  | 'savings_pot_recurring_deposit_change' // hypothetical new monthly amount for the pot's recurring transfer-in (added if none exists yet)
+  // point at `savingsPotId` and use `date` below.
+  | 'savings_pot_lump_sum' // one-off deposit into a pot, on `date`
+  | 'savings_pot_withdrawal' // one-off withdrawal from a pot on `date`, capped to the pot's expected balance that day
+  | 'savings_pot_recurring_deposit_change' // new monthly amount for the pot's recurring transfer-in from `date` (added if none exists yet)
 
 // What kind of real thing a scenario action's target points at — a loan or
 // a credit card. Both are valid targets for pay_off_loan/exclude_loan/
@@ -151,6 +147,8 @@ export interface Scenario {
     // Used by 'pay_off_loan' and 'loan_overpayment' when at least one
     // target is a loan (not a credit card — see item d's scope) — when
     // the lump sum lands, or when the recurring extra payment starts.
+    // Also by the three 'savings_pot_*' actions: when the lump sum or
+    // withdrawal happens, or when the new deposit amount starts.
     // Undefined on scenarios saved before this field existed, which keeps
     // resolving to "today" (calculateScenarioImpact's prior, only
     // behaviour); the form itself requires an explicit pick for anything
