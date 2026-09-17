@@ -859,9 +859,20 @@ export function projectedTargetDate(pot: SavingsPot, currentBalance: number, rea
   if (!pot.targetAmount || pot.targetAmount <= currentBalance) return pot.targetAmount ? toIso(asOfDate) : null
   const horizon = addYears(asOfDate, 30)
 
+  const asOfIso = toIso(asOfDate)
   const deposits = generateSavingsDepositTransactions(pot, asOfDate, horizon, transferTemplates, payCycle)
   const interest = generateSavingsInterestTransactions(pot, [...realActivity, ...deposits.map((d, i) => ({ ...d, id: `generated:dep:${i}` }))], asOfDate, horizon)
-  const combined = [...deposits, ...interest].sort((a, b) => a.date.localeCompare(b.date))
+
+  // Real rows dated after asOfDate (e.g. a logged future deposit) aren't in
+  // currentBalance yet, so they're folded in here. Same dedupe as
+  // projectedBalanceAt: a real row replaces a generated one of the same
+  // type and date.
+  const pendingReal = realActivity.filter((t) => transactionTouchesSavingsPot(t, pot.id) && t.date > asOfIso && t.date >= pot.openingDate)
+  const realKeys = new Set(pendingReal.map((t) => `${t.type}:${t.date}`))
+  const combined = [
+    ...pendingReal.map((t) => ({ date: t.date, amount: savingsPotActivityDelta(t, pot.id) })),
+    ...[...deposits, ...interest].filter((t) => !realKeys.has(`${t.type}:${t.date}`)).map((t) => ({ date: t.date, amount: t.amount })),
+  ].sort((a, b) => a.date.localeCompare(b.date))
 
   let balance = currentBalance
   for (const t of combined) {

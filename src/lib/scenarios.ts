@@ -6,6 +6,7 @@ import { computeMinimumPaymentAmount, simulateCardPayoffMonths } from './creditC
 import { costForPerson } from './bills'
 import { calculateNetSalary } from './tax'
 import { todayIso, toLocalIsoDate, parseLocalDate } from './date'
+import { resolveTemplateAmount } from './schedule'
 import { monthlyEquivalentCost } from './legacyBridge'
 import { savingsPotBalanceAsOf, projectedBalanceAt, projectedTargetDate } from './savingsPotLedger'
 import { SAVINGS_CATEGORY_ID } from '../types/ledger'
@@ -45,12 +46,31 @@ export interface SalaryChangeImpact {
   delta: number
 }
 
-// ONE record per savings pot, with every action in the scenario that
-// targets it applied together (Adam, 2026-09-17: one card per pot, "now"
-// at the top, everything below compared against it). A pot belongs to one
-// person, so these figures are the same whoever is viewing; only whether a
-// recurring-deposit change counts toward THIS view's available cash
-// differs (pot owner only, like salary_change).
+// One date's changes to a savings pot. Sections build on each other: "before"
+// is everything scheduled plus the earlier sections, "after" adds this date.
+export interface SavingsPotSection {
+  date: string
+  lumpSum: number
+  withdrawal: number // capped at the pot's expected balance that day
+  oldRecurringMonthlyAmount: number | null // null = no deposit change on this date
+  newRecurringMonthlyAmount: number | null
+  balanceOnDateBefore: number
+  balanceOnDateAfter: number
+  reachDateBefore: string | null // null: no target, already reached, or not within 30 years
+  reachDateAfter: string | null
+  monthsSaved: number // positive = sooner, negative = later
+  // Only when the pot's targetDate is still ahead and not before this date.
+  balanceOnTargetDateBefore: number | null
+  balanceOnTargetDateAfter: number | null
+  oneOffCash: number // withdrawal − lump sum
+  monthlyCashChange: number // old − new monthly deposit
+}
+
+// ONE record per savings pot (Adam, 2026-09-17): the pot now, one section
+// per date, and a summary of all of them against now. A pot belongs to one
+// person, so these figures are the same whoever is viewing; only whether the
+// monthly cash change counts toward THIS view's available cash differs (pot
+// owner only, like salary_change).
 export interface SavingsPotImpact {
   savingsPotId: string
   potName: string
@@ -60,27 +80,20 @@ export interface SavingsPotImpact {
   balanceNow: number
   targetAmount: number | null
   targetDate: string | null
-  // When the pot reaches targetAmount as things stand (null: no target,
-  // or not within 30 years).
   currentReachDate: string | null
-  // Calendar months currentReachDate falls after targetDate (negative =
-  // ahead). null without both dates.
+  // Calendar months currentReachDate falls after targetDate (negative = ahead).
   monthsBehindTarget: number | null
   targetReached: boolean
 
-  // ── The scenario's changes ──
-  lumpSumTotal: number
-  withdrawalTotal: number // capped so the balance never goes below £0
-  balanceAfter: number
-  oldRecurringMonthlyAmount: number | null // null = no recurring change in this scenario
-  newRecurringMonthlyAmount: number | null
+  sections: SavingsPotSection[]
 
-  // ── Before → after, only where the pot has a target ──
-  newReachDate: string | null
-  monthsSaved: number // positive = sooner, negative = later
-  // Only when targetDate is set and still in the future.
-  balanceOnTargetDateBefore: number | null
-  balanceOnTargetDateAfter: number | null
+  // ── All changes vs now ──
+  finalReachDate: string | null
+  totalMonthsSaved: number
+  balanceOnTargetDateNow: number | null
+  balanceOnTargetDateAfterAll: number | null
+  totalOneOffCash: number
+  totalMonthlyCashChange: number
 }
 
 export interface ScenarioImpact {
@@ -110,8 +123,9 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
   let monthlyImpact = 0
   const loanImpacts: LoanImpact[] = []
   const savingsPotImpacts: SavingsPotImpact[] = []
-  const potChanges = new Map<string, PotChange>()
+  const potActions = new Map<string, { pot: AppData['savingsPots'][number]; actions: DatedPotAction[] }>()
   const today = new Date()
+  const todayStr = toLocalIsoDate(today)
   let salaryChangeImpact: SalaryChangeImpact | null = null
 
   // All keyed by `${kind}:${id}` so a loan and a credit card can never
@@ -310,35 +324,21 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
     } else if (action.type === 'savings_pot_lump_sum' || action.type === 'savings_pot_withdrawal' || action.type === 'savings_pot_recurring_deposit_change') {
       const pot = data.savingsPots.find((p) => p.id === action.savingsPotId)
       if (!pot) continue
-      if (!potChanges.has(pot.id)) {
-        potChanges.set(pot.id, { pot, balanceNow: round2(savingsPotBalanceAsOf(pot, data.transactions, today)), lumpSumTotal: 0, withdrawalTotal: 0, newRecurringMonthly: null })
-      }
-      const change = potChanges.get(pot.id)!
-
-      if (action.type === 'savings_pot_lump_sum') {
-        change.lumpSumTotal = round2(change.lumpSumTotal + action.value)
-        oneOffCashImpact -= action.value
-      } else if (action.type === 'savings_pot_withdrawal') {
-        // Capped against the running balance, in action order.
-        const available = round2(change.balanceNow + change.lumpSumTotal - change.withdrawalTotal)
-        const applied = round2(Math.max(0, Math.min(action.value, available)))
-        change.withdrawalTotal = round2(change.withdrawalTotal + applied)
-        oneOffCashImpact += applied
-      } else {
-        // Two changes to the same pot's deposit: the later one wins.
-        change.newRecurringMonthly = action.value
-      }
+      // Undated (saved before dates existed) or in the past: treated as today.
+      const date = action.date && action.date > todayStr ? action.date : todayStr
+      const entry = potActions.get(pot.id) ?? { pot, actions: [] }
+      entry.actions.push({ date, type: action.type, value: action.value })
+      potActions.set(pot.id, entry)
     }
   }
 
-  for (const change of potChanges.values()) {
-    const impact = buildSavingsPotImpact(change, today, data)
+  for (const { pot, actions } of potActions.values()) {
+    const impact = buildSavingsPotImpact(pot, actions, today, data)
     savingsPotImpacts.push(impact)
+    oneOffCashImpact += impact.totalOneOffCash
     // Counts against the OWNER's available cash only, same rule as
     // salary_change's targetPersonId === personId check.
-    if (impact.newRecurringMonthlyAmount !== null && change.pot.personId === personId) {
-      monthlyImpact -= round2(impact.newRecurringMonthlyAmount - (impact.oldRecurringMonthlyAmount ?? 0))
-    }
+    if (pot.personId === personId) monthlyImpact += impact.totalMonthlyCashChange
   }
 
   // --- Lump sum payoffs (now already correctly sequenced/clamped above) ---
@@ -640,83 +640,165 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
   }
 }
 
-interface PotChange {
-  pot: AppData['savingsPots'][number]
-  balanceNow: number
-  lumpSumTotal: number
-  withdrawalTotal: number
-  newRecurringMonthly: number | null
+interface DatedPotAction {
+  date: string
+  type: 'savings_pot_lump_sum' | 'savings_pot_withdrawal' | 'savings_pot_recurring_deposit_change'
+  value: number
+}
+
+interface PotPlan {
+  lumps: { date: string; amount: number }[]
+  withdrawals: { date: string; amount: number }[]
+  recurring: { date: string; monthly: number }[]
 }
 
 /**
- * One pot's "now" vs "after every change in the scenario". Always via
- * savingsPotLedger.ts's own helpers, with the real recurring templates and
- * the owner's pay cycle (Batch 21, APP-KNOWLEDGE.md §1.13a).
+ * One pot: "now", one section per date, and the all-changes summary.
+ * Sections build on each other (Adam, 2026-09-17): a section's "before" is
+ * everything scheduled plus the earlier sections; its "after" adds that
+ * date's changes.
  *
- * The lump sum/withdrawal go in as synthetic activity dated today, not as a
- * higher `currentBalance`: projectedBalanceAt rebuilds the balance from
- * activity and ignores `currentBalance` for any future date, so bumping it
- * alone changed nothing (Adam's 2026-09-17 screenshot: £12,179.26 →
- * £12,179.26 for a £1,000 lump sum).
+ * Always via savingsPotLedger.ts's own helpers, with the real recurring
+ * templates and the owner's pay cycle (Batch 21, APP-KNOWLEDGE.md §1.13a).
+ * Lump sums and withdrawals go in as synthetic activity on their dates:
+ * projectedBalanceAt rebuilds the balance from activity and ignores
+ * `currentBalance` for future dates. A deposit change goes in as an
+ * amountHistory entry on the pot's transfer template, so the real schedule
+ * engine applies it from its date.
  */
-function buildSavingsPotImpact(change: PotChange, today: Date, data: AppData): SavingsPotImpact {
-  const { pot, balanceNow, lumpSumTotal, withdrawalTotal, newRecurringMonthly } = change
+function buildSavingsPotImpact(pot: AppData['savingsPots'][number], actions: DatedPotAction[], today: Date, data: AppData): SavingsPotImpact {
   const payCycle = data.payCycles.find((c) => c.personId === pot.personId)
   const todayStr = toLocalIsoDate(today)
-  const balanceAfter = round2(balanceNow + lumpSumTotal - withdrawalTotal)
+  const balanceNow = round2(savingsPotBalanceAsOf(pot, data.transactions, today))
+  const existingTemplate = data.recurringTemplates.find((t) => t.kind === 'transfer' && t.active && t.transferTo?.type === 'savings' && t.transferTo.savingsPotId === pot.id)
+  // The deposit input is monthly; this scales it to the template's own frequency.
+  const monthlyPerPayment = existingTemplate && existingTemplate.amount > 0 ? monthlyEquivalentCost(existingTemplate) / existingTemplate.amount : 1
 
-  const syntheticActivity: AppData['transactions'] = []
-  const synthetic = { date: todayStr, categoryId: SAVINGS_CATEGORY_ID, paymentMethod: 'bank_transfer' as const, status: 'pending' as const, location: 'personal' as const, ownerId: pot.personId, savingsPotId: pot.id }
-  if (lumpSumTotal > 0) syntheticActivity.push({ ...synthetic, id: 'what-if:lump', amount: lumpSumTotal, direction: 'out', type: 'savings_deposit' })
-  if (withdrawalTotal > 0) syntheticActivity.push({ ...synthetic, id: 'what-if:withdrawal', amount: withdrawalTotal, direction: 'in', type: 'savings_withdrawal' })
-  const afterActivity = [...data.transactions, ...syntheticActivity]
+  function activityFor(plan: PotPlan): AppData['transactions'] {
+    const base = { categoryId: SAVINGS_CATEGORY_ID, paymentMethod: 'bank_transfer' as const, status: 'pending' as const, location: 'personal' as const, ownerId: pot.personId, savingsPotId: pot.id }
+    return [
+      ...data.transactions,
+      ...plan.lumps.map((l, i) => ({ ...base, id: `what-if:lump:${i}`, date: l.date, amount: l.amount, direction: 'out' as const, type: 'savings_deposit' as const })),
+      ...plan.withdrawals.map((w, i) => ({ ...base, id: `what-if:withdrawal:${i}`, date: w.date, amount: w.amount, direction: 'in' as const, type: 'savings_withdrawal' as const })),
+    ]
+  }
 
-  let oldRecurringMonthlyAmount: number | null = null
-  let afterTemplates = data.recurringTemplates
-  if (newRecurringMonthly !== null) {
-    const existing = data.recurringTemplates.find((t) => t.kind === 'transfer' && t.active && t.transferTo?.type === 'savings' && t.transferTo.savingsPotId === pot.id)
-    oldRecurringMonthlyAmount = existing ? monthlyEquivalentCost(existing) : 0
-    if (existing) {
-      // The input is a monthly figure; scale it back to the template's own frequency.
-      const perPaymentToMonthly = existing.amount > 0 ? monthlyEquivalentCost(existing) / existing.amount : 1
-      const hypothetical: RecurringTemplate = { ...existing, amount: round2(newRecurringMonthly / perPaymentToMonthly) }
-      afterTemplates = data.recurringTemplates.map((t) => (t.id === existing.id ? hypothetical : t))
-    } else {
-      afterTemplates = [
-        ...data.recurringTemplates,
-        {
-          id: `what-if:deposit:${pot.id}`,
-          name: `${pot.name} deposit (what-if)`,
-          amount: newRecurringMonthly,
-          categoryId: SAVINGS_CATEGORY_ID,
-          paymentMethod: 'bank_transfer',
-          frequency: 'monthly',
-          anchorDate: todayStr,
-          location: 'personal',
-          ownerId: pot.personId,
-          payee: '',
-          payeeSharePercent: 100,
-          kind: 'transfer',
-          transferFrom: { type: 'personal' },
-          transferTo: { type: 'savings', savingsPotId: pot.id },
-          active: true,
-        },
+  function templatesFor(plan: PotPlan): RecurringTemplate[] {
+    if (plan.recurring.length === 0) return data.recurringTemplates
+    const added = plan.recurring.map((r) => ({ effectiveFrom: r.date, amount: round2(r.monthly / monthlyPerPayment) }))
+    if (existingTemplate) {
+      // The baseline keeps the template's current amount for any date before
+      // its own history, exactly as resolveTemplateAmount does unmodified.
+      const history = [
+        { effectiveFrom: '0000-01-01', amount: existingTemplate.amount },
+        ...(existingTemplate.amountHistory ?? []),
+        ...(existingTemplate.amountEffectiveFrom ? [{ effectiveFrom: existingTemplate.amountEffectiveFrom, amount: existingTemplate.amount }] : []),
+        ...added,
       ]
+      const last = history[history.length - 1]
+      const hypothetical: RecurringTemplate = { ...existingTemplate, amount: last.amount, amountEffectiveFrom: last.effectiveFrom, amountHistory: history.slice(0, -1) }
+      return data.recurringTemplates.map((t) => (t.id === existingTemplate.id ? hypothetical : t))
     }
+    const last = added[added.length - 1]
+    return [
+      ...data.recurringTemplates,
+      {
+        id: `what-if:deposit:${pot.id}`,
+        name: `${pot.name} deposit (what-if)`,
+        amount: last.amount,
+        amountEffectiveFrom: last.effectiveFrom,
+        amountHistory: added.slice(0, -1),
+        categoryId: SAVINGS_CATEGORY_ID,
+        paymentMethod: 'bank_transfer',
+        frequency: 'monthly',
+        anchorDate: added[0].effectiveFrom,
+        location: 'personal',
+        ownerId: pot.personId,
+        payee: '',
+        payeeSharePercent: 100,
+        kind: 'transfer',
+        transferFrom: { type: 'personal' },
+        transferTo: { type: 'savings', savingsPotId: pot.id },
+        active: true,
+      },
+    ]
+  }
+
+  function balanceOn(plan: PotPlan, dateStr: string): number {
+    const activity = activityFor(plan)
+    if (dateStr <= todayStr) return round2(savingsPotBalanceAsOf(pot, activity, today))
+    return round2(projectedBalanceAt(pot, balanceNow, activity, today, parseLocalDate(dateStr), templatesFor(plan), payCycle))
   }
 
   const targetAmount = pot.targetAmount ? pot.targetAmount : null
   const targetReached = targetAmount !== null && balanceNow >= targetAmount
-  const currentReachDate = targetAmount !== null && !targetReached ? projectedTargetDate(pot, balanceNow, data.transactions, today, data.recurringTemplates, payCycle) : null
-  const newReachDate = targetAmount !== null && !targetReached ? projectedTargetDate(pot, balanceAfter, afterActivity, today, afterTemplates, payCycle) : null
-  const monthsSaved = currentReachDate && newReachDate ? differenceInCalendarMonths(parseLocalDate(currentReachDate), parseLocalDate(newReachDate)) : 0
+  function reachDate(plan: PotPlan): string | null {
+    if (targetAmount === null || targetReached) return null
+    // Changes dated today aren't in balanceNow; later ones are folded in by projectedTargetDate.
+    const todayNet = plan.lumps.filter((l) => l.date === todayStr).reduce((s, l) => s + l.amount, 0) - plan.withdrawals.filter((w) => w.date === todayStr).reduce((s, w) => s + w.amount, 0)
+    return projectedTargetDate(pot, round2(balanceNow + todayNet), activityFor(plan), today, templatesFor(plan), payCycle)
+  }
+  const monthsBetween = (from: string | null, to: string | null) => (from && to ? differenceInCalendarMonths(parseLocalDate(from), parseLocalDate(to)) : 0)
 
   const targetDate = pot.targetDate ?? null
-  const monthsBehindTarget = targetDate && currentReachDate ? differenceInCalendarMonths(parseLocalDate(currentReachDate), parseLocalDate(targetDate)) : null
   const targetDateAhead = targetDate !== null && targetDate > todayStr
-  const balanceOnTargetDateBefore = targetDateAhead ? round2(projectedBalanceAt(pot, balanceNow, data.transactions, today, parseLocalDate(targetDate), data.recurringTemplates, payCycle)) : null
-  const balanceOnTargetDateAfter = targetDateAhead ? round2(projectedBalanceAt(pot, balanceAfter, afterActivity, today, parseLocalDate(targetDate), afterTemplates, payCycle)) : null
+  const emptyPlan: PotPlan = { lumps: [], withdrawals: [], recurring: [] }
+  const currentReachDate = reachDate(emptyPlan)
 
+  let plan = emptyPlan
+  let recurringMonthly = existingTemplate ? null : 0
+  const sections: SavingsPotSection[] = []
+  const dates = [...new Set(actions.map((a) => a.date))].sort()
+  for (const date of dates) {
+    const before = plan
+    const after: PotPlan = { lumps: [...plan.lumps], withdrawals: [...plan.withdrawals], recurring: [...plan.recurring] }
+    let lumpSum = 0
+    let withdrawal = 0
+    let newMonthly: number | null = null
+    for (const action of actions.filter((a) => a.date === date)) {
+      if (action.type === 'savings_pot_lump_sum') {
+        lumpSum = round2(lumpSum + action.value)
+        after.lumps.push({ date, amount: action.value })
+      } else if (action.type === 'savings_pot_withdrawal') {
+        // Capped at the pot's expected balance that day, given everything so far.
+        const applied = round2(Math.max(0, Math.min(action.value, balanceOn(after, date))))
+        withdrawal = round2(withdrawal + applied)
+        if (applied > 0) after.withdrawals.push({ date, amount: applied })
+      } else {
+        newMonthly = action.value // two changes on one date: the later action wins
+      }
+    }
+
+    let oldMonthly: number | null = null
+    if (newMonthly !== null) {
+      oldMonthly = recurringMonthly ?? round2(resolveTemplateAmount(existingTemplate!, date) * monthlyPerPayment)
+      after.recurring.push({ date, monthly: newMonthly })
+      recurringMonthly = newMonthly
+    }
+
+    const reachBefore = reachDate(before)
+    const reachAfter = reachDate(after)
+    const onTargetDate = targetDateAhead && date <= targetDate!
+    sections.push({
+      date,
+      lumpSum,
+      withdrawal,
+      oldRecurringMonthlyAmount: oldMonthly,
+      newRecurringMonthlyAmount: newMonthly,
+      balanceOnDateBefore: balanceOn(before, date),
+      balanceOnDateAfter: balanceOn(after, date),
+      reachDateBefore: reachBefore,
+      reachDateAfter: reachAfter,
+      monthsSaved: monthsBetween(reachBefore, reachAfter),
+      balanceOnTargetDateBefore: onTargetDate ? balanceOn(before, targetDate!) : null,
+      balanceOnTargetDateAfter: onTargetDate ? balanceOn(after, targetDate!) : null,
+      oneOffCash: round2(withdrawal - lumpSum),
+      monthlyCashChange: newMonthly !== null ? round2((oldMonthly ?? 0) - newMonthly) : 0,
+    })
+    plan = after
+  }
+
+  const finalReachDate = reachDate(plan)
   return {
     savingsPotId: pot.id,
     potName: pot.name,
@@ -725,17 +807,15 @@ function buildSavingsPotImpact(change: PotChange, today: Date, data: AppData): S
     targetAmount,
     targetDate,
     currentReachDate,
-    monthsBehindTarget,
+    monthsBehindTarget: targetDate && currentReachDate ? differenceInCalendarMonths(parseLocalDate(currentReachDate), parseLocalDate(targetDate)) : null,
     targetReached,
-    lumpSumTotal,
-    withdrawalTotal,
-    balanceAfter,
-    oldRecurringMonthlyAmount,
-    newRecurringMonthlyAmount: newRecurringMonthly,
-    newReachDate,
-    monthsSaved,
-    balanceOnTargetDateBefore,
-    balanceOnTargetDateAfter,
+    sections,
+    finalReachDate,
+    totalMonthsSaved: monthsBetween(currentReachDate, finalReachDate),
+    balanceOnTargetDateNow: targetDateAhead ? balanceOn(emptyPlan, targetDate!) : null,
+    balanceOnTargetDateAfterAll: targetDateAhead ? balanceOn(plan, targetDate!) : null,
+    totalOneOffCash: round2(sections.reduce((s, x) => s + x.oneOffCash, 0)),
+    totalMonthlyCashChange: round2(sections.reduce((s, x) => s + x.monthlyCashChange, 0)),
   }
 }
 

@@ -340,6 +340,13 @@ export function Scenarios() {
                         {action.type === 'purchase' && action.purchaseDate ? (
                           <span className="block text-xs text-[var(--color-ink-faint)] mt-0.5">{formatFullDate(action.purchaseDate)}</span>
                         ) : null}
+                        {REQUIRES_SAVINGS_POT_TARGET.includes(action.type) ? (
+                          <span className="block text-xs text-[var(--color-ink-faint)] mt-0.5">
+                            {data.savingsPots.find((p) => p.id === action.savingsPotId)?.name ?? 'Savings pot'} ·{' '}
+                            {action.type === 'savings_pot_recurring_deposit_change' ? 'from ' : ''}
+                            {action.date ? formatFullDate(action.date) : 'today'}
+                          </span>
+                        ) : null}
                         {action.type === 'new_finance_agreement' && action.termMonths ? (
                           <span className="block text-xs text-[var(--color-ink-faint)] mt-0.5">
                             £{formatCurrency(action.borrowAmount ?? 0)} at {action.aprPercent ?? 0}% APR over {action.termMonths}mo · total £
@@ -714,16 +721,43 @@ function CardRow({ label, value, color }: { label: string; value: string; color?
   )
 }
 
-/** One card per savings pot: the pot as it is now at the top, then every change in the scenario compared against it. */
+/** One card per savings pot: the pot now, one section per date (each building on the ones before), then all changes against now. */
 function SavingsPotCard({ impact: si }: { impact: SavingsPotImpact }) {
   const positive = 'var(--color-positive)'
   const negative = 'var(--color-negative)'
-  const recurringChanged = si.newRecurringMonthlyAmount !== null
-  const reachChanged = si.currentReachDate !== si.newReachDate
+  const showReach = si.targetAmount !== null && !si.targetReached
+  const reachLabel = (date: string | null) => (date ? formatFullDate(date) : 'Not within 30 years')
+  const sooner = (months: number) => (months === 0 ? '' : `${monthsLabel(Math.abs(months))} ${months > 0 ? 'sooner' : 'later'}`)
+  const money = (n: number) => `${n < 0 ? '-' : '+'}£${formatCurrency(Math.abs(n))}`
+  const recurringDates = si.sections.filter((s) => s.newRecurringMonthlyAmount !== null).map((s) => s.date)
 
   let onTrackNote = ''
   if (si.monthsBehindTarget !== null && si.monthsBehindTarget > 0) onTrackNote = ` (${monthsLabel(si.monthsBehindTarget)} late)`
   if (si.monthsBehindTarget !== null && si.monthsBehindTarget < 0) onTrackNote = ` (${monthsLabel(-si.monthsBehindTarget)} early)`
+
+  function divider(label: string) {
+    return (
+      <div className="flex items-center gap-2 mt-3 mb-1">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-ink-faint)] whitespace-nowrap">{label}</span>
+        <div className="h-px flex-1" style={{ background: 'var(--color-track)' }} />
+      </div>
+    )
+  }
+
+  function reachRows(before: string | null, after: string | null, months: number) {
+    if (!showReach || before === after) return null
+    return (
+      <>
+        <CardRow label="Reaches target" value={`${reachLabel(before)} → ${reachLabel(after)}`} color={months >= 0 ? positive : negative} />
+        {months !== 0 && <CardRow label="" value={sooner(months)} color={months > 0 ? positive : negative} />}
+      </>
+    )
+  }
+
+  function targetDateRow(before: number | null, after: number | null) {
+    if (!si.targetDate || before === null || after === null) return null
+    return <CardRow label={`On ${formatFullDate(si.targetDate)}`} value={`£${formatCurrency(before)} → £${formatCurrency(after)}`} color={after >= before ? positive : negative} />
+  }
 
   return (
     <div className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
@@ -734,40 +768,45 @@ function SavingsPotCard({ impact: si }: { impact: SavingsPotImpact }) {
         <CardRow label="Target" value={`£${formatCurrency(si.targetAmount)}${si.targetDate ? ` by ${formatFullDate(si.targetDate)}` : ''}`} />
       )}
       {si.targetReached && <CardRow label="On track for" value="Target reached" color={positive} />}
-      {si.targetAmount !== null && !si.targetReached && (
-        <CardRow label="On track for" value={si.currentReachDate ? `${formatFullDate(si.currentReachDate)}${onTrackNote}` : 'Not within 30 years'} />
-      )}
+      {showReach && <CardRow label="On track for" value={`${reachLabel(si.currentReachDate)}${si.currentReachDate ? onTrackNote : ''}`} />}
 
-      <div className="h-px my-2" style={{ background: 'var(--color-track)' }} />
+      {si.sections.map((s) => {
+        const onlyRecurring = s.newRecurringMonthlyAmount !== null && s.lumpSum === 0 && s.withdrawal === 0
+        return (
+          <div key={s.date}>
+            {divider(`${onlyRecurring ? 'From ' : ''}${formatFullDate(s.date)}`)}
+            {s.lumpSum > 0 && <CardRow label="Lump sum" value={`+£${formatCurrency(s.lumpSum)}`} />}
+            {s.withdrawal > 0 && <CardRow label="Withdrawal" value={`-£${formatCurrency(s.withdrawal)}`} />}
+            {s.newRecurringMonthlyAmount !== null && (
+              <CardRow label="Monthly deposit" value={`£${formatCurrency(s.oldRecurringMonthlyAmount ?? 0)} → £${formatCurrency(s.newRecurringMonthlyAmount)}/mo`} />
+            )}
+            {s.balanceOnDateBefore !== s.balanceOnDateAfter && (
+              <CardRow label={`Balance on ${formatFullDate(s.date)}`} value={`£${formatCurrency(s.balanceOnDateBefore)} → £${formatCurrency(s.balanceOnDateAfter)}`} />
+            )}
+            {reachRows(s.reachDateBefore, s.reachDateAfter, s.monthsSaved)}
+            {targetDateRow(s.balanceOnTargetDateBefore, s.balanceOnTargetDateAfter)}
+            {s.oneOffCash !== 0 && <CardRow label="One-off cash" value={money(s.oneOffCash)} color={s.oneOffCash > 0 ? positive : negative} />}
+            {s.monthlyCashChange !== 0 && (
+              <CardRow label="Available cash" value={`${money(s.monthlyCashChange)}/month`} color={s.monthlyCashChange > 0 ? positive : negative} />
+            )}
+          </div>
+        )
+      })}
 
-      {si.lumpSumTotal > 0 && <CardRow label="Lump sum" value={`+£${formatCurrency(si.lumpSumTotal)}`} />}
-      {si.withdrawalTotal > 0 && <CardRow label="Withdrawal" value={`-£${formatCurrency(si.withdrawalTotal)}`} />}
-      {(si.lumpSumTotal > 0 || si.withdrawalTotal > 0) && <CardRow label="Balance after" value={`£${formatCurrency(si.balanceAfter)}`} />}
-      {recurringChanged && (
-        <CardRow
-          label="Monthly deposit"
-          value={`£${formatCurrency(si.oldRecurringMonthlyAmount ?? 0)} → £${formatCurrency(si.newRecurringMonthlyAmount ?? 0)}/mo`}
-        />
-      )}
-
-      {si.targetAmount !== null && !si.targetReached && reachChanged && (
+      {si.sections.length >= 2 && (
         <>
-          <CardRow
-            label="Reaches target"
-            value={`${si.currentReachDate ? formatFullDate(si.currentReachDate) : 'Not within 30 years'} → ${si.newReachDate ? formatFullDate(si.newReachDate) : 'Not within 30 years'}`}
-            color={si.monthsSaved >= 0 ? positive : negative}
-          />
-          {si.monthsSaved !== 0 && (
-            <CardRow label="" value={`${monthsLabel(Math.abs(si.monthsSaved))} ${si.monthsSaved > 0 ? 'sooner' : 'later'}`} color={si.monthsSaved > 0 ? positive : negative} />
+          {divider('All changes')}
+          {reachRows(si.currentReachDate, si.finalReachDate, si.totalMonthsSaved)}
+          {targetDateRow(si.balanceOnTargetDateNow, si.balanceOnTargetDateAfterAll)}
+          {si.totalOneOffCash !== 0 && <CardRow label="One-off cash" value={money(si.totalOneOffCash)} color={si.totalOneOffCash > 0 ? positive : negative} />}
+          {si.totalMonthlyCashChange !== 0 && (
+            <CardRow
+              label="Available cash"
+              value={`${money(si.totalMonthlyCashChange)}/month${recurringDates.length === 1 ? ` from ${formatFullDate(recurringDates[0])}` : ''}`}
+              color={si.totalMonthlyCashChange > 0 ? positive : negative}
+            />
           )}
         </>
-      )}
-      {si.targetDate && si.balanceOnTargetDateBefore !== null && si.balanceOnTargetDateAfter !== null && (
-        <CardRow
-          label={`On ${formatFullDate(si.targetDate)}`}
-          value={`£${formatCurrency(si.balanceOnTargetDateBefore)} → £${formatCurrency(si.balanceOnTargetDateAfter)}`}
-          color={si.balanceOnTargetDateAfter >= si.balanceOnTargetDateBefore ? positive : negative}
-        />
       )}
     </div>
   )
@@ -812,8 +851,8 @@ function ScenarioForm({
   // A lump-sum/exclude/recurring-overpayment action with nothing linked is
   // never valid to save — see REQUIRES_LOAN_TARGET.
   const actionsAllLinkedWhereRequired = actions.every((a) => !REQUIRES_LOAN_TARGET.includes(a.type) || resolveTargets(a).length > 0)
-  // Same idea for the three savings-pot actions — see REQUIRES_SAVINGS_POT_TARGET.
-  const savingsPotActionsHaveTarget = actions.every((a) => !REQUIRES_SAVINGS_POT_TARGET.includes(a.type) || Boolean(a.savingsPotId))
+  // Same idea for the three savings-pot actions (REQUIRES_SAVINGS_POT_TARGET), which also need a date.
+  const savingsPotActionsHaveTarget = actions.every((a) => !REQUIRES_SAVINGS_POT_TARGET.includes(a.type) || (Boolean(a.savingsPotId) && Boolean(a.date)))
   // A purchase without a date or a cost has nothing to compute against —
   // it would save as a silently inert action, which is exactly the kind
   // of "saved but does nothing" state this app has been bitten by before.
@@ -982,6 +1021,27 @@ function ScenarioForm({
                   className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
                 />
               </label>
+            )}
+
+            {showSavingsPotPicker && (
+              <label className="flex flex-col gap-0.5">
+                <span className="text-[10px] uppercase tracking-wide text-[var(--color-ink-faint)]">
+                  {action.type === 'savings_pot_recurring_deposit_change' ? 'Starts' : action.type === 'savings_pot_withdrawal' ? 'When' : 'When it lands'}
+                </span>
+                <input
+                  type="date"
+                  min={todayIso()}
+                  value={action.date ?? ''}
+                  onChange={(e) => updateAction({ date: e.target.value })}
+                  className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none text-sm"
+                />
+              </label>
+            )}
+
+            {showSavingsPotPicker && !action.date && (
+              <p className="col-span-2 text-[11px]" style={{ color: 'var(--color-negative)' }}>
+                {action.type === 'savings_pot_recurring_deposit_change' ? 'When does the new deposit start?' : 'Pick a date for this.'}
+              </p>
             )}
 
             {showRecastToggle && (
