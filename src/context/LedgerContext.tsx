@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { nanoid } from 'nanoid'
 import type {
   AppDataV2,
@@ -24,7 +24,9 @@ import { categoryForTransfer, buildTransferTransaction, locationsEqual, location
 import { applyCreditCardLocationChange, reassignTransactionsForLocationChange, priorLocationEntry } from '../lib/locationChange'
 
 import type { Scenario } from '../types/models'
-import { defaultLedgerData, defaultPayCycleConfig, loadLedgerData, saveLedgerData } from '../lib/ledgerStorage'
+import { defaultLedgerData, defaultPayCycleConfig } from '../lib/ledgerStorage'
+import { isPromiseLike, type LedgerStore } from '../lib/store/LedgerStore'
+import { localStorageLedgerStore } from '../lib/store/localStorageLedgerStore'
 import { createCategory, removeCategorySafely } from '../lib/categories'
 import { recordCreditCardSpend, recordCreditCardLumpPayment } from '../lib/creditCards'
 import { applyLoanOverpayment, settleLoan, calibrateLoanFromStatementLines, reassignLoanRecurringOverpaymentTransactions, type CalibrationResult } from '../lib/ledgerLoans'
@@ -343,13 +345,64 @@ interface LedgerContextValue {
 
 const LedgerContext = createContext<LedgerContextValue | null>(null)
 
-export function LedgerProvider({ children }: { children: ReactNode }) {
-  const [data, setDataState] = useState<AppDataV2>(() => loadLedgerData() ?? defaultLedgerData())
-  const [importGeneration, setImportGeneration] = useState(0)
+type InitialLoad = { status: 'ready'; data: AppDataV2 } | { status: 'loading'; pending: Promise<AppDataV2 | null> }
+
+/**
+ * Persistence goes through `store` (lib/store/LedgerStore.ts), so this file
+ * is identical in every app and only the store passed in differs. Defaults
+ * to the offline store. The store is read once, on mount.
+ *
+ * A store that loads synchronously renders its data on the very first
+ * render, with no loading state. One that returns a Promise renders nothing
+ * until it resolves.
+ */
+export function LedgerProvider({ children, store: storeProp = localStorageLedgerStore }: { children: ReactNode; store?: LedgerStore }) {
+  const [store] = useState(() => storeProp)
+  const [initial, setInitial] = useState<InitialLoad>(() => {
+    const loaded = store.load()
+    if (isPromiseLike(loaded)) return { status: 'loading', pending: loaded }
+    return { status: 'ready', data: loaded ?? defaultLedgerData() }
+  })
 
   useEffect(() => {
-    saveLedgerData(data)
-  }, [data])
+    if (initial.status !== 'loading') return
+    let cancelled = false
+    initial.pending.then(
+      (loaded) => { if (!cancelled) setInitial({ status: 'ready', data: loaded ?? defaultLedgerData() }) },
+      (err) => {
+        console.error('Failed to load ledger data', err)
+        if (!cancelled) setInitial({ status: 'ready', data: defaultLedgerData() })
+      },
+    )
+    return () => { cancelled = true }
+  }, [initial])
+
+  if (initial.status === 'loading') return null
+  return <LedgerDataProvider store={store} initialData={initial.data}>{children}</LedgerDataProvider>
+}
+
+function LedgerDataProvider({ children, store, initialData }: { children: ReactNode; store: LedgerStore; initialData: AppDataV2 }) {
+  const [data, setDataState] = useState<AppDataV2>(initialData)
+  const [importGeneration, setImportGeneration] = useState(0)
+
+  // Every change is handed to the store with the state it replaced. The
+  // first run passes the just-loaded data as both, which keeps the
+  // long-standing write-back of freshly migrated data on startup.
+  const previousData = useRef(data)
+  useEffect(() => {
+    store.save(data, previousData.current)
+    previousData.current = data
+  }, [data, store])
+
+  // Changes arriving from outside this tab (a sync). A wholesale one is
+  // treated exactly like setData, so pages resync derived state.
+  useEffect(() => {
+    if (!store.subscribe) return
+    return store.subscribe((next, wholesale) => {
+      setDataState(next)
+      if (wholesale) setImportGeneration((g) => g + 1)
+    })
+  }, [store])
 
   // Automatic clearing — runs on every data load/change. autoClearDuePayments
   // returns the SAME `data` reference when there's nothing new to settle,

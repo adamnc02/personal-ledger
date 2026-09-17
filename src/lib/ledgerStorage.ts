@@ -13,11 +13,16 @@ import { toLocalIsoDate } from './date'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 
-const STORAGE_KEY = 'ledger:app-data-v2:v1'
+export const STORAGE_KEY = 'ledger:app-data-v2:v1'
 
-export function loadLedgerData(): AppDataV2 | null {
+// `storage`/`key` are parameters so lib/store/localStorageLedgerStore.ts can
+// point these at a separate key (the test app's sync preview) or an
+// in-memory Storage (verify-ledger-store.ts). `storage` is resolved inside
+// the try, as the bare `localStorage` global always was, so a browser that
+// throws on accessing it is still logged rather than thrown.
+export function loadLedgerData(storage?: Storage, key: string = STORAGE_KEY): AppDataV2 | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = (storage ?? localStorage).getItem(key)
     if (!raw) return null
     return migrateLedgerData(JSON.parse(raw))
   } catch (err) {
@@ -140,9 +145,9 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
   return reconcilePersonReferences(backfilled)
 }
 
-export function saveLedgerData(data: AppDataV2): void {
+export function saveLedgerData(data: AppDataV2, storage?: Storage, key: string = STORAGE_KEY): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+    (storage ?? localStorage).setItem(key, JSON.stringify(data))
   } catch (err) {
     console.error('Failed to save ledger data', err)
   }
