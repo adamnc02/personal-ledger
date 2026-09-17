@@ -65,7 +65,7 @@ check('...tagged location: pot + potId, not personal', billOccs.every((t) => t.l
 
 const dataWithPotBill: AppDataV2 = {
   primaryPersonId: 'me',
-  people: [{ id: 'me', name: 'Me', color: '#fff', salaryHistory: [], salaryOverrides: [], savingsEntries: [] } as unknown as Person],
+  people: [{ id: 'me', name: 'Me', color: '#fff', salaryHistory: [], salaryOverrides: [] } as unknown as Person],
   categories: [],
   recurringTemplates: [potBill],
   loans: [],
@@ -176,7 +176,7 @@ check('An unrelated transaction (different sourceId) is never touched', rewritte
 const orphanBill: RecurringTemplate = { ...potBill, id: 'bill-orphan', ownerId: 'ghost' }
 const dataWithGhostOwner: AppDataV2 = {
   ...dataWithPotBill,
-  people: [{ id: 'me', name: 'Me', color: '#fff', salaryHistory: [], salaryOverrides: [], savingsEntries: [] } as unknown as Person],
+  people: [{ id: 'me', name: 'Me', color: '#fff', salaryHistory: [], salaryOverrides: [] } as unknown as Person],
   recurringTemplates: [orphanBill],
   pots: [], // the pot itself no longer exists either — simulates a pot that was deleted without going through removePot
   primaryPersonId: 'me',

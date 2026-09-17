@@ -5,7 +5,6 @@ import { summarizeLoan, currentLoanMonthlyCost, estimateSettlementFigure, simula
 import { computeMinimumPaymentAmount, simulateCardPayoffMonths } from './creditCards'
 import { costForPerson } from './bills'
 import { calculateNetSalary } from './tax'
-import { monthlyAmountForEntry, monthsUntil } from './savings'
 import { todayIso, toLocalIsoDate, parseLocalDate } from './date'
 
 export interface LoanImpact {
@@ -43,16 +42,6 @@ export interface SalaryChangeImpact {
   delta: number
 }
 
-export interface SavingsLumpSumImpact {
-  personName: string
-  goalName: string
-  lumpSumApplied: number
-  originalRemaining: number
-  newRemaining: number
-  monthsSaved: number
-  hasTargetDate: boolean
-}
-
 export interface ScenarioImpact {
   oneOffCashImpact: number // one-time proceeds/costs, including any lump sum beyond what a loan/card needed
   monthlyAvailableBefore: number
@@ -60,7 +49,6 @@ export interface ScenarioImpact {
   monthlyImpact: number // recurring monthly change, from loans, cards, new/cancelled costs, or a salary change
   loanImpacts: LoanImpact[]
   salaryChangeImpact: SalaryChangeImpact | null
-  savingsImpacts: SavingsLumpSumImpact[]
 }
 
 /** A credit card's monthly cost has no location/split concept (CreditCard.ownerId is the sole owner, always) — so unlike a loan/bill this is either the full amount or nothing, never a partial share. */
@@ -86,7 +74,6 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
   // matched — every map/set below shares this convention.
   const exclusions = new Set<string>()
   const overpayments = new Map<string, number>()
-  const savingsLumpSums = new Map<string, number>() // key: `${personId}:${entryId}`
 
   // Running balance per target as actions are applied in order, so a second
   // action targeting the same loan/card sees what the first one already
@@ -206,20 +193,12 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
       }
       oneOffCashImpact += pool
     } else if (action.type === 'purchase') {
-      // Buying something is one-off cash out, exactly like putting money
-      // into savings below. The DATED view of the same purchase (what the
+      // Buying something is one-off cash out. The DATED view of the same purchase (what the
       // balance will be on the day, and at the end of that cycle) is
       // computed separately in lib/purchaseImpact.ts — this file has no
       // calendar, by design. Counting it here as well is not a
       // double-count: the two answer different questions and are shown as
       // separate figures.
-      oneOffCashImpact -= action.value
-    } else if (action.type === 'savings_lump_sum' && action.savingsEntryId) {
-      const targetPersonId = action.personId || personId
-      const key = `${targetPersonId}:${action.savingsEntryId}`
-      savingsLumpSums.set(key, (savingsLumpSums.get(key) ?? 0) + action.value)
-      // Putting money into savings is spending it, same as buying something —
-      // it leaves whatever one-off cash this scenario generated.
       oneOffCashImpact -= action.value
     } else if (action.type === 'new_bill' || action.type === 'new_finance_agreement') {
       // Both are ongoing monthly costs — a simple new bill, or a finance
@@ -574,40 +553,6 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
     }
   }
 
-  // --- Savings lump sums: how much sooner a goal is hit ---
-  const savingsImpacts: SavingsLumpSumImpact[] = []
-  for (const [key, lumpSum] of savingsLumpSums.entries()) {
-    const [targetPersonId, entryId] = key.split(':')
-    const person = data.people.find((p) => p.id === targetPersonId)
-    const entry = person?.savingsEntries.find((e) => e.id === entryId)
-    if (!person || !entry) continue
-
-    const originalRemaining = Math.max(0, (entry.targetAmount ?? 0) - (entry.currentAmount ?? 0))
-    const newRemaining = round2(Math.max(0, originalRemaining - lumpSum))
-    const hasTargetDate = Boolean(entry.targetDate)
-
-    let monthsSaved = 0
-    if (hasTargetDate) {
-      // Assume the same monthly contribution the goal was already relying on
-      // to hit its date — the lump sum just means fewer months are needed
-      // at that same rate, not a promise to save any faster afterward.
-      const monthlyRate = monthlyAmountForEntry(entry)
-      const originalMonths = monthsUntil(entry.targetDate!)
-      const newMonths = monthlyRate > 0 ? Math.ceil(newRemaining / monthlyRate) : 0
-      monthsSaved = Math.max(0, originalMonths - newMonths)
-    }
-
-    savingsImpacts.push({
-      personName: person.name,
-      goalName: entry.name || 'Unnamed goal',
-      lumpSumApplied: lumpSum,
-      originalRemaining,
-      newRemaining,
-      monthsSaved,
-      hasTargetDate,
-    })
-  }
-
   return {
     oneOffCashImpact: round2(oneOffCashImpact),
     monthlyAvailableBefore,
@@ -615,7 +560,6 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
     monthlyImpact: round2(monthlyImpact),
     loanImpacts,
     salaryChangeImpact,
-    savingsImpacts,
   }
 }
 
@@ -677,7 +621,6 @@ export function calculateHouseholdScenarioImpact(scenario: Scenario, data: AppDa
     monthlyImpact,
     loanImpacts: Array.from(loanImpactsByKey.values()),
     salaryChangeImpact: perPerson.find((r) => r.salaryChangeImpact)?.salaryChangeImpact ?? null,
-    savingsImpacts: perPerson[0]?.savingsImpacts ?? [],
   }
 }
 

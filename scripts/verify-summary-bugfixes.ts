@@ -70,7 +70,7 @@ const jointBill: RecurringTemplate = {
 }
 const dataWithJoint: AppDataV2 = {
   ...base,
-  people: [...base.people, { id: ellaId, name: 'Ella', color: '#7c6fe0', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }],
+  people: [...base.people, { id: ellaId, name: 'Ella', color: '#7c6fe0', salaryHistory: [], salaryOverrides: [] }],
   recurringTemplates: [jointBill],
   jointAccount: { openingBalance: 100, openingBalanceDate: '2026-01-01' },
 }

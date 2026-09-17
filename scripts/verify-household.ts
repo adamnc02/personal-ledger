@@ -11,7 +11,7 @@ function check(label: string, actual: unknown, expected: unknown) {
 }
 
 function person(id: string, name: string): Person {
-  return { id, name, color: '#000000', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+  return { id, name, color: '#000000', salaryHistory: [], salaryOverrides: [] }
 }
 
 function bill(overrides: Partial<RecurringTemplate>): RecurringTemplate {

@@ -31,8 +31,8 @@ function dataWith(overrides: Partial<AppDataV2>): AppDataV2 {
   return {
     primaryPersonId: 'adam',
     people: [
-      { id: 'adam', name: 'Adam', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] },
-      { id: 'ella', name: 'Ella', color: '#4cd08a', salaryHistory: [], salaryOverrides: [], savingsEntries: [] },
+      { id: 'adam', name: 'Adam', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] },
+      { id: 'ella', name: 'Ella', color: '#4cd08a', salaryHistory: [], salaryOverrides: [] },
     ],
     categories: [],
     recurringTemplates: [],

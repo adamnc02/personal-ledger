@@ -176,7 +176,6 @@ function dataWith(payCycle: PayCycleConfig): AppDataV2 {
           },
         ],
         salaryOverrides: [],
-        savingsEntries: [],
       },
     ],
     categories: [],

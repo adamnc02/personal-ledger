@@ -86,7 +86,7 @@ const tutorTemplate: RecurringTemplate = {
 function dataWithTutor(): AppDataV2 {
   return {
     primaryPersonId: 'p1',
-    people: [{ id: 'p1', name: 'Test', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }],
+    people: [{ id: 'p1', name: 'Test', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }],
     categories: [],
     recurringTemplates: [tutorTemplate],
     loans: [],

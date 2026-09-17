@@ -789,7 +789,7 @@ function LedgerDataProvider({ children, store, initialData }: { children: ReactN
 
   const addPerson: LedgerContextValue['addPerson'] = ({ name, color }) => {
     const id = nanoid(8)
-    const person: Person = { id, name, color, salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+    const person: Person = { id, name, color, salaryHistory: [], salaryOverrides: [] }
     setDataState((prev) => ({
       ...prev,
       people: [...prev.people, person],

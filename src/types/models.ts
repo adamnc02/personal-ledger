@@ -1,19 +1,6 @@
 import type { PayFrequency, SalaryDeduction, StudentLoanPlan } from '../lib/tax'
 import type { CreditCard } from './ledger'
 
-export interface SavingsEntry {
-  id: string
-  type: 'goal' | 'plan'
-  name: string
-  includeInSummary: boolean // whether this counts against "Available" balance
-  // 'goal' fields — a target to save toward
-  targetAmount?: number
-  currentAmount?: number
-  targetDate?: string // ISO date, optional
-  // 'plan' fields — a flat recurring commitment, no target
-  monthlyAmount?: number
-}
-
 export interface Person {
   id: string
   name: string
@@ -26,7 +13,6 @@ export interface Person {
     deductions: SalaryDeduction[] // ordered — applied in payroll order, see lib/tax.ts
     employerPensionPercent?: number // informational only, doesn't affect take-home
   }
-  savingsEntries: SavingsEntry[]
 }
 
 // 'pot' added 2026-09-03 (App Dev.md "Pots" backlog item) — a bill/loan's
@@ -113,7 +99,6 @@ export type ScenarioActionType =
   | 'exclude_loan' // simulate as if a loan or credit card's monthly cost didn't count at all
   | 'loan_overpayment' // a recurring extra amount on top of a loan or credit card's normal payment
   | 'salary_change' // hypothetical new gross annual salary, for a chosen person
-  | 'savings_lump_sum' // one-off lump sum toward a savings goal
   | 'purchase' // buying a one-off thing on a specific DATE — see purchaseImpact.ts
 
 // What kind of real thing a scenario action's target points at — a loan or
@@ -167,8 +152,7 @@ export interface Scenario {
     // would normally mean actually calling the lender, unlike a lump sum
     // — so it's always treated as reduce_term regardless of this field.
     recastMode?: 'reduce_term' | 'reduce_payment'
-    personId?: string // for 'salary_change' and 'savings_lump_sum' — whose salary/goal this applies to (defaults to the viewer)
-    savingsEntryId?: string // for 'savings_lump_sum' — which of that person's savings goals it targets
+    personId?: string // for 'salary_change' — whose salary this applies to (defaults to the viewer)
     // Used by 'new_bill' and 'new_finance_agreement' — where the new cost sits and how it's split
     name?: string
     location?: BillLocation

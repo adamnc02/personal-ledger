@@ -9,8 +9,8 @@ function check(label: string, actual: unknown, expected: unknown, tolerance = 0.
   if (!ok) failures++
 }
 
-const adam: Person = { id: 'adam', name: 'Adam', color: '#fff', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
-const ella: Person = { id: 'ella', name: 'Ella', color: '#000', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+const adam: Person = { id: 'adam', name: 'Adam', color: '#fff', salaryHistory: [], salaryOverrides: [] }
+const ella: Person = { id: 'ella', name: 'Ella', color: '#000', salaryHistory: [], salaryOverrides: [] }
 const adamCycle = { ...defaultPayCycleConfig('adam'), openingBalance: 100, openingBalanceDate: '2020-01-01' }
 const ellaCycle = { ...defaultPayCycleConfig('ella'), openingBalance: 50, openingBalanceDate: '2020-01-01' }
 

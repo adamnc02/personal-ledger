@@ -102,7 +102,6 @@ const person: Person = {
     },
   ],
   salaryOverrides: [],
-  savingsEntries: [],
 }
 const payCycle: PayCycleConfig = {
   personId: 'me',

@@ -37,7 +37,6 @@ const retiring: Person = {
   color: '#ff5b4c',
   salaryHistory: [{ id: 's1', personId: 'p1', effectiveFrom: '2026-01-01', grossAnnual: 40000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [], endDate: '2026-06-30' }],
   salaryOverrides: [],
-  savingsEntries: [],
 }
 check('Before end date: snapshot still applies', findApplicableSnapshot(retiring, '2026-06-15')?.id, 's1')
 check('On end date: snapshot still applies (final payment)', findApplicableSnapshot(retiring, '2026-06-30')?.id, 's1')
@@ -53,7 +52,6 @@ const newJob: Person = {
     { id: 's2', personId: 'p2', effectiveFrom: '2026-06-01', grossAnnual: 42000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] },
   ],
   salaryOverrides: [],
-  savingsEntries: [],
 }
 check('A later snapshot with no end date supersedes an earlier ended one', findApplicableSnapshot(newJob, '2026-06-15')?.id, 's2')
 check('The ended snapshot still governs its own (pre-handover) window', findApplicableSnapshot(newJob, '2026-03-01')?.id, 's1')

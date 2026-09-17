@@ -37,7 +37,7 @@ export function loadLedgerData(storage?: Storage, key: string = STORAGE_KEY): Ap
  * a category list already persisted to localStorage from before one of
  * these was introduced would otherwise never gain it automatically, and
  * every generated transaction that's hard-forced onto it (e.g. every
- * savings_contribution onto Savings) would show as "Uncategorised"
+ * generated pot transfer onto Savings) would show as "Uncategorised"
  * forever. Only ADDS missing built-ins by id; never touches existing
  * categories, built-in or otherwise, so a renamed "Bills" or any
  * user-created category is left completely alone.
@@ -63,7 +63,12 @@ export function migrateLedgerData(data: AppDataV2): AppDataV2 {
     // sorting would reassign the very indices this reads (§11.7/§11.7b,
     // decided 2026-09-15). `??` not `||`, so an already-backfilled
     // recordedSeq of 0 is kept rather than silently recomputed.
-    people: (data.people ?? []).map((person) => ({
+    //
+    // `savingsEntries` (legacy savings goals/plans, superseded by SavingsPot
+    // on 2026-09-02) is dropped from every person. Nothing could create an
+    // entry after that date, and both real backups have none (Q6,
+    // DECISIONS-2026-09-15.md), so there is nothing to carry over.
+    people: (data.people ?? []).map(({ savingsEntries: _legacySavingsEntries, ...person }: Person & { savingsEntries?: unknown }) => ({
       ...person,
       salaryHistory: (person.salaryHistory ?? []).map((snapshot, index) => ({ ...snapshot, recordedSeq: snapshot.recordedSeq ?? index })),
     })),
@@ -221,7 +226,6 @@ export function defaultLedgerData(): AppDataV2 {
     color: '#ff5b4c',
     salaryHistory: [],
     salaryOverrides: [],
-    savingsEntries: [],
   }
 
   return {
@@ -249,7 +253,7 @@ export function defaultLedgerData(): AppDataV2 {
  *
  * Interest is unwound too, for the same reason the payment is: under the
  * old model a cleared GENERATED minimum payment posted a cycle's interest
- * to the balance before subtracting itself (applyClearSideEffects), so a
+ * to the balance before subtracting itself (a clear-time side effect, since removed), so a
  * minimum payment that cleared today left both effects baked in. A logged
  * lump payment never posted interest, so only its amount is reversed.
  */

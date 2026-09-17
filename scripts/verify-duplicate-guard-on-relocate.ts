@@ -58,7 +58,6 @@ const person: Person = {
   color: '#ff5b4c',
   salaryHistory: [],
   salaryOverrides: [],
-  savingsEntries: [],
 }
 
 const testBill: RecurringTemplate = {

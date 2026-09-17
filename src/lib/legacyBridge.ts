@@ -9,7 +9,7 @@
 // This is a deliberate choice over rewriting the engine against the
 // ledger types directly — that would mean re-deriving and re-testing 380
 // lines of financial simulation logic (loan overpayment cascades, salary
-// change deltas, savings goal timelines, household aggregation) with real
+// change deltas, household aggregation) with real
 // risk of subtly changing behaviour that already works. Bridging the data
 // is lower-risk and keeps exactly one thing changing at a time.
 //
@@ -65,7 +65,6 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
             employerPensionPercent: snapshot.employerPensionPercent,
           }
         : { grossAnnual: 0, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] },
-      savingsEntries: p.savingsEntries,
     }
   })
 

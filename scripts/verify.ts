@@ -90,8 +90,8 @@ check('currentLoanMonthlyCost is 0 once fully paid off', currentLoanMonthlyCost(
 
 // ---- 3. Bill split percentages, both directions ----
 const people: Person[] = [
-  { id: 'adam', name: 'Adam', color: '#fff', salary: adamSalary, savingsEntries: [] },
-  { id: 'ella', name: 'Ella', color: '#fff', salary: ellaSalary, savingsEntries: [] },
+  { id: 'adam', name: 'Adam', color: '#fff', salary: adamSalary },
+  { id: 'ella', name: 'Ella', color: '#fff', salary: ellaSalary },
 ]
 const splitBill: Bill = {
   id: 'b1',
@@ -206,25 +206,6 @@ const withApr = calculateFinanceAgreement({ borrowAmount: 1000, aprPercent: 12, 
 check('12% APR over 12mo: monthly payment ≈ £88.56 (standard amortisation, compound APR->monthly conversion — not the incorrect APR/12 shortcut this used to use)', withApr.monthlyPayment, 88.56, 0.1)
 check('12% APR: total repayable > borrowed amount (interest applied)', withApr.totalRepayable > 1000, true)
 check('12% APR: totalRepayable = monthlyPayment × term', withApr.totalRepayable, withApr.monthlyPayment * 12, 0.05)
-
-// ---- 9. Savings lump sum: reduces remaining and shows months saved ----
-const adamWithGoal: Person = {
-  ...people[0],
-  savingsEntries: [
-    { id: 'goal1', type: 'goal', name: 'House deposit', includeInSummary: false, targetAmount: 5000, currentAmount: 1000, targetDate: '2027-08-01' },
-  ],
-}
-const savingsData: AppData = { ...scenarioData, people: [adamWithGoal, people[1]], loans: [] }
-const savingsScenario: Scenario = {
-  id: 's4',
-  name: 'Lump sum to house deposit',
-  includeInCumulative: true,
-  actions: [{ id: 'a4', type: 'savings_lump_sum', label: '', value: 2000, personId: 'adam', savingsEntryId: 'goal1' }],
-}
-const savingsImpact = calculateScenarioImpact(savingsScenario, savingsData, 'adam', 1000)
-check('Savings lump sum reduces oneOffCashImpact (money spent into savings)', savingsImpact.oneOffCashImpact, -2000)
-check('Savings lump sum: newRemaining = 4000 - 2000', savingsImpact.savingsImpacts[0]?.newRemaining, 2000)
-check('Savings lump sum: months saved > 0 with a target date', savingsImpact.savingsImpacts[0]?.monthsSaved > 0, true)
 
 // ---- 10. Cascade fix: reproduces the exact reported bug ----
 // Sell for £15,000 across two loans (Monzo needs £7696.19, Car needs

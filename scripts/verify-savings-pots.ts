@@ -142,7 +142,7 @@ const exampleDaily = buildExampleLedger({ type: 'daily_accrual_monthly_credited'
 check('Daily-accrual example ledger includes the illustrative mid-month deposit', exampleDaily.some((r) => r.label === 'Example deposit'), true)
 
 // ---- 12. REGRESSION (Adam-reported, 2026-09-02): recurring deposits/interest must appear in computeProjection's OWN output — not just in savingsPotLedger.ts's own helpers. This is the actual bug: the Wallet ledger modal and Home's pot cards called the generators directly and worked fine; the Home page's PERSONAL LEDGER list (computeProjection) never called them at all, so only hand-logged deposits/withdrawals (real stored Transactions) ever showed up there. ----
-const projPerson: Person = { id: 'p1', name: 'Pat', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+const projPerson: Person = { id: 'p1', name: 'Pat', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }
 const projPayCycle = { ...defaultPayCycleConfig('p1'), openingBalanceDate: '2026-01-01', openingBalance: 1000 }
 // 2026-09-14 — interestDestination: personal explicitly, so this pot's
 // generated interest is genuinely destined for THIS ledger; a pot with no

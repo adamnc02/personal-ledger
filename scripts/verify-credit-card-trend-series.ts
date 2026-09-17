@@ -9,7 +9,7 @@ function check(label: string, actual: unknown, expected: unknown, tolerance = 0.
   if (!ok) failures++
 }
 
-const me: Person = { id: 'me', name: 'Me', color: '#fff', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }
+const me: Person = { id: 'me', name: 'Me', color: '#fff', salaryHistory: [], salaryOverrides: [] }
 const payCycle = { ...defaultPayCycleConfig('me'), openingBalanceDate: '2020-01-01' }
 
 const card: CreditCard = {

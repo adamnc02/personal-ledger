@@ -20,7 +20,6 @@
 // is impossible rather than merely patched.
 
 import { cardBalanceAsOf, withLiveBalance, recordCreditCardSpend, recordCreditCardLumpPayment, totalPaidForCard, generateMinimumPaymentTransactions } from '../src/lib/creditCards'
-import { applyClearSideEffects } from '../src/lib/clearTransaction'
 import { migrateLedgerData } from '../src/lib/ledgerStorage'
 import { toLocalIsoDate } from '../src/lib/date'
 import { CREDIT_CARD_CATEGORY_ID } from '../src/types/ledger'
@@ -100,10 +99,10 @@ check('Spend increases the derived balance', cardBalanceAsOf(card, [{ ...spend.t
 check('A spend never counts as "paid"', totalPaidForCard('card-1', [{ ...spend.transaction, id: 'tx-spend' }], new Date(2026, 7, 25)), 0)
 
 // ---- 4. No double-counting: clearing has no side effect any more ----
-const data: AppDataV2 = { people: [], categories: [], recurringTemplates: [], loans: [], creditCards: [card], pensions: [], transactions: paid200, payCycles: [], scenarios: [], primaryPersonId: '' }
-const afterClear = applyClearSideEffects(data, paid200[0])
-check('applyClearSideEffects is a no-op for credit card payments (reintroducing the mutation would double-count)', afterClear.creditCards[0].currentBalance, 1600)
-check('...so the derived balance after a clear pass is still the single, correct figure', cardBalanceAsOf(afterClear.creditCards[0], afterClear.transactions, today), 1400)
+// clearTransaction.ts (applyClearSideEffects) was deleted on 2026-09-17 with
+// the legacy savingsEntries: its only remaining branch was the savings-goal
+// one. Clearing is a pure status flip, so the derived balance is the single figure.
+check('The derived balance after the payment is the single, correct figure', cardBalanceAsOf(card, paid200, today), 1400)
 
 // ---- 5. Interest posts on billing dates after the anchor, once each ----
 const interestCard: CreditCard = { ...card, id: 'card-i', currentBalance: 1000, balanceAsOfDate: '2026-08-14', interestRatePercent: 22.9, minimumPayment: { type: 'fixed', amount: 0 } }

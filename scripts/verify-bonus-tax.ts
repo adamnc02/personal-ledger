@@ -125,7 +125,6 @@ const person: Person = {
   color: '#ff5b4c',
   salaryHistory: [{ id: 'snap-1', personId: 'me', effectiveFrom: '2026-01-01', ...realSalary }],
   salaryOverrides: [],
-  savingsEntries: [],
 }
 check('With no bonus, the period reports plain snapshot net pay', computeNetPayForPeriod(person, '2026-09-14'), 2938.89, 0.01)
 check('computeNetBonusAmount agrees with calculateBonusOnTop', computeNetBonusAmount(person, '2026-09-14', 1000), 572.28, 0.01)

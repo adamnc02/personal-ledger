@@ -114,7 +114,7 @@ function danglingReferences(data: AppDataV2): string[] {
 const base = defaultLedgerData()
 const ADAM = base.primaryPersonId
 const ELLA = 'ella'
-const person = (id: string, name: string): Person => ({ id, name, color: '#7c6fe0', salaryHistory: [], salaryOverrides: [], savingsEntries: [] })
+const person = (id: string, name: string): Person => ({ id, name, color: '#7c6fe0', salaryHistory: [], salaryOverrides: [] })
 
 function template(id: string, overrides: Partial<RecurringTemplate>): RecurringTemplate {
   return {

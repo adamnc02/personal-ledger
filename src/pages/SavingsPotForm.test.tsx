@@ -35,7 +35,7 @@ describe('SavingsPotForm repro — 10000 becoming 9990 on save', () => {
   it('types field-by-field in top-to-bottom order and checks what actually gets saved', async () => {
     const user = userEvent.setup()
     const onSave = vi.fn()
-    render(<SavingsPotForm people={[{ id: 'p1', name: 'Beverley', color: '#fff', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }]} defaultPersonId="p1" onCancel={() => {}} onSave={onSave} />)
+    render(<SavingsPotForm people={[{ id: 'p1', name: 'Beverley', color: '#fff', salaryHistory: [], salaryOverrides: [] }]} defaultPersonId="p1" onCancel={() => {}} onSave={onSave} />)
 
     // "New pot" chooser first
     await user.click(screen.getByText(/New pot/))
@@ -62,7 +62,7 @@ describe('SavingsPotForm repro — 10000 becoming 9990 on save', () => {
   it('types Target amount BEFORE Monthly deposit — out of DOM order, the more realistic mobile-tap scenario', async () => {
     const user = userEvent.setup()
     const onSave = vi.fn()
-    render(<SavingsPotForm people={[{ id: 'p1', name: 'Beverley', color: '#fff', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }]} defaultPersonId="p1" onCancel={() => {}} onSave={onSave} />)
+    render(<SavingsPotForm people={[{ id: 'p1', name: 'Beverley', color: '#fff', salaryHistory: [], salaryOverrides: [] }]} defaultPersonId="p1" onCancel={() => {}} onSave={onSave} />)
     await user.click(screen.getByText(/New pot/))
     await user.type(screen.getByPlaceholderText('e.g. Rainy day fund'), 'house deposit')
     await user.clear(screen.getByLabelText('AER (%)'))
@@ -83,7 +83,7 @@ describe('SavingsPotForm repro — 10000 becoming 9990 on save', () => {
   it('edits On day of month AFTER Target amount is filled', async () => {
     const user = userEvent.setup()
     const onSave = vi.fn()
-    render(<SavingsPotForm people={[{ id: 'p1', name: 'Beverley', color: '#fff', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }]} defaultPersonId="p1" onCancel={() => {}} onSave={onSave} />)
+    render(<SavingsPotForm people={[{ id: 'p1', name: 'Beverley', color: '#fff', salaryHistory: [], salaryOverrides: [] }]} defaultPersonId="p1" onCancel={() => {}} onSave={onSave} />)
     await user.click(screen.getByText(/New pot/))
     await user.type(screen.getByPlaceholderText('e.g. Rainy day fund'), 'house deposit')
     await user.clear(screen.getByLabelText('AER (%)'))
@@ -110,7 +110,7 @@ describe('SavingsPotForm repro — 10000 becoming 9990 on save', () => {
 // Monthly. These drive the real form, so they prove the choice reaches
 // onSave — not just that a helper returns the right shape.
 describe('SavingsPotForm — interest crediting frequency', () => {
-  const people = [{ id: 'p1', name: 'Beverley', color: '#fff', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }]
+  const people = [{ id: 'p1', name: 'Beverley', color: '#fff', salaryHistory: [], salaryOverrides: [] }]
 
   for (const frequency of ['monthly', 'quarterly', 'annual'] as const) {
     it(`saves a new pot credited ${frequency} as exactly '${frequency}', and the explanation says so`, async () => {

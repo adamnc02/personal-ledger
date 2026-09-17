@@ -2,7 +2,7 @@
 //  - the DATED figures (lib/purchaseImpact.ts) — balance on the day, and
 //    the projected balance at the end of the cycle that day falls in;
 //  - the UNDATED figure (lib/scenarios.ts) — a purchase is one-off cash
-//    out, same as a savings lump sum;
+//    out, same as selling an asset in reverse;
 //  - that the two are consistent rather than double-counting.
 //
 // The assertions that matter most are the ones tying purchaseImpact's
@@ -29,7 +29,7 @@ function check(label: string, actual: unknown, expected: unknown) {
     passed++
   } else {
     failed++
-    console.error(`FAIL: ${label}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`)
+    console.error(`✗ ${label}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`)
   }
 }
 
@@ -71,7 +71,7 @@ function tx(id: string, date: string, amount: number, status: 'cleared' | 'pendi
 
 const data: AppDataV2 = {
   primaryPersonId: 'p1',
-  people: [{ id: 'p1', name: 'Test', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [], savingsEntries: [] }],
+  people: [{ id: 'p1', name: 'Test', color: '#ff5b4c', salaryHistory: [], salaryOverrides: [] }],
   categories: [],
   recurringTemplates: [],
   loans: [],
@@ -224,11 +224,11 @@ check('a scenario with no purchases at all returns an empty list', computePurcha
 
 // ── 9. The undated engine still counts it as one-off cash out ───────────
 // lib/scenarios.ts has no calendar, but a purchase is still money
-// leaving — it has to show in oneOffCashImpact exactly like a savings
-// lump sum, or the existing summary silently under-reports.
+// leaving — it has to show in oneOffCashImpact exactly like any
+// other one-off cost, or the existing summary silently under-reports.
 
 const legacyData: AppData = {
-  people: [{ id: 'p1', name: 'Test', color: '#ff5b4c', salary: { grossAnnual: 0, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] }, savingsEntries: [] }],
+  people: [{ id: 'p1', name: 'Test', color: '#ff5b4c', salary: { grossAnnual: 0, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] } }],
   bills: [],
   loans: [],
   creditCards: [],
@@ -259,8 +259,13 @@ check('a purchase nets off against a sale in the same scenario', calculateScenar
 // so the cycle a purchase is measured against must follow the override
 // rather than the fixed day.
 
+// The override has to be STORED in data.payCycles as well as passed in:
+// the app always passes the stored config (Scenarios.tsx), and the cycle
+// lookup reads the stored one (resolveCycleBounds). Passing it only as the
+// argument described a state the app never produces, and failed.
 const followsPayday: PayCycleConfig = { ...payCycle, paydayDayOfMonth: 28, cycleStartFollowsPayday: true }
-const overridden = computePurchaseImpacts(data, 'p1', followsPayday, purchaseScenario([{ id: 'g1', name: 'Desk', value: 50, purchaseDate: '2026-09-15' }]), asOf)[0]
+const followsPaydayData: AppDataV2 = { ...data, payCycles: [followsPayday] }
+const overridden = computePurchaseImpacts(followsPaydayData, 'p1', followsPayday, purchaseScenario([{ id: 'g1', name: 'Desk', value: 50, purchaseDate: '2026-09-15' }]), asOf)[0]
 const expectedBounds = cycleBoundsForDate(new Date(2026, 8, 15), followsPayday)
 
 check('purchase cycle honours cycleStartFollowsPayday (start)', overridden.cycleStart, toLocalIsoDate(expectedBounds.start))

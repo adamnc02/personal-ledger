@@ -20,7 +20,6 @@ import { generateLoanPaymentTransactions, resolveRecurringOverpaymentSource } fr
 import { generateMinimumPaymentTransactions } from './creditCards'
 import { generateSalaryTransactions } from './salaryLedger'
 import { generatePensionTransactions } from './pensionLedger'
-import { generateSavingsContributions } from './savingsLedger'
 import { generateSavingsDepositTransactions, generateSavingsInterestTransactions, generateSavingsWithdrawalTransactions } from './savingsPotLedger'
 import { generatePotDepositTransactions } from './potLedger'
 import { resolveCycleBounds } from './pensionLedger'
@@ -234,7 +233,6 @@ export function computeProjectionToDate(
     for (const pension of data.pensions.filter((p) => p.personId === personId)) {
       generated.push(...generatePensionTransactions(pension, rangeStart, horizonEndDate))
     }
-    generated.push(...generateSavingsContributions(person, payCycle, rangeStart, horizonEndDate))
     // BUGFIX (2026-09-02, reported by Adam): recurring monthly deposits
     // and interest were computed correctly by savingsPotLedger.ts's own
     // functions (the Wallet info-icon modal and Home's SavingsPotsSection

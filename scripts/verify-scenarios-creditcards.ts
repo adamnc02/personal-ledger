@@ -20,7 +20,6 @@ function person(id: string): Person {
     name: id,
     color: '#000',
     salary: { grossAnnual: 30000, taxCode: '1257L', studentLoanPlan: 'none', payFrequency: 'monthly', deductions: [] },
-    savingsEntries: [],
   }
 }
 

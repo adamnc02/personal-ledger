@@ -214,7 +214,7 @@ check(
 // ---- 10. Migration backfills missing built-in categories (the "Uncategorised" savings bug) ----
 // Simulates data persisted BEFORE the Savings built-in category existed —
 // exactly the real-world scenario that produced generated
-// savings_contribution transactions with a categoryId matching nothing
+// savings transactions with a categoryId matching nothing
 // in the person's own category list, showing as "Uncategorised".
 const staleData = {
   people: [],

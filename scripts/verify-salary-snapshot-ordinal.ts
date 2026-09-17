@@ -48,7 +48,7 @@ function snap(over: Partial<SalarySnapshot> & Pick<SalarySnapshot, 'id' | 'effec
     ...over,
   }
 }
-const personWith = (salaryHistory: SalarySnapshot[]): Person => ({ id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory, salaryOverrides: [], savingsEntries: [] })
+const personWith = (salaryHistory: SalarySnapshot[]): Person => ({ id: 'me', name: 'Me', color: '#ff5b4c', salaryHistory, salaryOverrides: [] })
 
 // ─────────────────────────────────────────────────────────────────────
 // 1. Two snapshots sharing an effectiveFrom — the later-RECORDED wins.
