@@ -4,7 +4,7 @@ import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso, parseLocalDate } from '../lib/date'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
-import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
+import { computeProjection, horizonCycles, inCycleWindow, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
 import { averageAdHocSpendForCycle, daysOfSpendHistory, forecastSpendForCycle, hasAnyMatchingSpend, hasSpendHistory, MIN_SPEND_HISTORY_DAYS, type SpendScope } from '../lib/averageSpendForecast'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary, buildJointPersonGroups, type JointPersonGroup } from '../lib/jointLedger'
@@ -748,7 +748,11 @@ function SalaryBreakdownCard({ data, horizon }: { data: AppDataV2; horizon: Proj
   const summary = useMemo(() => {
     if (!payCycle) return null
     const projection = computeProjection(data, data.primaryPersonId, payCycle, horizon)
-    return computeCycleSummary(projection.transactions, projection.clearedBalance)
+    const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
+    return computeCycleSummary(projection.transactions, projection.clearedBalance, {
+      startIso: toLocalIsoDate(cycles[0].start),
+      endIso: toLocalIsoDate(cycles[cycles.length - 1].end),
+    })
   }, [data, payCycle, horizon])
 
   if (!summary) return null
@@ -2564,6 +2568,7 @@ function DateOrderedList({
   forecast,
   forecastEndIso,
   cycleStartIso,
+  cycleEndIso,
 }: {
   transactions: Transaction[]
   data: AppDataV2
@@ -2585,6 +2590,8 @@ function DateOrderedList({
    * caller now passes it.
    */
   cycleStartIso?: string
+  /** The last cycle end (2026-09-17, Adam-reported): without it, a row dated after the horizon (e.g. another household member whose own pay cycle ends later) showed here but not in CycleGroupedList. */
+  cycleEndIso?: string
   /**
    * 2026-09-14 (Adam-reported, "This cycle" horizon) — the average spend
    * forecast used to only ever appear inside CycleGroupedList, which
@@ -2612,7 +2619,7 @@ function DateOrderedList({
     running += sign(t)
     return { t, running }
   })
-  const visible = withRunning.filter(({ t }) => (showCleared || t.status !== 'cleared') && (!cycleStartIso || t.date >= cycleStartIso))
+  const visible = withRunning.filter(({ t }) => (showCleared || t.status !== 'cleared') && (!cycleStartIso || t.date >= cycleStartIso) && (!cycleEndIso || t.date <= cycleEndIso))
   const hasForecast = !!forecast && forecast.forecastAmount > 0
   const finalRunning = visible.length > 0 ? visible[visible.length - 1].running : openingRunningBalance
 
@@ -2827,9 +2834,9 @@ function PersonalDetail({
         </p>
 
         {grouping === 'category' ? (
-          <CategoryGroupedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
+          <CategoryGroupedList transactions={inCycleWindow(ledgerTxns, cycles)} data={data} showCleared={showCleared} />
         ) : order === 'amount' ? (
-          <AmountOrderedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
+          <AmountOrderedList transactions={inCycleWindow(ledgerTxns, cycles)} data={data} showCleared={showCleared} />
         ) : cycleTotals ? (
           <CycleGroupedList
             transactions={ledgerTxns}
@@ -2848,6 +2855,7 @@ function PersonalDetail({
             showCleared={showCleared}
             groupByDirection={groupByDirection}
             cycleStartIso={toLocalIsoDate(cycles[0].start)}
+            cycleEndIso={toLocalIsoDate(cycles[cycles.length - 1].end)}
             forecast={forecastByCycle?.get(toLocalIsoDate(cycles[0].start))}
             forecastEndIso={toLocalIsoDate(cycles[0].end)}
           />
@@ -3128,9 +3136,9 @@ function JointDetail({
               groupByPerson
             />
           ) : grouping === 'category' ? (
-            <CategoryGroupedList transactions={jointProjection.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
+            <CategoryGroupedList transactions={inCycleWindow(jointProjection.transactions, cycles)} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
           ) : order === 'amount' ? (
-            <AmountOrderedList transactions={jointProjection.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
+            <AmountOrderedList transactions={inCycleWindow(jointProjection.transactions, cycles)} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
           ) : cycleTotals ? (
             <CycleGroupedList
               transactions={jointProjection.transactions}
@@ -3151,6 +3159,7 @@ function JointDetail({
               amountSign={jointAccountSignedAmount}
               groupByDirection={groupByDirection}
               cycleStartIso={toLocalIsoDate(cycles[0].start)}
+              cycleEndIso={toLocalIsoDate(cycles[cycles.length - 1].end)}
               forecast={forecastByCycle?.get(toLocalIsoDate(cycles[0].start))}
               forecastEndIso={toLocalIsoDate(cycles[0].end)}
             />
@@ -3243,9 +3252,9 @@ function PotDetail({
         </p>
 
         {grouping === 'category' ? (
-          <CategoryGroupedList transactions={projection.transactions} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
+          <CategoryGroupedList transactions={inCycleWindow(projection.transactions, cycles)} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
         ) : order === 'amount' ? (
-          <AmountOrderedList transactions={projection.transactions} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
+          <AmountOrderedList transactions={inCycleWindow(projection.transactions, cycles)} data={data} showCleared={showCleared} amountSign={potSignedAmount} />
         ) : cycleTotals ? (
           <CycleGroupedList
             transactions={projection.transactions}
@@ -3265,6 +3274,7 @@ function PotDetail({
             amountSign={potSignedAmount}
             groupByDirection={groupByDirection}
             cycleStartIso={toLocalIsoDate(cycles[0].start)}
+            cycleEndIso={toLocalIsoDate(cycles[cycles.length - 1].end)}
           />
         )}
       </HomeSection>
@@ -3376,9 +3386,9 @@ function HouseholdDetail({
             buildPersonGroups={(rows) => buildHouseholdPersonGroups(personProjections, rows)}
           />
         ) : grouping === 'category' ? (
-          <CategoryGroupedList transactions={combinedTransactions} data={data} showCleared={showCleared} />
+          <CategoryGroupedList transactions={inCycleWindow(combinedTransactions, combinedCycles)} data={data} showCleared={showCleared} />
         ) : order === 'amount' ? (
-          <AmountOrderedList transactions={combinedTransactions} data={data} showCleared={showCleared} />
+          <AmountOrderedList transactions={inCycleWindow(combinedTransactions, combinedCycles)} data={data} showCleared={showCleared} />
         ) : cycleTotals ? (
           <CycleGroupedList
             transactions={combinedTransactions}
@@ -3389,7 +3399,7 @@ function HouseholdDetail({
             groupByDirection={groupByDirection}
           />
         ) : (
-          <DateOrderedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} showCleared={showCleared} groupByDirection={groupByDirection} cycleStartIso={toLocalIsoDate(combinedCycles[0].start)} />
+          <DateOrderedList transactions={combinedTransactions} data={data} openingRunningBalance={combinedOpeningBalance} showCleared={showCleared} groupByDirection={groupByDirection} cycleStartIso={toLocalIsoDate(combinedCycles[0].start)} cycleEndIso={toLocalIsoDate(combinedCycles[combinedCycles.length - 1].end)} />
         )}
       </HomeSection>
 
