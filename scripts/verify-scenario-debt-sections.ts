@@ -188,6 +188,17 @@ console.log('1. Synthetic loan and credit card')
   const clearedCard = run(lump(5000, d1, 'card-1', 'credit_card'), overpay(100, d1, 'card-1', 'credit_card'))
   checkTrue('Clearing a card and overpaying it frees the minimum payment, not £0', clearedCard.monthlyImpact > 0, clearedCard.monthlyImpact)
 
+  // Regression (Adam's screenshot, mum's backup, 2026-09-17): a lump sum and
+  // a recurring overpayment on the SAME DATE. The lump lands inside that
+  // period's overpaymentApplied, and the old total read the payment right
+  // there, so a £3,000 lump was reported as a £3,000/month cost
+  // (-£3,500/mo for a £500 overpayment). The card reads the payment a month
+  // later, which is why it showed the correct £790.20 and -£500.
+  const sameDayPair = run(lump(3000, todayIso()), overpay(500, todayIso()))
+  check('A lump sum on the same date as an overpayment is not read as a monthly cost', sameDayPair.monthlyImpact, -500)
+  check('...and the one-off is the lump sum', sameDayPair.oneOffCashImpact, -3000)
+  check('...and the card agrees', sameDayPair.debtImpacts[0].totalMonthlyCashChange, -500)
+
   // ---- Credit card: one undated section ----
   const cardImpact = run(lump(500, d1, 'card-1', 'credit_card')).debtImpacts[0]
   check('Credit card: undated, one section dated today', [cardImpact.dated, cardImpact.sections.length, cardImpact.sections[0].date], [false, 1, todayIso()])

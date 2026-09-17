@@ -23,6 +23,7 @@ import { computeHouseholdProjections } from '../src/lib/householdLedger'
 import { computePotProjection } from '../src/lib/potLedger'
 import { isLedgerTransaction } from '../src/lib/runningBalance'
 import { computeCycleSummary } from '../src/lib/cycleSummary'
+import { distinctByCategory } from '../src/lib/categories'
 import { toLocalIsoDate } from '../src/lib/date'
 import type { AppDataV2, Transaction } from '../src/types/ledger'
 
@@ -30,6 +31,11 @@ let failures = 0
 function check(label: string, ok: boolean, detail?: unknown) {
   console.log(`  ${ok ? '✓' : '✗'} ${label}${!ok && detail !== undefined ? ` (${JSON.stringify(detail)})` : ''}`)
   if (!ok) failures++
+}
+/** Same, comparing two values rather than taking a boolean. */
+function checkEq(label: string, actual: unknown, expected: unknown) {
+  const ok = JSON.stringify(actual) === JSON.stringify(expected)
+  check(`${label}${ok ? '' : `: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`}`, ok)
 }
 
 const BACKUPS = '/Users/adamcox/Downloads/App Development & Bug Tracking/shared-finance-ledger/'
@@ -120,6 +126,34 @@ console.log('\n4b. Home default view (2026-09-17)')
   check('...but still require list/person grouping and date order', /order === 'date'/.test(canShow) && /grouping !== 'category'/.test(canShow))
   const reset = src.slice(src.indexOf('function resetToDefault'), src.indexOf('function resetToDefault') + 400)
   check('Reset restores those same defaults and leaves the horizon alone', /setShowCleared\(false\)/.test(reset) && /setCycleTotals\(true\)/.test(reset) && !/setHorizon/.test(reset))
+}
+
+console.log('\n5. Trend tooltip icons are one per category (2026-09-17)')
+{
+  const rows = [
+    { id: 'a', categoryId: 'food' },
+    { id: 'b', categoryId: 'food' },
+    { id: 'c', categoryId: 'fuel' },
+    { id: 'd' },
+    { id: 'e' },
+  ]
+  checkEq('Repeats collapse, first occurrence kept, order preserved', distinctByCategory(rows).map((r) => r.id), ['a', 'c', 'd'])
+  checkEq('Nothing to dedupe: unchanged', distinctByCategory([{ id: 'x', categoryId: 'food' }]).map((r) => r.id), ['x'])
+  checkEq('Empty day', distinctByCategory([]), [])
+
+  // Real backups: every day the tooltip can land on.
+  for (const file of ['finance-ledger-backup-2026-09-15.json', 'finance-ledger-backup-2026-09-15-mum.json']) {
+    const data: AppDataV2 = migrateLedgerData(JSON.parse(readFileSync(BACKUPS + file, 'utf8')))
+    const who = file.includes('mum') ? 'mum' : 'Adam'
+    const byDay = new Map<string, Transaction[]>()
+    for (const t of data.transactions.filter(isLedgerTransaction)) byDay.set(t.date, [...(byDay.get(t.date) ?? []), t])
+    const sameCategoryDays = [...byDay.values()].filter((rows) => distinctByCategory(rows).length < rows.length)
+    check(`${who}: every day shows one icon per distinct category`, [...byDay.values()].every((rows) => {
+      const distinct = distinctByCategory(rows)
+      return distinct.length === new Set(rows.map((r) => r.categoryId || 'uncategorised')).size && distinct.length <= rows.length
+    }))
+    check(`${who}: has ${sameCategoryDays.length} day(s) that previously repeated an icon`, sameCategoryDays.length > 0)
+  }
 }
 
 console.log(failures === 0 ? '\nAll Home list window checks passed.' : `\n${failures} check(s) FAILED.`)

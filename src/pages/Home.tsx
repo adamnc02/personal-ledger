@@ -34,7 +34,7 @@ import { ProgressRing } from '../components/ProgressRing'
 import { CategoryIcon } from '../components/CategoryIcon'
 import { BalanceSpendChart, SavingsPotPillChart, shortDayLabel, type BalanceSpendView } from '../components/TrendChart'
 import { SAVINGS_CATEGORY_ID, CREDIT_CARD_CATEGORY_ID } from '../types/ledger'
-import { seededCategoryIdForIcon, DEFAULT_POT_CATEGORY_ICON, DEFAULT_POT_CATEGORY_ICON_COLOR } from '../lib/categories'
+import { seededCategoryIdForIcon, distinctByCategory, DEFAULT_POT_CATEGORY_ICON, DEFAULT_POT_CATEGORY_ICON_COLOR } from '../lib/categories'
 import type { AppDataV2, CreditCard, Loan, Pot, SavingsPot, Transaction } from '../types/ledger'
 
 // ── Deck construction — doc addendum on Summary card visibility ────────
@@ -1919,9 +1919,15 @@ function TrendsModal({
 /** Category icons + net signed movement for whatever ledger-eligible transactions landed on `dateIso` — the Balance/Spend chart tooltip's requirement (icons per the prompt doc; the net "£X IN/OUT" figure per the reference screenshots, shown left of the icons). */
 function dayDetailsForDay(transactions: Transaction[], categories: AppDataV2['categories'], dateIso: string): { icons: { key: string; node: ReactNode }[]; netAmount: number } {
   const dayTx = transactions.filter((t) => t.date === dateIso && isLedgerTransaction(t))
-  const icons = dayTx.map((t) => {
+  // One icon per CATEGORY, not per transaction (Adam, 2026-09-17): three
+  // shops on the same day used to show the same icon three times, which says
+  // nothing the first one didn't. Keyed by category so the row stays a
+  // distinct list; first occurrence wins, so the order still follows the
+  // day's own transaction order. An uncategorised row (no matching category)
+  // collapses under one key for the same reason.
+  const icons = distinctByCategory(dayTx).map((t) => {
     const category = categories.find((c) => c.id === t.categoryId)
-    return { key: t.id, node: <CategoryIcon category={category} size={16} /> }
+    return { key: t.categoryId || 'uncategorised', node: <CategoryIcon category={category} size={16} /> }
   })
   const netAmount = dayTx.reduce((sum, t) => sum + signedAmount(t), 0)
   return { icons, netAmount }
