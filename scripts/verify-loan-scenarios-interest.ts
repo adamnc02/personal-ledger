@@ -152,15 +152,18 @@ const fullImpact = calculateScenarioImpact(fullScenario, scenarioData, 'me', 0)
 check('A lump sum covering the real settlement figure DOES fully pay off the loan', fullImpact.loanImpacts[0]?.fullyPaidOff, true)
 check('...and leaves £0 remaining, not a leftover balance from an under-covering lump sum', fullImpact.loanImpacts[0]?.newRemaining, 0)
 
-// A lump sum larger than the settlement figure doesn't spill the excess
-// into stray one-off cash below what was genuinely needed to close it.
+// A lump sum larger than the settlement figure only costs what the loan
+// actually took. CHANGED 2026-09-17 (Adam): a pay_off_loan lump sum is money
+// out of your own pocket, so one-off cash is now MINUS what was applied; the
+// £500 the loan didn't need never left the account, so it is not a gain
+// either. A sell_asset's leftover proceeds still count as cash in hand.
 const overShootScenario: Scenario = {
   id: 's3',
   name: 'Pay off with more than needed',
   actions: [{ id: 'a1', type: 'pay_off_loan', label: '', value: round2(trueSettlement) + 500, targets: [{ kind: 'loan', id: bridgedLoan.id }] }],
 }
 const overShootImpact = calculateScenarioImpact(overShootScenario, scenarioData, 'me', 0)
-check('A lump sum of settlement+£500 fully pays off the loan and leaves exactly £500 as genuine one-off cash', overShootImpact.oneOffCashImpact, 500)
+check('A lump sum of settlement+£500 costs the settlement figure in one-off cash, and the unused £500 is neither gain nor cost', overShootImpact.oneOffCashImpact, -round2(trueSettlement))
 
 function round2(n: number) {
   return Math.round(n * 100) / 100

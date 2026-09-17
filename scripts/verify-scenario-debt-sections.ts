@@ -119,6 +119,17 @@ console.log('1. Synthetic loan and credit card')
   check('Lump sum (reduce_term): no monthly cash change', s[0].monthlyCashChange, 0)
   check('Summary fields follow the last section', [di.balanceAfterAll, di.finishDateAfterAll, di.totalMonthsSaved], [s[0].balanceOnDateAfter, s[0].finishDateAfter, s[0].monthsSaved])
 
+  // 2026-09-17 (Adam): a lump sum toward a debt is money out of pocket.
+  check('Lump sum: section one-off cash is the money paid', s[0].oneOffCash, -2000)
+  check('Lump sum: the scenario total agrees', single.oneOffCashImpact, -2000)
+  const overshoot = run(lump(999999, d1))
+  check('Only what the loan actually took counts; the unused remainder is neither gain nor cost', overshoot.oneOffCashImpact, -overshoot.debtImpacts[0].totalLumpSum)
+  // A sale funds itself, so it costs nothing out of pocket and its leftover
+  // proceeds are still cash in hand — deliberately unchanged.
+  const sale = calculateScenarioImpact(scenario({ type: 'sell_asset', value: 999999, date: d1, targets: [{ kind: 'loan', id: 'car-loan' }] }), data, 'me', 0)
+  check('A sale: no one-off cost on the card', sale.debtImpacts[0].sections[0].oneOffCash, 0)
+  checkTrue('A sale: leftover proceeds are still cash in hand', sale.oneOffCashImpact > 0, sale.oneOffCashImpact)
+
   const recast = run(lump(2000, d1, 'car-loan', 'loan', 'reduce_payment')).debtImpacts[0].sections[0]
   checkTrue('Lump sum (reduce_payment): the payment falls and frees cash', recast.monthlyPaymentAfter < recast.monthlyPaymentBefore && recast.monthlyCashChange > 0, recast)
 
@@ -128,6 +139,7 @@ console.log('1. Synthetic loan and credit card')
   check('Recurring: extra per month recorded', rs.newRecurringOverpayment, 100)
   check('Recurring: payment rises by the extra', round2(rs.monthlyPaymentAfter - rs.monthlyPaymentBefore), 100)
   check('Recurring: costs that much available cash', rs.monthlyCashChange, -100)
+  check('Recurring: no one-off cash, it is a monthly commitment', rs.oneOffCash, 0)
   checkTrue('Recurring: finishes sooner', rs.monthsSaved > 0, rs.monthsSaved)
 
   // ---- Two dates build on each other ----
@@ -158,6 +170,7 @@ console.log('1. Synthetic loan and credit card')
   checkTrue('Credit card: paid off sooner, minimum payment unchanged (fixed £50)', cardImpact.totalMonthsSaved > 0 && cardImpact.monthlyPaymentNow === 50, cardImpact)
   const cardCleared = run(lump(5000, d1, 'card-1', 'credit_card')).debtImpacts[0]
   check('Credit card: a lump sum bigger than the balance clears it', [cardCleared.balanceAfterAll, cardCleared.fullyPaidOff, cardCleared.sections[0].monthlyPaymentAfter], [0, true, 0])
+  check('Credit card: one-off cash is what the card took', cardCleared.sections[0].oneOffCash, -cardCleared.totalLumpSum)
 
   // ---- Exclude keeps its own card ----
   const excluded = run({ type: 'exclude_loan', value: 0, linkedTargetKind: 'loan', linkedTargetId: 'car-loan' })

@@ -258,7 +258,15 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
         // decide HOW MUCH goes where (unchanged), but what happens to the
         // loan afterward is now genuinely simulated from action.date, not
         // assumed to happen today.
-        if (applied > 0) recordDebtAction(kind, id, { date: kind === 'loan' ? action.date || todayStr : todayStr, lumpSum: applied, recastMode: action.recastMode ?? 'reduce_term' })
+        if (applied > 0) {
+          recordDebtAction(kind, id, { date: kind === 'loan' ? action.date || todayStr : todayStr, lumpSum: applied, recastMode: action.recastMode ?? 'reduce_term', fromSale: action.type === 'sell_asset' })
+          // 2026-09-17 (Adam): a pay_off_loan lump sum is money leaving your
+          // own pocket, so it counts against one-off cash the same way a
+          // savings pot lump sum does. A sell_asset's proceeds are not: that
+          // money arrived with the sale, and only what the targets DIDN'T
+          // need stays in hand (the leftover below, unchanged).
+          if (action.type === 'pay_off_loan') oneOffCashImpact -= applied
+        }
         if (kind === 'loan' && applied > 0) {
           const eventDate = action.date || todayIso()
           addLoanEvent(id, { date: eventDate, amount: applied, recastMode: action.recastMode ?? 'reduce_term' })
@@ -266,7 +274,10 @@ export function calculateScenarioImpact(scenario: Scenario, data: AppData, perso
           if (!existing || eventDate > existing) lastLumpDateByLoan.set(id, eventDate)
         }
       }
-      oneOffCashImpact += pool
+      // Only a sale leaves cash in hand. Money earmarked for a pay_off_loan
+      // that a target didn't need never left the account, so it is neither a
+      // gain nor a cost (2026-09-17).
+      if (action.type === 'sell_asset') oneOffCashImpact += pool
     } else if (action.type === 'purchase') {
       // Buying something is one-off cash out. The DATED view of the same purchase (what the
       // balance will be on the day, and at the end of that cycle) is
@@ -842,6 +853,8 @@ interface DebtAction {
   lumpSum?: number
   overpayment?: number
   recastMode?: 'reduce_term' | 'reduce_payment'
+  /** Funded by a sell_asset's proceeds rather than out of pocket, so it costs no cash. */
+  fromSale?: boolean
 }
 
 /**
@@ -869,6 +882,8 @@ export interface DebtSection {
   fullyPaidOff: boolean
   /** The viewer's own share of the monthly payment change: positive frees cash, negative costs it. */
   monthlyCashChange: number
+  /** Money out of pocket on this date: a lump sum paid from your own funds, negative. Zero when a sale funded it. */
+  oneOffCash: number
 }
 
 /** ONE record per loan or credit card a scenario acts on: where it stands now, one section per date, and all changes against now. Excluded debts are not here — they keep their own card (Adam: "leave exclude as it is"). */
@@ -887,6 +902,7 @@ export interface DebtImpact {
   monthsRemainingAfterAll: number
   totalMonthsSaved: number
   totalLumpSum: number
+  totalOneOffCash: number
   totalMonthlyCashChange: number
   fullyPaidOff: boolean
 }
@@ -955,6 +971,7 @@ function buildDebtImpacts(
             monthsSaved: Math.max(0, payoffNow.months - payoffAfter.months),
             fullyPaidOff,
             monthlyCashChange,
+            oneOffCash: round2(-actions.filter((a) => !a.fromSale).reduce((s, a) => s + (a.lumpSum ?? 0), 0)),
           },
         ],
         balanceAfterAll: balanceAfter,
@@ -962,6 +979,7 @@ function buildDebtImpacts(
         monthsRemainingAfterAll: payoffAfter.months,
         totalMonthsSaved: Math.max(0, payoffNow.months - payoffAfter.months),
         totalLumpSum: lumpSum,
+        totalOneOffCash: round2(-actions.filter((a) => !a.fromSale).reduce((s, a) => s + (a.lumpSum ?? 0), 0)),
         totalMonthlyCashChange: monthlyCashChange,
         fullyPaidOff,
       })
@@ -1045,6 +1063,7 @@ function buildDebtImpacts(
         monthsSaved: Math.max(0, stateBefore.monthsRemaining - stateAfter.monthsRemaining),
         fullyPaidOff: stateAfter.fullyPaidOff && stateAfter.balance <= 0.005,
         monthlyCashChange: round2(monthlyShare(stateBefore.payment) - monthlyShare(stateAfter.payment)),
+        oneOffCash: round2(-onDate.filter((a) => !a.fromSale).reduce((s, a) => s + (a.lumpSum ?? 0), 0)),
       })
     }
 
@@ -1064,6 +1083,7 @@ function buildDebtImpacts(
       monthsRemainingAfterAll: last?.monthsRemainingAfter ?? original.monthsRemaining,
       totalMonthsSaved: Math.max(0, original.monthsRemaining - (last?.monthsRemainingAfter ?? original.monthsRemaining)),
       totalLumpSum: round2(actions.reduce((s, a) => s + (a.lumpSum ?? 0), 0)),
+      totalOneOffCash: round2(sections.reduce((s, x) => s + x.oneOffCash, 0)),
       totalMonthlyCashChange: round2(sections.reduce((s, x) => s + x.monthlyCashChange, 0)),
       fullyPaidOff: (last?.fullyPaidOff ?? false) && (last?.balanceOnDateAfter ?? 1) <= 0.005,
     })

@@ -111,7 +111,10 @@ const cardFullPayoffScenario: Scenario = {
 }
 const cardFullPayoffImpact = calculateScenarioImpact(cardFullPayoffScenario, cardPayoffData, 'me', 0)
 checkTrue('A lump sum bigger than the balance fully pays off the card', cardFullPayoffImpact.loanImpacts[0]?.fullyPaidOff ?? false)
-check('Whatever is left over after fully paying off the card becomes one-off cash', cardFullPayoffImpact.oneOffCashImpact, 1000) // 2000 - 1000 balance
+// CHANGED 2026-09-17 (Adam): paying a card off is money out of pocket, so
+// one-off cash is minus the £1,000 the card actually took. The other £1,000
+// was never needed and never left the account.
+check('Clearing the card costs what it took, not the whole earmarked amount', cardFullPayoffImpact.oneOffCashImpact, -1000)
 
 // ── Credit card: exclude ──
 

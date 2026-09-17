@@ -751,6 +751,9 @@ function DebtCard({
                 color={s.monthlyPaymentAfter < s.monthlyPaymentBefore ? positive : negative}
               />
             )}
+            {s.oneOffCash !== 0 && (
+              <CardRow label="One-off cash" value={`-£${formatCurrency(Math.abs(s.oneOffCash))}`} color={negative} />
+            )}
             {s.monthlyCashChange !== 0 && (
               <CardRow
                 label="Available cash"
@@ -772,6 +775,7 @@ function DebtCard({
           {di.totalLumpSum > 0 && <CardRow label="Lump sums" value={`£${formatCurrency(di.totalLumpSum)}`} />}
           <CardRow label="Balance" value={`£${formatCurrency(di.balanceNow)} → £${formatCurrency(di.balanceAfterAll)}`} color={positive} />
           {finishRows(di.finishDateNow, di.finishDateAfterAll, di.monthsRemainingNow, di.monthsRemainingAfterAll, di.totalMonthsSaved)}
+          {di.totalOneOffCash !== 0 && <CardRow label="One-off cash" value={`-£${formatCurrency(Math.abs(di.totalOneOffCash))}`} color={negative} />}
           {di.totalMonthlyCashChange !== 0 && (
             <CardRow
               label="Available cash"
