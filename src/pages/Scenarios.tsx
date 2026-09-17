@@ -4,7 +4,7 @@ import { toLocalIsoDate, todayIso } from '../lib/date'
 import { useNavigate } from 'react-router-dom'
 import { useLedgerData } from '../context/LedgerContext'
 import { buildLegacyAppData } from '../lib/legacyBridge'
-import { calculateScenarioImpact, calculateHouseholdScenarioImpact, mergeScenarios, resolveTargets, type ScenarioImpact, type LoanImpact } from '../lib/scenarios'
+import { calculateScenarioImpact, calculateHouseholdScenarioImpact, mergeScenarios, resolveTargets, type ScenarioImpact, type LoanImpact, type SavingsPotImpact } from '../lib/scenarios'
 import { computePurchaseImpacts, computePurchaseImpactsForScenarios, type PurchaseImpact } from '../lib/purchaseImpact'
 import { formatFullDate } from '../lib/format'
 import { calculateNetSalary } from '../lib/tax'
@@ -642,65 +642,7 @@ function ImpactSummary({
       ))}
 
       {impact.savingsPotImpacts.map((si) => (
-        <div key={`${si.savingsPotId}-${si.kind}`} className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
-          <p className="text-sm font-medium text-[var(--color-ink)] mb-2">
-            {si.potName}
-            {si.kind === 'withdrawal' && (
-              <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-coral)' }}>
-                Withdrawal
-              </span>
-            )}
-            {si.kind === 'recurring_deposit_change' && (
-              <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-ink-faint)' }}>
-                Recurring deposit
-              </span>
-            )}
-          </p>
-
-          {si.kind !== 'recurring_deposit_change' && (
-            <>
-              <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
-                <span>Balance now</span>
-                <span className="font-mono">£{formatCurrency(si.balanceNow)}</span>
-              </div>
-              <div className="flex justify-between text-xs text-[var(--color-ink-muted)]">
-                <span>Balance after</span>
-                <span className="font-mono">£{formatCurrency(si.balanceAfter)}</span>
-              </div>
-            </>
-          )}
-
-          {si.kind === 'recurring_deposit_change' && (
-            <div className="flex justify-between text-xs mt-1" style={{ color: (si.newRecurringMonthlyAmount ?? 0) >= (si.oldRecurringMonthlyAmount ?? 0) ? 'var(--color-negative)' : 'var(--color-positive)' }}>
-              <span>Monthly deposit</span>
-              <span className="font-mono">
-                £{formatCurrency(si.oldRecurringMonthlyAmount ?? 0)} → £{formatCurrency(si.newRecurringMonthlyAmount ?? 0)}/mo
-              </span>
-            </div>
-          )}
-
-          <div className="flex justify-between text-xs mt-1 text-[var(--color-ink-muted)]">
-            <span>Projected {formatFullDate(si.projectedAtDate)}</span>
-            <span className="font-mono">
-              £{formatCurrency(si.projectedBalanceBefore)} → £{formatCurrency(si.projectedBalanceAfter)}
-            </span>
-          </div>
-
-          {si.newTargetDate && (
-            <div className="flex justify-between text-xs mt-1" style={{ color: 'var(--color-positive)' }}>
-              <span>New target date</span>
-              <span className="font-mono">{formatFullDate(si.newTargetDate)}</span>
-            </div>
-          )}
-          {si.monthsSaved !== 0 && (
-            <div className="flex justify-between text-xs mt-1" style={{ color: si.monthsSaved > 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
-              <span>{si.monthsSaved > 0 ? 'Time saved' : 'Time added'}</span>
-              <span className="font-mono">
-                {Math.abs(si.monthsSaved)} month{Math.abs(si.monthsSaved) === 1 ? '' : 's'}
-              </span>
-            </div>
-          )}
-        </div>
+        <SavingsPotCard key={si.savingsPotId} impact={si} />
       ))}
 
       {/* BUGFIX (Adam-reported, 2026-09 session — "I still see the bottom
@@ -746,12 +688,86 @@ function ImpactSummary({
                 </span>
               </div>
               <p className="text-[11px] text-[var(--color-ink-faint)] mt-1 leading-relaxed">
-                A single payment, not a monthly change, so it's kept separate from the figures above — whatever's left
-                after every linked loan target in this scenario has taken what it needs.
+                A single payment, not a monthly change, so it's kept separate from the figures above
+                {impact.loanImpacts.some((li) => li.kind === 'payoff')
+                  ? " — whatever's left after every linked loan target in this scenario has taken what it needs."
+                  : '.'}
               </p>
             </>
           )}
         </div>
+      )}
+    </div>
+  )
+}
+
+function monthsLabel(n: number): string {
+  return `${n} month${n === 1 ? '' : 's'}`
+}
+
+function CardRow({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="flex justify-between gap-3 text-xs mt-1" style={{ color: color ?? 'var(--color-ink-muted)' }}>
+      <span>{label}</span>
+      <span className="font-mono text-right">{value}</span>
+    </div>
+  )
+}
+
+/** One card per savings pot: the pot as it is now at the top, then every change in the scenario compared against it. */
+function SavingsPotCard({ impact: si }: { impact: SavingsPotImpact }) {
+  const positive = 'var(--color-positive)'
+  const negative = 'var(--color-negative)'
+  const recurringChanged = si.newRecurringMonthlyAmount !== null
+  const reachChanged = si.currentReachDate !== si.newReachDate
+
+  let onTrackNote = ''
+  if (si.monthsBehindTarget !== null && si.monthsBehindTarget > 0) onTrackNote = ` (${monthsLabel(si.monthsBehindTarget)} late)`
+  if (si.monthsBehindTarget !== null && si.monthsBehindTarget < 0) onTrackNote = ` (${monthsLabel(-si.monthsBehindTarget)} early)`
+
+  return (
+    <div className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
+      <p className="text-sm font-medium text-[var(--color-ink)] mb-1">{si.potName}</p>
+
+      <CardRow label="Balance now" value={`£${formatCurrency(si.balanceNow)}`} />
+      {si.targetAmount !== null && (
+        <CardRow label="Target" value={`£${formatCurrency(si.targetAmount)}${si.targetDate ? ` by ${formatFullDate(si.targetDate)}` : ''}`} />
+      )}
+      {si.targetReached && <CardRow label="On track for" value="Target reached" color={positive} />}
+      {si.targetAmount !== null && !si.targetReached && (
+        <CardRow label="On track for" value={si.currentReachDate ? `${formatFullDate(si.currentReachDate)}${onTrackNote}` : 'Not within 30 years'} />
+      )}
+
+      <div className="h-px my-2" style={{ background: 'var(--color-track)' }} />
+
+      {si.lumpSumTotal > 0 && <CardRow label="Lump sum" value={`+£${formatCurrency(si.lumpSumTotal)}`} />}
+      {si.withdrawalTotal > 0 && <CardRow label="Withdrawal" value={`-£${formatCurrency(si.withdrawalTotal)}`} />}
+      {(si.lumpSumTotal > 0 || si.withdrawalTotal > 0) && <CardRow label="Balance after" value={`£${formatCurrency(si.balanceAfter)}`} />}
+      {recurringChanged && (
+        <CardRow
+          label="Monthly deposit"
+          value={`£${formatCurrency(si.oldRecurringMonthlyAmount ?? 0)} → £${formatCurrency(si.newRecurringMonthlyAmount ?? 0)}/mo`}
+        />
+      )}
+
+      {si.targetAmount !== null && !si.targetReached && reachChanged && (
+        <>
+          <CardRow
+            label="Reaches target"
+            value={`${si.currentReachDate ? formatFullDate(si.currentReachDate) : 'Not within 30 years'} → ${si.newReachDate ? formatFullDate(si.newReachDate) : 'Not within 30 years'}`}
+            color={si.monthsSaved >= 0 ? positive : negative}
+          />
+          {si.monthsSaved !== 0 && (
+            <CardRow label="" value={`${monthsLabel(Math.abs(si.monthsSaved))} ${si.monthsSaved > 0 ? 'sooner' : 'later'}`} color={si.monthsSaved > 0 ? positive : negative} />
+          )}
+        </>
+      )}
+      {si.targetDate && si.balanceOnTargetDateBefore !== null && si.balanceOnTargetDateAfter !== null && (
+        <CardRow
+          label={`On ${formatFullDate(si.targetDate)}`}
+          value={`£${formatCurrency(si.balanceOnTargetDateBefore)} → £${formatCurrency(si.balanceOnTargetDateAfter)}`}
+          color={si.balanceOnTargetDateAfter >= si.balanceOnTargetDateBefore ? positive : negative}
+        />
       )}
     </div>
   )
