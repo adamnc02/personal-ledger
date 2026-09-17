@@ -166,6 +166,33 @@ export function resolveTemplateOccurrenceDate(rawDate: string, template: Recurri
 }
 
 /**
+ * 2026-09-17 (Adam-reported) — a follows-payday/follows-cycle-start
+ * transfer's occurrence is PAID on its resolved date, which is always
+ * later than its natural slot (up to one pay period later). So whether it
+ * falls inside a date range has to be decided by that resolved date, not
+ * by the slot.
+ *
+ * Deciding by slot dropped any occurrence whose slot was before the range
+ * but whose payday was inside it. Adam's three transfers anchored on
+ * 12 Sep, paid on payday 30 Sep: on 17 Sep, every "from today" view
+ * skipped September. The transfer card header said "Next 30 Oct", and a
+ * savings pot opened on 12 Sep (whose ledger window starts today) had no
+ * 30 Sep deposit. "Manage upcoming payments" and the Home ledger start
+ * earlier than the slot, so they were right, and disagreed with the rest.
+ * It also let in an occurrence whose slot was inside the range but whose
+ * payday was after it.
+ *
+ * Returns the extra look-back to walk from, or null when the template's
+ * dates are never moved (every other template: slot === date).
+ */
+function resolvedRangeLookback(template: RecurringTemplate, rangeStart: Date, payCycle?: PayCycleConfig): Date | null {
+  if (template.kind !== 'transfer' || !payCycle || !(template.followsPayday || template.followsCycleStart)) return null
+  // One pay period at most separates a slot from its resolved date; two
+  // months covers monthly and four-weekly cycles with room to spare.
+  return addMonths(rangeStart, -2)
+}
+
+/**
  * Walks a template's frequency/anchorDate forward across [rangeStart,
  * rangeEnd] and returns every occurrence — shared by
  * generateTransactionsForTemplate (which turns these into full
@@ -194,12 +221,17 @@ function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd
 
   const anchor = parseLocalDate(template.anchorDate)
   const anchorDay = scheduleAnchorDay(template)
+  // See resolvedRangeLookback: a date-moving transfer is range-checked by
+  // its resolved date, so the walk starts early enough to reach it.
+  const lookback = resolvedRangeLookback(template, rangeStart, payCycle)
+  const rangeStartIso = toIso(rangeStart)
+  const rangeEndIso = toIso(rangeEnd)
 
   let cursor = anchor
   let iterations = 0
   // Walk forward from the anchor to the start of the range without
   // emitting anything — the anchor itself may be years in the past.
-  while (cursor < rangeStart && iterations < MAX_OCCURRENCES) {
+  while (cursor < (lookback ?? rangeStart) && iterations < MAX_OCCURRENCES) {
     cursor = nextOccurrence(cursor, template, anchorDay)
     iterations++
   }
@@ -210,11 +242,14 @@ function walkOccurrences(template: RecurringTemplate, rangeStart: Date, rangeEnd
     const override = template.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
     if (!override?.deleted) {
       const rawDate = override?.date ?? originalDate
-      results.push({
-        originalDate,
-        date: resolveTemplateOccurrenceDate(rawDate, template, payCycle),
-        amount: override?.amount ?? resolveTemplateAmount(template, originalDate),
-      })
+      const date = resolveTemplateOccurrenceDate(rawDate, template, payCycle)
+      if (!lookback || (date >= rangeStartIso && date <= rangeEndIso)) {
+        results.push({
+          originalDate,
+          date,
+          amount: override?.amount ?? resolveTemplateAmount(template, originalDate),
+        })
+      }
     }
     cursor = nextOccurrence(cursor, template, anchorDay)
     iterations++
@@ -346,9 +381,13 @@ export function scheduledTemplateDates(
   if (rangeEnd < rangeStart) return []
   const anchor = parseLocalDate(template.anchorDate)
   const anchorDay = scheduleAnchorDay(template)
+  // Same range rule as walkOccurrences (resolvedRangeLookback).
+  const lookback = resolvedRangeLookback(template, rangeStart, payCycle)
+  const rangeStartIso = toIso(rangeStart)
+  const rangeEndIso = toIso(rangeEnd)
   let cursor = anchor
   let iterations = 0
-  while (cursor < rangeStart && iterations < MAX_OCCURRENCES) {
+  while (cursor < (lookback ?? rangeStart) && iterations < MAX_OCCURRENCES) {
     cursor = nextOccurrence(cursor, template, anchorDay)
     iterations++
   }
@@ -376,7 +415,8 @@ export function scheduledTemplateDates(
     // input and its confirm modal's "from" date from this value, so both
     // used to name the stale date.
     const override = template.occurrenceOverrides?.find((o) => o.originalDate === originalDate)
-    results.push({ originalDate, date: resolveTemplateOccurrenceDate(override?.date ?? originalDate, template, payCycle) })
+    const date = resolveTemplateOccurrenceDate(override?.date ?? originalDate, template, payCycle)
+    if (!lookback || (date >= rangeStartIso && date <= rangeEndIso)) results.push({ originalDate, date })
     cursor = nextOccurrence(cursor, template, anchorDay)
     iterations++
   }

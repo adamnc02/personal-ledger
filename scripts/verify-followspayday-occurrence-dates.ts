@@ -42,7 +42,7 @@ function check(label: string, actual: unknown, expected: unknown) {
     passed++
   } else {
     failed++
-    console.error(`FAIL: ${label}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`)
+    console.error(`✗ ${label}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`)
   }
 }
 
@@ -134,7 +134,11 @@ const templateWithAmountOverride: RecurringTemplate = {
   // the resolved date instead.
   occurrenceOverrides: [{ originalDate: '2026-09-30', amount: 999 }],
 }
-const septPreview = templateOccurrencePreviews(templateWithAmountOverride, new Date('2026-09-01'), 1, payCycle)[0]
+// As of 1 Oct, not 1 Sep (2026-09-17): occurrences are now range-checked by
+// the date they're PAID (verify-follows-payday-range.ts). The 31 Aug slot is
+// paid on 30 Sep, so on 1 Sep IT is the next payment; the natural-Sept slot
+// (paid 30 Oct) is next only once 30 Sep has passed.
+const septPreview = templateOccurrencePreviews(templateWithAmountOverride, new Date('2026-10-01'), 1, payCycle)[0]
 assert('override matched: previews[0] is the natural Sept occurrence', septPreview?.originalDate === '2026-09-30')
 check('override amount applied despite the displayed date having moved', septPreview?.amount, 999)
 assert('override does not corrupt originalDate reported back (stays the natural date)', septPreview?.originalDate === '2026-09-30')
@@ -165,7 +169,7 @@ check(
 // shifting by one, not a shorter list. Identify the exact resolved date
 // September's pause removes, then assert the paused list no longer
 // contains it (while the unpaused list does, at the same count).
-const unpausedPreviewsSept = templateOccurrencePreviews(followsPaydayTemplate, new Date('2026-09-01'), 1, payCycle)
+const unpausedPreviewsSept = templateOccurrencePreviews(followsPaydayTemplate, new Date('2026-10-01'), 1, payCycle) // see septPreview above
 const septResolvedDate = unpausedPreviewsSept[0]?.date
 const pausedPreviewDates = templateOccurrencePreviews(templateWithPause, windowStart, 6, payCycle).map((p) => p.date)
 const unpausedPreviewDates = templateOccurrencePreviews(followsPaydayTemplate, windowStart, 6, payCycle).map((p) => p.date)
