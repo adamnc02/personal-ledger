@@ -1,9 +1,9 @@
 // Automatic clearing — there is NO tap-to-clear anywhere in the app.
 // The moment "today" reaches or passes a scheduled bill/loan/credit-
-// card-minimum/salary/savings-contribution/joint-share date, it settles
-// on its own: this function materializes it into a real, persisted,
-// cleared Transaction and applies whatever side effect its type carries
-// (credit card balance, before it became derived).
+// card-minimum/salary/joint-share date, it settles on its own: this
+// function materializes it into a real, persisted, cleared Transaction.
+// Clearing has no side effect of its own: balances are derived from the
+// transactions.
 //
 // Two separate things come due and need settling, and both are covered:
 //  1. Anything GENERATED (a scheduled bill/loan/salary/etc. occurrence
