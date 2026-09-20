@@ -1465,8 +1465,14 @@ blocked while anything still points at it.
 ## 34. Testing: the verify suite
 
 **The house testing idiom** is `scripts/verify-*.ts` — 134 plain `tsx` executables printing ✓/✗,
-each with a header explaining the real bug it prevents. Several read the real backup files in
+each with a header explaining the real bug it prevents. Several read the fixtures in
 `scripts/fixtures/`. **Write one alongside any change to `src/lib/`.**
+
+> 🚨 **Some verify scripts read real backups from OUTSIDE this repo, by absolute path** —
+> `~/Downloads/App Development & Bug Tracking/shared-finance-ledger/finance-ledger-backup-2026-09-15.json`,
+> `…-2026-09-15-mum.json` and `…-2026-09-17-mum.json`. Across the three ledger repos, 45 scripts
+> depend on them. They are not in git and there is no second copy. **Do not tidy that folder
+> without checking what still points at it.**
 
 ```bash
 npx tsc -b                 # must be clean
