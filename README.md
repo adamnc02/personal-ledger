@@ -333,7 +333,10 @@ remembering it came from £7.50. The 50p funds a pot called Coin Jar. Card expen
 not a bank transfer, not a bill or any card-related row, and nothing located in a pot or the joint
 account. 🚨 **There is no second transaction** — the jar's balance is derived from the difference
 on the rows that name it, so deleting the expense takes its 50p with it automatically. You can opt
-a single transaction out, and that opt-out is stored rather than inferred.
+a single transaction out, and that opt-out is stored rather than inferred. Switching round-ups on
+or off asks for a date it applies from — **a plain calendar date, not a payday** (2026-09-22): the
+switch re-dates nothing already logged, so it does not have to land on one, and a person with no
+salary configured can still use it.
 
 ---
 
