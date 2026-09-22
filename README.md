@@ -217,7 +217,9 @@ Five collapsible sections plus backup.
 - **Manage people** — add, rename, recolour, set the primary person ("this is your dashboard
   view"). Deleting a person is **blocked** while anything still references them; the delete sheet
   stages a Move or Delete decision per blocking item and applies them all at once, or none.
-- **Backup** — download the whole ledger as JSON, and restore from one. Restore is a full replace.
+- **Backup** — download the whole ledger as JSON, and restore from one. Restore is a full replace,
+  now behind the app's own confirmation rather than the browser's: it names the file, says what is
+  in the app now and what is in the file, and cannot be dismissed by accident.
 
 ### Borrowing — loans and credit cards
 

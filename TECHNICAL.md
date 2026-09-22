@@ -1225,8 +1225,13 @@ Key internals:
   for every ordinary pot, which is what keeps the toggle off every other pot's form; it reads the
   **jar owner's** pay cycle, not the primary person's — and the switch takes a plain date (§13),
   so a jar owner with no salary configured can still turn round-ups on.
-- **`BackupSection`** — `downloadLedgerBackup` / `parseLedgerBackupJson`, restored through
-  `setData` (so it is store-agnostic).
+- **`WalletBackupSlot`** (`src/components/BackupSection.tsx`, PROMPT-14 Part 1) — the Backup card
+  used to be declared inline here. It moved to a **shared** component behind a placement slot,
+  because `src/pages/**` may not diverge from `shared-finance-ledger` and that app shows Backup &
+  Restore in its Account modal instead. **Nothing changes in this app:** with no provider, the slot
+  renders the card exactly where it always was. It still restores through `setData`, so it stays
+  store-agnostic, and the restore confirm is now the app's own portalled `ConfirmModal` rather than
+  `window.confirm` — which has room to say what is being replaced.
 - Several rows use a **`SavedFlash`** pulse; a brand-new pension or pot flashes on *mount* rather
   than at save time, and the Joint Account card watches for the account appearing, because its
   first creation goes through `AppGuards`' modal and there is no click handler on this page to
