@@ -219,6 +219,13 @@ Five collapsible sections plus backup.
   stages a Move or Delete decision per blocking item and applies them all at once, or none.
 - **Backup** — download the whole ledger as JSON, and restore from one. See **What each button
   does** below.
+- **Overdraft** — on the pay-cycle cog, each pot, and the joint account: how far below zero that
+  account may go. Leave it at 0 if it cannot.
+
+  > 🚨 **It does nothing visible in THIS app.** No colour changes, no warnings — a balance inside
+  > your overdraft still shows red, because it is still a negative number. The field exists because
+  > `shared-finance-ledger` reads it to decide when to send a low-balance notification, and the two
+  > apps keep one set of types. Setting it here is harmless and changes nothing.
 
 ### Borrowing — loans and credit cards
 
