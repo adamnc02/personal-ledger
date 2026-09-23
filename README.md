@@ -217,7 +217,15 @@ Five collapsible sections plus backup.
 - **Manage people** — add, rename, recolour, set the primary person ("this is your dashboard
   view"). Deleting a person is **blocked** while anything still references them; the delete sheet
   stages a Move or Delete decision per blocking item and applies them all at once, or none.
-- **Backup** — download the whole ledger as JSON, and restore from one. Restore is a full replace.
+- **Backup** — download the whole ledger as JSON, and restore from one. See **What each button
+  does** below.
+- **Overdraft** — on the pay-cycle cog, each pot, and the joint account: how far below zero that
+  account may go. Leave it at 0 if it cannot.
+
+  > 🚨 **It does nothing visible in THIS app.** No colour changes, no warnings — a balance inside
+  > your overdraft still shows red, because it is still a negative number. The field exists because
+  > `shared-finance-ledger` reads it to decide when to send a low-balance notification, and the two
+  > apps keep one set of types. Setting it here is harmless and changes nothing.
 
 ### Borrowing — loans and credit cards
 
@@ -396,3 +404,35 @@ A non-zero exit, a `✗`, a line starting `FAIL`, or an `Error:` all count as a 
 | `src/types/ledger.ts` | **The comments are the spec.** Read them before changing what a field means |
 | `shared-finance-ledger/DIVERGENCE.md` | The enforced register of what may differ between the two live apps |
 | `Downloads/App Development & Bug Tracking/personal-ledger/` | Dated development notes, prompts and UAT scripts |
+
+
+## What each button does
+
+Plain English, for when you are looking at the app rather than the code. There are two, both on the
+Wallet page in the **Backup** card, and neither has an equivalent anywhere else in this app.
+
+### ↓ Download
+
+Writes your **whole ledger** to a `.json` file. On an iPhone that opens the Share Sheet; elsewhere
+it is an ordinary download.
+
+- Nothing leaves the device unless you then send the file somewhere yourself.
+- It changes no data. It is always safe.
+
+### ↑ Restore from a file
+
+You pick a `.json` file, and then **the app's own confirmation appears** — it names the file, says
+what is in the app right now, and says what is in the file. Confirm and **everything currently in
+the app is replaced by the file's contents**.
+
+> 🚨 **This is a full replace, not a merge, and it cannot be undone.** There is no cloud copy behind
+> it in this app — whatever you replace is gone, and the file you picked is the only version that
+> survives. That is why the confirmation spells out both sides before you commit to it.
+
+(Until PROMPT-14 this was the browser's own grey confirm box, which had no room to say any of that.)
+
+### There is no Force Sync here
+
+There is nothing to sync to. This app is localStorage-only, permanently — no account, no server, no
+cloud backup. `shared-finance-ledger` is the app that syncs, and it has a **Force Sync** button in
+its Account modal; this one deliberately does not.

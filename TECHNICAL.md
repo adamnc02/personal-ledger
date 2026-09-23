@@ -1225,8 +1225,13 @@ Key internals:
   for every ordinary pot, which is what keeps the toggle off every other pot's form; it reads the
   **jar owner's** pay cycle, not the primary person's — and the switch takes a plain date (§13),
   so a jar owner with no salary configured can still turn round-ups on.
-- **`BackupSection`** — `downloadLedgerBackup` / `parseLedgerBackupJson`, restored through
-  `setData` (so it is store-agnostic).
+- **`WalletBackupSlot`** (`src/components/BackupSection.tsx`, PROMPT-14 Part 1) — the Backup card
+  used to be declared inline here. It moved to a **shared** component behind a placement slot,
+  because `src/pages/**` may not diverge from `shared-finance-ledger` and that app shows Backup &
+  Restore in its Account modal instead. **Nothing changes in this app:** with no provider, the slot
+  renders the card exactly where it always was. It still restores through `setData`, so it stays
+  store-agnostic, and the restore confirm is now the app's own portalled `ConfirmModal` rather than
+  `window.confirm` — which has room to say what is being replaced.
 - Several rows use a **`SavedFlash`** pulse; a brand-new pension or pot flashes on *mount* rather
   than at save time, and the Joint Account card watches for the account appearing, because its
   first creation goes through `AppGuards`' modal and there is no click handler on this page to
@@ -1478,8 +1483,13 @@ blocked while anything still points at it.
 - **Moves from a delete rewrite PENDING rows only** (a row cleared today included). The
   Bills/Borrowing "move to a pot" flow keeps its own cleared-rows-too behaviour, because it is
   answering a different question (§13).
-- **Joint splits:** a deleted person's joint split items move at 100% and become Personal when one
-  person is left.
+- **Joint splits (PROMPT-16 D3, 2026-09-23):** a joint item blocks a person's delete **only when
+  they are its payee**. A non-payee's share simply falls to whoever remains (`costForPerson` splits
+  the remainder among every non-payee), so it is not listed and nothing is written; taking a payee's
+  item over **keeps its split**. 100% is right only when a single person is left, where the item
+  becomes Personal. 🚨 The old rule listed every joint item with a split when a temporary third
+  person was deleted, and each "move" set the share to 100 — nine real bills, doubled, in one
+  evening, with `owner_id` untouched.
 
 **Deliberately not restricted:**
 
