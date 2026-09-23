@@ -1483,8 +1483,13 @@ blocked while anything still points at it.
 - **Moves from a delete rewrite PENDING rows only** (a row cleared today included). The
   Bills/Borrowing "move to a pot" flow keeps its own cleared-rows-too behaviour, because it is
   answering a different question (§13).
-- **Joint splits:** a deleted person's joint split items move at 100% and become Personal when one
-  person is left.
+- **Joint splits (PROMPT-16 D3, 2026-09-23):** a joint item blocks a person's delete **only when
+  they are its payee**. A non-payee's share simply falls to whoever remains (`costForPerson` splits
+  the remainder among every non-payee), so it is not listed and nothing is written; taking a payee's
+  item over **keeps its split**. 100% is right only when a single person is left, where the item
+  becomes Personal. 🚨 The old rule listed every joint item with a split when a temporary third
+  person was deleted, and each "move" set the share to 100 — nine real bills, doubled, in one
+  evening, with `owner_id` untouched.
 
 **Deliberately not restricted:**
 
