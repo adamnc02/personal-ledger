@@ -1117,6 +1117,31 @@ excluding them would flatter it.
 > be verified on Home too, not only on the page that owns the feature.** A fix that looks right on
 > Borrowing and wrong on Home is not finished.
 
+### `lib/shortfall.ts` and the overdraft floor — carried here, never alerted (PROMPT-14/15)
+
+This repo **does** contain `lib/shortfall.ts`, and `overdraftAmount` **is** a field on
+`PayCycleConfig`, `JointAccountConfig` and `Pot`, editable in the same places as the opening
+balance. Neither is a mistake, and neither is dead code waiting to be tidied away.
+
+- **`shortfall.ts` is shared on purpose.** It is pure arithmetic over engines that already exist
+  here — `cycleBalanceSeries` walks every day of the cycle, `findShortfalls` reports the **first**
+  day the projected balance goes below the floor. It invents no maths of its own, so it belongs to
+  the shared engine, not to the sync layer, and `DIVERGENCE.md` lists it as **shared, not
+  divergent**.
+- **`overdraftAmount` is how far below zero an account may go** — positive, `0` meaning none, and
+  **not** effective-dated. `0` is a real value, not "unset": with `overdraftAmount: 0`, below zero
+  *is* running out of money.
+- **A Coin Jar never gets the field**, and a `SavingsPot` is not watched at all.
+
+🚨 **There are no alerts in this app, and there never will be** — a push notification needs a server
+to send it, and this app is deliberately, permanently offline (§1). That is a **permanent** row in
+`DIVERGENCE.md` ("Part 7 reaches TWO apps, not three"), not a gap someone should close. What the
+fields buy here is that the data model stays identical across the three ledger apps, so a backup
+round-trips between them and `check:divergence` keeps passing on `src/lib/**`.
+
+The alert rule itself — the two severities, the nightly-vs-Sundays cadence, the 20:00 gate — is
+documented in `shared-finance-ledger/TECHNICAL.md` §45, where it actually runs.
+
 ---
 
 ## 24. Module: Home
@@ -1276,6 +1301,35 @@ comes from `lib/pickerFirst.ts`.
 **Manage upcoming payments** for per-occurrence edits.
 
 "Just a single payment" is how a one-off is expressed — there is no separate entity for it.
+
+### The form's starting owner is derived, never `||`-defaulted (PROMPT-16 Part D1)
+
+`src/lib/formOwner.ts`. **On a joint item `ownerId` is `''`, and `''` is a MEANING** — "joint, owned
+by nobody" — not "unset". The form used to seed its state with `initial?.ownerId || defaultOwnerId`,
+and `||` cannot tell the two apart: it swallowed the `''` and substituted `data.primaryPersonId`.
+
+**That value was never displayed and never saved** — `LocationEditor` hides the Owner field for a
+joint item, and the save forces `''` back for `location === 'joint'` — so on its own it did no harm.
+It is written down anyway because two places disagreeing about what `''` means is how the
+2026-09-22 joint-bill damage started (§33), and the next reader of that `||` could not tell which of
+the two behaviours was the accident.
+
+`formOwnerId(initial, primaryPersonId)` states the rule once: **joint → the primary person as a
+STANDBY**, used only if the user switches the location to Personal or Pot, never written as the
+item's owner; **personal or pot → the item's own owner, or the primary person for a new one.**
+
+Two traps it closes, both of which leave a form that looks right:
+
+- Defaulting only when `initial` is absent still shows a person on a joint bill being **edited**.
+  The condition is about the **location**, not about whether there is an `initial`.
+- Making the form blank while leaving the save as it is puts the two out of step in the *other*
+  direction, and the save is then right by accident. `BillOwner.test.tsx` asserts the form **and**
+  the save together: no owner shown for a joint item, `''` saved with the share unchanged, and a new
+  personal bill still defaulting to the primary person.
+
+🚨 **Same class as the overdraft field found the same evening: a falsy-but-meaningful value (`''`,
+`0`) rendered as "unset".** `|| defaultOwnerId`, `|| primaryPersonId` and `ownerId ||` are worth
+grepping — this is unlikely to have been the only one.
 
 ---
 
@@ -1504,19 +1558,35 @@ blocked while anything still points at it.
 
 ## 34. Testing: the verify suite
 
-**The house testing idiom** is `scripts/verify-*.ts` — 134 plain `tsx` executables printing ✓/✗,
-each with a header explaining the real bug it prevents. Several read the fixtures in
-`scripts/fixtures/`. **Write one alongside any change to `src/lib/`.**
+**The house testing idiom** is `scripts/verify-*.ts` — **140** plain `tsx` executables printing ✓/✗
+(2026-09-23), each with a header explaining the real bug it prevents. Several read the fixtures in
+`scripts/fixtures/`. **Write one alongside any change to `src/lib/`.** The sync apps carry the same
+suite plus 14 sync-only checks, which is the whole of the 140 / 154 / 154 difference — not drift.
 
-> 🚨 **Some verify scripts read real backups from OUTSIDE this repo, by absolute path** —
-> `~/Downloads/App Development & Bug Tracking/shared-finance-ledger/finance-ledger-backup-2026-09-15.json`,
-> `…-2026-09-15-mum.json` and `…-2026-09-17-mum.json`. Across the three ledger repos, 45 scripts
-> depend on them. They are not in git and there is no second copy. **Do not tidy that folder
-> without checking what still points at it.**
+> 🚨 **Some verify scripts read real backups from OUTSIDE this repo, by absolute path**, out of
+> `~/Downloads/App Development & Bug Tracking/shared-finance-ledger/`. They are not in git and there
+> is no second copy. **This repo reads four of them:**
+>
+> | File | Scripts here |
+> |---|---|
+> | `finance-ledger-backup-2026-09-15.json` | 28 |
+> | `finance-ledger-backup-2026-09-15-mum.json` | 21 |
+> | `finance-ledger-backup-2026-09-17-mum.json` | 15 |
+> | **`finance-ledger-backup-2026-09-22-PROD.json`** | 1 — `verify-delete-reassign.ts`, the real pre-detour production export PROMPT-16 D3 is reproduced against |
+>
+> A fifth, `finance-ledger-backup-2026-09-20-mum.json`, is read by the two sync apps only.
+> **Do not tidy that folder without re-running the path sweep** — the last two of these became
+> load-bearing after the folder was last surveyed, which is exactly how one gets deleted:
+>
+> ```bash
+> cd ~/Documents/GitHub && grep -rhoE "App Development & Bug Tracking/[A-Za-z0-9 ._&'-]+(/[A-Za-z0-9 ._&'-]+)*" \
+>   personal-ledger/scripts shared-finance-ledger/scripts finance-ledger-test/scripts listly/scripts \
+>   | sort | uniq -c | sort -rn
+> ```
 
 ```bash
 npx tsc -b                 # must be clean
-npx vitest run             # SavingsPotForm + LedgerProvider suites
+npx vitest run             # 45 tests: SavingsPotForm, LedgerProvider, OverdraftField, BillOwner
 for f in scripts/verify-*.ts; do out=$(npx tsx "$f" 2>&1); rc=$?; \
   if [ $rc -ne 0 ] || echo "$out" | grep -qE "✗|^FAIL|Error:"; then \
   echo "FAIL: $f"; echo "$out" | grep -E "✗|^FAIL|Error:" | head -5; fi; done; echo DONE
