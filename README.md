@@ -319,6 +319,9 @@ Three things stay visible to both of you, on purpose:
 paid, still clears, and still counts in every balance, projection and statement. This changes which
 rows are listed, never what anything is worth.
 
+Because joint transfers stay visible, **Transactions → Transfers puts the other person's name on a
+transfer that is theirs** — one-off and recurring alike. No badge means it is yours.
+
 With one person in the app, nothing changes at all.
 
 ---
