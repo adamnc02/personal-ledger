@@ -299,6 +299,28 @@ be that day, and what am I left with by the end of that cycle?"
 Scenarios can be included in a combined view, and a scenario's loan overpayment can be **converted
 to a real recurring overpayment** in one tap.
 
+### With two people in the app, each of you sees only your own
+
+Add a second person and **Wallet, Bills, Transactions and Borrowing stop showing the other person's
+things**: their pots, savings pots, pensions, bills, loans, credit cards, transactions and
+transfers. The app shows what belongs to whoever this device is set to — Wallet → People → **Set as
+me**.
+
+Three things stay visible to both of you, on purpose:
+
+- **anything joint** — every joint bill, every joint transaction, and any transfer in or out of the
+  joint account, whoever set it up;
+- **anything that belongs to nobody in particular** — a bill with no owner is still everyone's to
+  pay;
+- **Wallet → Salary**, which lists the household's earners, and the **Home** page, whose Household
+  and Joint cards exist to show both of you side by side.
+
+**Nothing is hidden from the maths.** A bill of theirs you cannot see on the Bills page is still
+paid, still clears, and still counts in every balance, projection and statement. This changes which
+rows are listed, never what anything is worth.
+
+With one person in the app, nothing changes at all.
+
 ---
 
 ## How the money maths works
