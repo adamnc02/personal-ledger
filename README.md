@@ -126,7 +126,9 @@ The top half is a **stacked wallet of cards** you tap to bring to the front; the
 that card's own ledger. The deck order is fixed — Personal, Joint, Pots, Credit Cards, Loans,
 Savings Pots, Household — and each entry has its own visibility rule (Joint and Household need a
 second person; a loan card disappears once the loan is settled or fully repaid). Tapping a card
-promotes it; everything else keeps its relative order.
+promotes it; everything else keeps its relative order. While the stack is fanned out, each card
+behind the front one shows its current figure beside its type ("£1,000.00 Savings") — the balance,
+or what is owed today on a credit card or loan.
 
 **Every hero card reads the same three figures, and they reconcile by eye:** *Current balance*
 (everything cleared), *Pending* (the net of everything still to happen inside the horizon —
@@ -281,7 +283,11 @@ keyed data (overrides, pauses, amount boundaries) moves with them. Nothing befor
   category of the most recent past transaction with a similar name, so "tesco" finds your last
   Tesco shop. Cleared entries are grouped by month and collapsed.
 - **Recurring** — recurring expenses and income on the same schedule engine as Bills, personal
-  only, with the same per-occurrence edit/pause and effective-dated amount change.
+  only, with the same per-occurrence edit/pause and effective-dated amount change. A recurring card
+  expense rounds up like a one-off one, shown rounded ahead of each payment: the wizard ends on the
+  same round-up step, the expanded form has a round-up box (changed "just a single payment" or
+  "every payment from then on"), and each payment under *Manage upcoming payments* can opt out on
+  its own.
 - **Transfers** — one-off or recurring, between any two of: current account, a savings pot, the
   joint account, a pot. A recurring transfer can **follow payday** or **follow the cycle start**
   rather than a fixed calendar date.
@@ -366,7 +372,8 @@ remembering it came from £7.50. The 50p funds a pot called Coin Jar. Card expen
 not a bank transfer, not a bill or any card-related row, and nothing located in a pot or the joint
 account. 🚨 **There is no second transaction** — the jar's balance is derived from the difference
 on the rows that name it, so deleting the expense takes its 50p with it automatically. You can opt
-a single transaction out, and that opt-out is stored rather than inferred. Switching round-ups on
+a single transaction out, and that opt-out is stored rather than inferred. Recurring card expenses
+round too, payment by payment, by the switch on each payment's own date. Switching round-ups on
 or off asks for a date it applies from — **a plain calendar date, not a payday** (2026-09-22): the
 switch re-dates nothing already logged, so it does not have to land on one, and a person with no
 salary configured can still use it.
@@ -381,7 +388,8 @@ from a list, or exact dates.
 
 **Preview** opens it inside the app. **Save** gives you the file — a single self-contained HTML
 document that works with no network at all, regroups itself by day, category or as a full pivot
-table, and prints to A4, one account per page.
+table, and prints to A4, one account per page. **Reset to default** puts every view setting back as
+it opened, keeping the account you are on and the theme.
 
 ⚠️ **The saved file needs a computer.** An iPhone previews HTML without running it, so a statement
 saved to your phone shows the buttons and no table. Email or AirDrop it to a laptop — or just use
