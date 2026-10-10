@@ -156,7 +156,8 @@ Projected, for every horizon, by construction.
 **Filters** sheet holding: group by List / Category / Person, order by Date / Amount, *Show
 cleared*, *Cycle-end totals*, *Group by direction*, and *Average spend forecast*. Whatever is
 switched on is summarised as chips next to the button, and a **Reset to default** restores the
-lot. A control that does not apply to the current card says so rather than disappearing ("A loan
+lot. The view stays as you left it while the app is open — visiting another tab and coming back
+keeps it — and a freshly opened app starts from the default (*This cycle*, cleared hidden). A control that does not apply to the current card says so rather than disappearing ("A loan
 only has repayments going one way").
 
 - **Cycle-end totals** groups the window into pay-cycle sections, each with its own closing
@@ -182,7 +183,10 @@ balance reached anywhere in the view, and its tooltip shows the net change plus 
 
 ### Wallet — salary, pensions, savings, pots, the joint account
 
-Five collapsible sections plus backup.
+Five collapsible sections plus backup. Tapping a pay period, pension, savings pot, pot or the
+joint account opens it in a sheet from the bottom (the small panel icon on the card); the X or a
+tap outside closes it. The salary card itself opens in place, already open on you, so your pay
+periods are always in view.
 
 - **Salary.** One row per person. Set up gross annual salary, tax code, student loan plan,
   employer pension %, and any number of named deductions (fixed or percentage, pre- or post-tax).
@@ -266,9 +270,9 @@ monthly, quarterly, annual — or a single payment), first due date, and locatio
 Joint Account or a Pot), with a joint bill carrying a payee and a split percentage.
 
 Amounts are **effective-dated**: changing one asks which payment it starts from and leaves
-everything before it alone. **Manage upcoming payments** lists the last payment on or before today
-plus the next twelve, and lets you move a date, change an amount, or pause an occurrence
-individually — each of which is stored against that occurrence's *slot*, never its date. Anything
+everything before it alone. **Manage upcoming payments** lists every payment from the last five
+days (or, if there is none, the last one before that) plus the next twelve, and lets you move a
+date, change an amount, or pause an occurrence individually — each of which is stored against that occurrence's *slot*, never its date. Anything
 differing from what the schedule would naturally produce is badged "· Adjusted".
 
 🚨 **Changing when a schedule pays re-dates stored payments; it never re-creates them.** You pick
@@ -277,11 +281,17 @@ keyed data (overrides, pauses, amount boundaries) moves with them. Nothing befor
 
 ### Transactions — four tabs
 
+**A payment stays correctable for five days**, today included: a payment on 9 Oct can be changed
+until 13 Oct. In that time it stays in view rather than folding away, it is listed under *Manage
+upcoming payments*, and pausing it — or deleting the bill, recurring transaction, loan, card or
+pot behind it — takes it out of the ledger, round-up and all. After five days it is history and
+none of those touch it.
+
 - **Transactions** — ad-hoc expenses, income, bonuses and credit-card spend, logged through a
   short wizard (name → amount → date → category → payment method → location, with a card step when
   it is a card, and a round-up step when a Coin Jar exists). The category step starts on the
   category of the most recent past transaction with a similar name, so "tesco" finds your last
-  Tesco shop. Cleared entries are grouped by month and collapsed.
+  Tesco shop. Cleared entries older than five days are grouped by month and collapsed.
 - **Recurring** — recurring expenses and income on the same schedule engine as Bills, personal
   only, with the same per-occurrence edit/pause and effective-dated amount change. A recurring card
   expense rounds up like a one-off one, shown rounded ahead of each payment: the wizard ends on the
@@ -294,7 +304,7 @@ keyed data (overrides, pauses, amount boundaries) moves with them. Nothing befor
   tiles that scrolls sideways, one per location, each showing how many transfers leave it, what its
   recurring transfers move this pay cycle and a bar split by destination. Every tile starts closed;
   tap one and it slides into view with its transfers beneath — recurring first, then one-offs, with
-  cleared one-offs older than three days folded into one **Cleared** group.
+  cleared one-offs older than five days folded into one **Cleared** group.
 - **Overpayments** — create and manage one-off and recurring loan overpayments.
 
 On Transactions and on Bills, opening a row closes the one that was open, so only one is ever
