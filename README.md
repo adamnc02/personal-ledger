@@ -233,6 +233,8 @@ periods are always in view.
   > `shared-finance-ledger` reads it to decide when to send a low-balance notification, and the two
   > apps keep one set of types. Setting it here is harmless and changes nothing.
 
+At the very bottom of the page, **Build** shows which version of the app this device is running.
+
 ### Borrowing — loans and credit cards
 
 **Loans.** Name, monthly payment (with its own effective-dated history), term, first payment date,
