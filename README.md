@@ -98,6 +98,18 @@ never starts the parent row's swipe.
 
 ---
 
+### On a laptop
+
+At 1024px wide and up the app is laid out for a laptop; a phone, or a narrow window, keeps the phone
+layout. The tabs move to a **side rail** with the app's logo and the current pay cycle — the button at
+its foot collapses it to icons, and the device remembers. Lists become **tables** (Home's ledger with a
+Today line, Bills, every Transactions tab), and tapping a row opens it in a **panel on the right** while
+the page narrows beside it. Wallet shows your own salary as a row of pay-period tiles above cards for
+Savings, Pots, the Joint Account, Pensions and Backup; What-if shows the combined view across the top and
+the scenarios side by side with the one you pick. Every figure is the phone's own.
+
+---
+
 ## The idea underneath everything
 
 A **`Transaction`** is the only thing that carries money. Bills, loans, credit-card minimums,

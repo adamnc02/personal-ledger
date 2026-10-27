@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react'
 import { HashRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { LedgerProvider } from './context/LedgerContext'
 import { BottomNav } from './components/BottomNav'
+import { Rail } from './components/Rail'
+import { useWide } from './lib/useWide'
 import { AppGuards } from './components/AppGuards'
 import { Home } from './pages/Home'
 import { Salary } from './pages/Salary'
@@ -21,6 +23,8 @@ function ScrollToTop({ containerRef }: { containerRef: React.RefObject<HTMLDivEl
 
 function App() {
   const contentRef = useRef<HTMLDivElement>(null)
+  // Laptop-sized (lib/laptop.ts): the side rail replaces the bottom pill.
+  const wide = useWide()
 
   return (
     <LedgerProvider>
@@ -32,18 +36,19 @@ function App() {
               see BottomNav for why that matters on iOS standalone. */}
           <div
             id="app-shell"
-            className="relative flex flex-col overflow-hidden"
+            className={`relative flex overflow-hidden ${wide ? 'flex-row' : 'flex-col'}`}
             style={{ height: 'var(--app-height, 100dvh)', background: 'var(--color-bg)' }}
           >
             <div className="edge-fade edge-fade-top" />
             <div className="edge-fade edge-fade-bottom" />
+            {wide && <Rail />}
             <div
               id="app-content"
               ref={contentRef}
-              className="flex-1 overflow-y-auto overflow-x-hidden"
+              className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden"
               style={{
                 paddingTop: 'var(--safe-top)',
-                paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) - 6px + 20px)',
+                paddingBottom: wide ? 'calc(var(--safe-bottom) + 40px)' : 'calc(var(--nav-h) + var(--safe-bottom) - 6px + 20px)',
                 WebkitOverflowScrolling: 'touch',
               }}
             >
@@ -57,7 +62,7 @@ function App() {
                 <Route path="/scenarios" element={<Scenarios />} />
               </Routes>
             </div>
-            <BottomNav />
+            {!wide && <BottomNav />}
           </div>
         </HashRouter>
       </AppGuards>
