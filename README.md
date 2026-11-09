@@ -231,7 +231,14 @@ periods are always in view.
   bills and loans routed through it. A **Coin Jar** is a special pot created by the round-up
   switch rather than by a form, which is why it is the only pot whose opening balance stays
   editable, and the only one that offers no ring, target, recurring deposits or bill funding.
-- **Joint Account.** Its own reconciled opening balance and date, plus **Rebalance all accounts**.
+- **Joint Account.** Its own reconciled opening balance and date, plus **Rebalance all accounts**:
+  type each account's balance from the bank as at the **end** of a day, and nothing already logged
+  for that day counts against it (setting an account up, or editing its opening balance in
+  settings, counts from the start of the day instead).
+- **A balance below zero.** Every opening-balance field of an account that can be overdrawn — the
+  current account, the joint account, a pot, the Coin Jar, and Rebalance — has a **+ / −** toggle
+  beside it; the box keeps the number pad. A savings pot's opening balance and every overdraft
+  field have no toggle: a negative there is always a typo.
 - **Manage people** — add, rename, recolour, set the primary person ("this is your dashboard
   view"). Deleting a person is **blocked** while anything still references them; the delete sheet
   stages a Move or Delete decision per blocking item and applies them all at once, or none.
@@ -273,6 +280,12 @@ from. The balance is **derived, not stored**: `currentBalance` is an anchor as a
 interest. Log ad-hoc lump payments, set a one-off different minimum charge, or **Set to Clear** a
 statement.
 
+**Money paid onto a card from outside** — a refund, or someone else paying it off for you — is
+logged as **income** with the card as its location, one-off or recurring (Transactions → Income →
+Location → *Credit Card: name*). It works exactly like an overpayment: the balance falls from its
+date, through the card's own windows, so later minimums fall. It is never the minimum payment
+itself, and no account of yours is debited.
+
 A statement window changes which cycle spend belongs to: spend inside a window is due on the
 payment date *after* that window closes. Without a window, spend counts toward the very next
 payment date with no lag.
@@ -301,6 +314,9 @@ upcoming payments*, and pausing it — or deleting the bill, recurring transacti
 pot behind it — takes it out of the ledger, round-up and all. After five days it is history and
 none of those touch it.
 
+- **Income can land on a savings pot or a credit card**, one-off or recurring, for money that
+  arrives there straight from outside (a refund, someone else paying in). Pick it as the
+  location; there is no payment-method step, because nothing of yours paid it.
 - **Transactions** — ad-hoc expenses, income, bonuses and credit-card spend, logged through a
   short wizard (name → amount → date → category → payment method → location, with a card step when
   it is a card, and a round-up step when a Coin Jar exists). The category step starts on the
@@ -319,6 +335,11 @@ none of those touch it.
   recurring transfers move this pay cycle and a bar split by destination. Every tile starts closed;
   tap one and it slides into view with its transfers beneath — recurring first, then one-offs, with
   cleared one-offs older than five days folded into one **Cleared** group.
+- **To the other person** — with two people in the app, a transfer **from your Current Account**
+  can go **to theirs** ("<Name>'s Current Account"), one-off or recurring. It is one transfer: you
+  see it **Sent**, they see it **Received**, and either of you can change or delete it. Nobody can
+  record money out of the other person's account. Household is unchanged by it: the money only
+  moved between you.
 - **Overpayments** — create and manage one-off and recurring loan overpayments.
 
 On Transactions and on Bills, opening a row closes the one that was open, so only one is ever
