@@ -357,6 +357,13 @@ be that day, and what am I left with by the end of that cycle?"
 Scenarios can be included in a combined view, and a scenario's loan overpayment can be **converted
 to a real recurring overpayment** in one tap.
 
+Every loan and savings-pot card has a **Statement** button: the scenario date by date. For a loan,
+each payment day's interest, payment, any extra and the balance, with a lump sum paid on another day
+on a row of its own, and a header comparing the finish date, payments left and interest with and
+without the scenario. For a savings pot, every deposit, withdrawal and interest credit with the
+running balance, the scenario's own changes marked. A loan card's "Finishes" is the statement's last
+row. Credit cards have no statement: What-if works out a card's payoff in months, not dates.
+
 ### With two people in the app, each of you sees only your own
 
 Add a second person and **Wallet, Bills, Transactions and Borrowing stop showing the other person's
